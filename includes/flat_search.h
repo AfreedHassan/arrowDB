@@ -26,6 +26,16 @@ inline float dotProduct(
     return res;
 }
 
+/* Flat (brute-force) search implementation that returns top-k nearest neighbors based on dot product similarity
+ *
+ * Parameters:
+ * - store: VectorStore containing the vectors to search
+ * - query: query vector
+ * - k: number of nearest neighbors to return
+ *
+ *   Returns:
+ * - vector of SearchResult containing the top-k nearest neighbors
+ */
 inline std::vector<SearchResult> flatSearch(
     const VectorStore& store,
     const std::vector<float>& query,
@@ -36,7 +46,7 @@ inline std::vector<SearchResult> flatSearch(
 
     for (size_t i = 0; i < store.size(); ++i) {
         float score = dotProduct(
-            store.vectorAt(i),
+            store.vecAt(i),
             query.data(),
             store.dimension()
         );
@@ -53,7 +63,7 @@ inline std::vector<SearchResult> flatSearch(
     while (!minHeap.empty()) {
         auto [score, idx] = minHeap.top();
         minHeap.pop();
-        results.push_back({store.id_at(idx), score});
+        results.push_back({store.vecIdAt(idx), score});
     }
 
     std::reverse(results.begin(), results.end());

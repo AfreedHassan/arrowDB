@@ -1,5 +1,9 @@
 CompileFlags:
-  Add: [ --std=c++23 ]
+  Add: 
+    - --std=c++23
+    - -Ibuild/_deps/googletest-src/googletest/include
+    - -Ibuild/_deps/googletest-src/googlemock/include
+    - -Iincludes
 
 
 

@@ -44,11 +44,11 @@ public:
         return ids_.size();
     }
 
-    const float* vectorAt(size_t index) const {
+    const float* vecAt(size_t index) const {
         return &vectors_[index * dim_];
     }
 
-    uint64_t id_at(size_t index) const {
+    uint64_t vecIdAt(size_t index) const {
         return ids_[index];
     }
 
