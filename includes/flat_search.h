@@ -9,11 +9,21 @@
 
 namespace arrow {
 
+/**
+ * @brief Result of a vector search operation.
+ */
 struct SearchResult {
-    uint64_t id;
-    float score;
+    uint64_t id;    ///< The unique identifier of the matched vector.
+    float score;    ///< The similarity score (dot product) of the match.
 };
 
+/**
+ * @brief Computes the dot product of two vectors.
+ * @param a Pointer to the first vector.
+ * @param b Pointer to the second vector.
+ * @param dim The dimension of both vectors.
+ * @return The dot product (sum of element-wise products).
+ */
 inline float dotProduct(
     const float* a,
     const float* b,
@@ -26,15 +36,20 @@ inline float dotProduct(
     return res;
 }
 
-/* Flat (brute-force) search implementation that returns top-k nearest neighbors based on dot product similarity
- *
- * Parameters:
- * - store: VectorStore containing the vectors to search
- * - query: query vector
- * - k: number of nearest neighbors to return
- *
- *   Returns:
- * - vector of SearchResult containing the top-k nearest neighbors
+/**
+ * @brief Performs a flat (brute-force) search for top-k nearest neighbors.
+ * 
+ * This function searches through all vectors in the store using dot product
+ * similarity. For normalized vectors, dot product is equivalent to cosine similarity.
+ * Results are returned in descending order of similarity score.
+ * 
+ * @param store The VectorStore containing the vectors to search.
+ * @param query The query vector. Should be normalized for cosine similarity.
+ * @param k The number of nearest neighbors to return.
+ * @return A vector of SearchResult containing the top-k nearest neighbors,
+ *         sorted by score in descending order.
+ * @note Time complexity is O(n*d + k*log(k)) where n is the number of vectors
+ *       and d is the dimension.
  */
 inline std::vector<SearchResult> flatSearch(
     const VectorStore& store,
