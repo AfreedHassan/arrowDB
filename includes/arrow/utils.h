@@ -74,3 +74,4 @@ inline std::vector<float> validateAndNormalize(
 } // namespace arrow
 
 #endif // ARROW_UTILS_H	
+

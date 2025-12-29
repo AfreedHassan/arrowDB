@@ -1,7 +1,7 @@
 #include <iostream>
 #include <string>
-#include "../includes/arrowdb.h"
-#include "../includes/utils.h"
+#include "arrow/collection.h"
+#include "arrow/misc_utils.h"
 
 typedef enum {
   META_COMMAND_SUCCESS,
@@ -50,11 +50,15 @@ int repl() {
     }
 }
 
-
 using namespace arrow;
 
 int main() {
-	CollectionConfig cfg("my_collection", 768, DistanceMetric::Cosine, DataType::Float16);
+	CollectionConfig cfg(
+			"my_collection",
+			768, 
+			DistanceMetric::Cosine,
+			DataType::Float16
+	);
 
 	Collection collection(cfg);
 

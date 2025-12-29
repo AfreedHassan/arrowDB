@@ -14,6 +14,8 @@ target_sources(arrowDB
 	PRIVATE 
 		src/main.cpp
 )
+
+# Include directory: allows #include "arrow/..." to resolve to includes/arrow/...
 target_include_directories(arrowDB PRIVATE includes)
 
 # Google Test setup
@@ -35,6 +37,8 @@ file(GLOB TEST_SOURCES "tests/*.cpp")
 
 # Test executable (includes all test files)
 add_executable(tests ${TEST_SOURCES})
+
+# Include directory: allows #include "arrow/..." to resolve to includes/arrow/...
 target_include_directories(tests PRIVATE includes)
 target_link_libraries(tests PRIVATE 
     GTest::gtest 
@@ -42,4 +46,4 @@ target_link_libraries(tests PRIVATE
 )
 
 # Register tests - Google Test will automatically discover all TEST() macros
-add_test(NAME AllTests COMMAND tests)
+add_test(NAME UnitTests COMMAND tests)

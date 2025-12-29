@@ -7,6 +7,7 @@
 #include <stdexcept>
 
 namespace arrow {
+	using VectorID = uint64_t;  ///< Type alias for vector identifiers
 
 /**
  * @brief Storage for high-dimensional vectors with associated IDs.
@@ -19,7 +20,7 @@ class VectorStore {
 private:
     size_t dim_;
     std::vector<float> vectors_; 
-    std::vector<uint64_t> ids_;
+    std::vector<VectorID> ids_;
 
 public:
     /**
@@ -36,7 +37,7 @@ public:
      * @return The internal index at which the vector was inserted.
      * @throws std::invalid_argument if the dimension of vec does not match dim_.
      */
-    size_t insert(uint64_t id, const std::vector<float>& vec) {
+    size_t insert(VectorID id, const std::vector<float>& vec) {
 
         if (vec.size() != dim_) {
             throw std::invalid_argument("dimension mismatch");
@@ -80,7 +81,7 @@ public:
      * @param index The internal index of the vector.
      * @return The unique identifier of the vector at index.
      */
-    uint64_t vecIdAt(size_t index) const {
+    VectorID vecIdAt(size_t index) const {
         return ids_[index];
     }
 
@@ -96,3 +97,4 @@ public:
 } // namespace arrow
 	
 #endif // VECTOR_STORE_H
+
