@@ -4,46 +4,83 @@ project(arrowDB LANGUAGES CXX)
 # Set C++ standard
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON) # compile_commands.json for clangd
 
-# Generate compile_commands.json for clangd
-set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+# Default to Release build if not specified
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release)
+endif()
+message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 
-# Main executable
-add_executable(arrowDB src/main.cpp)
-target_sources(arrowDB
-	PRIVATE 
-		src/main.cpp
-)
-
-# Include directory: allows #include "arrow/..." to resolve to includes/arrow/...
-target_include_directories(arrowDB PRIVATE includes)
-
-# Google Test setup
+# ─────────────────────────────────────────────────────────────
+# Dependencies
+# ─────────────────────────────────────────────────────────────
 include(FetchContent)
+
+FetchContent_Declare(
+  hnswlib
+  GIT_REPOSITORY https://github.com/nmslib/hnswlib.git
+  GIT_TAG v0.8.0
+)
 FetchContent_Declare(
   googletest
   GIT_REPOSITORY https://github.com/google/googletest.git
   GIT_TAG v1.14.0
 )
-
+FetchContent_Declare(
+  benchmark
+  GIT_REPOSITORY https://github.com/google/benchmark.git
+  GIT_TAG v1.8.3
+)
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
-FetchContent_MakeAvailable(googletest)
+set(BENCHMARK_ENABLE_TESTING OFF CACHE BOOL "" FORCE)  # Don't build benchmark tests
+FetchContent_MakeAvailable(hnswlib googletest benchmark)
 
-# Enable testing
+# ─────────────────────────────────────────────────────────────
+# Main executable
+# ─────────────────────────────────────────────────────────────
+add_executable(arrowDB src/main.cpp)
+target_sources(arrowDB PRIVATE
+    src/main.cpp
+		src/index/hnsw_index.cpp
+)
+target_include_directories(arrowDB PRIVATE includes)
+target_link_libraries(arrowDB PRIVATE hnswlib)
+target_compile_options(arrowDB PRIVATE -O3 -march=native)  # Enable CPU-specific SIMD
+
+# ─────────────────────────────────────────────────────────────
+# Tests
+# ─────────────────────────────────────────────────────────────
 enable_testing()
-
-# Automatically discover all test files
 file(GLOB TEST_SOURCES "tests/*.cpp")
 
-# Test executable (includes all test files)
 add_executable(tests ${TEST_SOURCES})
-
-# Include directory: allows #include "arrow/..." to resolve to includes/arrow/...
+target_sources(tests PRIVATE
+		src/index/hnsw_index.cpp
+)
 target_include_directories(tests PRIVATE includes)
 target_link_libraries(tests PRIVATE 
+    hnswlib
     GTest::gtest 
     GTest::gtest_main
 )
+target_compile_options(tests PRIVATE -O3 -march=native)  # Enable CPU-specific SIMD
 
-# Register tests - Google Test will automatically discover all TEST() macros
 add_test(NAME UnitTests COMMAND tests)
+
+# ─────────────────────────────────────────────────────────────
+# Benchmarks
+# ─────────────────────────────────────────────────────────────
+file(GLOB BENCH_SOURCES "benchmarks/*.cpp")
+
+add_executable(benchmarks ${BENCH_SOURCES})
+target_sources(benchmarks PRIVATE
+    src/index/hnsw_index.cpp
+)
+target_include_directories(benchmarks PRIVATE includes)
+target_link_libraries(benchmarks PRIVATE 
+    hnswlib
+    benchmark::benchmark
+    benchmark::benchmark_main
+)
+target_compile_options(benchmarks PRIVATE -O3 -march=native)
