@@ -51,7 +51,7 @@ inline float dotProduct(
  * @note Time complexity is O(n*d + k*log(k)) where n is the number of vectors
  *       and d is the dimension.
  */
-inline std::vector<SearchResult> flatSearch(
+inline std::vector<SearchResult> knnSearch(
     const VectorStore& store,
     const std::vector<float>& query,
     size_t k
