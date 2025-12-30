@@ -3,6 +3,8 @@
 #include <variant>
 #include <vector>
 #include <string>
+#include <memory>
+#include "hnsw_index.h"
 
 namespace arrow {
 	
@@ -119,8 +121,12 @@ namespace arrow {
 			DataType dtype() const {
 				return config_.dtype;
 			}
+
+			/// Insert a vector into the collection.
+			void insert(VectorID id, const std::vector<float>& vec) { index_->insert(id, vec); }
 		private:
 			const CollectionConfig config_;
+    	std::unique_ptr<HNSWIndex> index_;
 
 			// ----- Internal state (added later) -----
 			// VectorStore vector_store_;

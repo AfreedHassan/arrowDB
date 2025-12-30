@@ -21,6 +21,7 @@ namespace arrow {
 
 	template<typename T>
 	using Result = std::expected<T, ErrorCode>;
+
 }
 
 #endif // TYPES_H
