@@ -47,6 +47,7 @@ FetchContent_MakeAvailable(hnswlib googletest benchmark json)
 add_executable(arrowDB src/main.cpp)
 target_sources(arrowDB PRIVATE
     src/main.cpp
+		src/core/wal.cpp
 		src/index/hnsw_index.cpp
 )
 target_include_directories(arrowDB PRIVATE includes)
@@ -62,6 +63,7 @@ file(GLOB TEST_SOURCES "tests/*.cpp")
 add_executable(tests ${TEST_SOURCES})
 target_sources(tests PRIVATE
 		src/index/hnsw_index.cpp
+		src/core/wal.cpp
 )
 target_include_directories(tests PRIVATE includes tests)
 target_link_libraries(tests PRIVATE 
@@ -77,6 +79,7 @@ add_test(NAME HNSWIndexTests COMMAND tests --gtest_filter=HNSWIndexTest.*)
 add_test(NAME CollectionTests COMMAND tests --gtest_filter=CollectionTest.*)
 add_test(NAME MetadataTests COMMAND tests --gtest_filter=MetadataTest.*)
 add_test(NAME MetadataIntegrationTests COMMAND tests --gtest_filter=MetadataIntegrationTest.*)
+add_test(NAME WALUnitTests COMMAND tests --gtest_filter=WALTest.*)
 #add_test(NAME SIFTTests COMMAND tests --gtest_filter=SIFTTest.*)
 
 # Grouped test entries for convenience
