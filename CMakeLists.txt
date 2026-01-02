@@ -32,9 +32,14 @@ FetchContent_Declare(
   GIT_REPOSITORY https://github.com/google/benchmark.git
   GIT_TAG v1.8.3
 )
+FetchContent_Declare(
+  json
+  GIT_REPOSITORY https://github.com/nlohmann/json.git
+  GIT_TAG v3.11.3
+)
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 set(BENCHMARK_ENABLE_TESTING OFF CACHE BOOL "" FORCE)  # Don't build benchmark tests
-FetchContent_MakeAvailable(hnswlib googletest benchmark)
+FetchContent_MakeAvailable(hnswlib googletest benchmark json)
 
 # ─────────────────────────────────────────────────────────────
 # Main executable
@@ -45,7 +50,7 @@ target_sources(arrowDB PRIVATE
 		src/index/hnsw_index.cpp
 )
 target_include_directories(arrowDB PRIVATE includes)
-target_link_libraries(arrowDB PRIVATE hnswlib)
+target_link_libraries(arrowDB PRIVATE hnswlib nlohmann_json::nlohmann_json)
 target_compile_options(arrowDB PRIVATE -O3 -march=native)  # Enable CPU-specific SIMD
 
 # ─────────────────────────────────────────────────────────────
@@ -58,15 +63,29 @@ add_executable(tests ${TEST_SOURCES})
 target_sources(tests PRIVATE
 		src/index/hnsw_index.cpp
 )
-target_include_directories(tests PRIVATE includes)
+target_include_directories(tests PRIVATE includes tests)
 target_link_libraries(tests PRIVATE 
     hnswlib
     GTest::gtest 
     GTest::gtest_main
+    nlohmann_json::nlohmann_json
 )
 target_compile_options(tests PRIVATE -O3 -march=native)  # Enable CPU-specific SIMD
 
-add_test(NAME UnitTests COMMAND tests)
+# Add separate test entries for unit and integration tests using GoogleTest filters
+add_test(NAME HNSWIndexTests COMMAND tests --gtest_filter=HNSWIndexTest.*)
+add_test(NAME CollectionTests COMMAND tests --gtest_filter=CollectionTest.*)
+add_test(NAME MetadataTests COMMAND tests --gtest_filter=MetadataTest.*)
+add_test(NAME MetadataIntegrationTests COMMAND tests --gtest_filter=MetadataIntegrationTest.*)
+#add_test(NAME SIFTTests COMMAND tests --gtest_filter=SIFTTest.*)
+
+# Grouped test entries for convenience
+add_test(NAME UnitTests COMMAND tests --gtest_filter="HNSWIndexTest.*:MetadataUnitTest.*")
+add_test(NAME IntegrationTests COMMAND tests --gtest_filter="CollectionTest.*:MetadataIntegrationTest.*")
+
+# Also add a combined test that runs everything
+#add_test(NAME AllTests COMMAND tests)
+
 
 # ─────────────────────────────────────────────────────────────
 # Benchmarks
@@ -82,5 +101,6 @@ target_link_libraries(benchmarks PRIVATE
     hnswlib
     benchmark::benchmark
     benchmark::benchmark_main
+    nlohmann_json::nlohmann_json
 )
 target_compile_options(benchmarks PRIVATE -O3 -march=native)
