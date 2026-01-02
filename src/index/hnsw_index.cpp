@@ -8,7 +8,7 @@
 namespace arrow {
 
 HNSWIndex::HNSWIndex(size_t dim, DistanceMetric metric, const HNSWConfig& config)
-    : dim_(dim) {
+    : dim_(dim), metric_(metric) {
     
     // Create space based on metric
     switch (metric) {
@@ -59,19 +59,32 @@ std::vector<SearchResult> HNSWIndex::search(
     
     std::vector<SearchResult> results;
     results.reserve(resultsQueue.size());
+
+		int8_t distToScoreConverter = (metric_ == DistanceMetric::L2) ? 1 : -1;
     
     // Results come out in worst-to-best order, reverse them
     while (!resultsQueue.empty()) {
 				// dist -> float, label -> hnswlib::labeltype
         auto [dist, label] = resultsQueue.top();
         resultsQueue.pop();
-        // For inner product, hnswlib returns negative distance
-        // Convert back to similarity score
-        float score = -dist;
+        // For InnerProduct/Cosine, hnswlib returns negative distance (smaller = better)
+        // For L2, hnswlib returns positive distance (smaller = better)
+        float score = distToScoreConverter * dist;
         results.push_back({static_cast<VectorID>(label), score});
     }
     std::reverse(results.begin(), results.end());
     return results;
+}
+
+void HNSWIndex::saveIndex(const std::string& path) const {
+		hnsw_->saveIndex(path);
+}
+
+void HNSWIndex::loadIndex(const std::string& path) {
+	hnsw_ = std::make_unique<hnswlib::HierarchicalNSW<float>>(
+		space_.get(),
+		path
+	);
 }
 
 size_t HNSWIndex::size() const {
