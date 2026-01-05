@@ -53,7 +53,7 @@ public:
     HNSWIndex& operator=(HNSWIndex&&) noexcept;
     
     /// Insert a vector with the given ID.
-    void insert(VectorID id, const std::vector<float>& vec);
+    bool insert(VectorID id, const std::vector<float>& vec);
     
     /// Search for k nearest neighbors.
     /// @param ef Search beam width (higher = better recall, slower)

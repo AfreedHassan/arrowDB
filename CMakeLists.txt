@@ -1,10 +1,11 @@
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.16...3.29)
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 project(arrowDB LANGUAGES CXX)
 
-# Set C++ standard
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON) # compile_commands.json for clangd
+set(CMAKE_CXX_CLANG_TIDY "clang-tidy;-checks=*")
 
 # Default to Release build if not specified
 if(NOT CMAKE_BUILD_TYPE)
@@ -32,14 +33,19 @@ FetchContent_Declare(
   GIT_REPOSITORY https://github.com/google/benchmark.git
   GIT_TAG v1.8.3
 )
+
+set(FETCHCONTENT_QUIET OFF)
 FetchContent_Declare(
   json
   GIT_REPOSITORY https://github.com/nlohmann/json.git
   GIT_TAG v3.11.3
 )
+
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 set(BENCHMARK_ENABLE_TESTING OFF CACHE BOOL "" FORCE)  # Don't build benchmark tests
 FetchContent_MakeAvailable(hnswlib googletest benchmark json)
+
+
 
 # ─────────────────────────────────────────────────────────────
 # Main executable
@@ -50,9 +56,14 @@ target_sources(arrowDB PRIVATE
 		src/core/wal.cpp
 		src/index/hnsw_index.cpp
 )
-target_include_directories(arrowDB PRIVATE includes)
-target_link_libraries(arrowDB PRIVATE hnswlib nlohmann_json::nlohmann_json)
+target_include_directories(arrowDB PRIVATE include)
+target_link_libraries(arrowDB 
+	PRIVATE 
+		hnswlib 
+		nlohmann_json::nlohmann_json 
+)
 target_compile_options(arrowDB PRIVATE -O3 -march=native)  # Enable CPU-specific SIMD
+
 
 # ─────────────────────────────────────────────────────────────
 # Tests
@@ -65,7 +76,7 @@ target_sources(tests PRIVATE
 		src/index/hnsw_index.cpp
 		src/core/wal.cpp
 )
-target_include_directories(tests PRIVATE includes tests)
+target_include_directories(tests PRIVATE include tests)
 target_link_libraries(tests PRIVATE 
     hnswlib
     GTest::gtest 
@@ -99,7 +110,7 @@ add_executable(benchmarks ${BENCH_SOURCES})
 target_sources(benchmarks PRIVATE
     src/index/hnsw_index.cpp
 )
-target_include_directories(benchmarks PRIVATE includes)
+target_include_directories(benchmarks PRIVATE include)
 target_link_libraries(benchmarks PRIVATE 
     hnswlib
     benchmark::benchmark

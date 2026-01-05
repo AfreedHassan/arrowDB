@@ -5,3 +5,4 @@ benchmarks/
 notes/
 *.md
 data/
+Makefile

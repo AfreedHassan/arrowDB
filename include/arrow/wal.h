@@ -37,6 +37,24 @@ struct Header {
     DELETE = 1 << 1,
     UPDATE = 1 << 2,
   };
+/*
+ *
+ * struct Operation { 
+    OperationType type;
+    VectorID id;
+		uint32_t dimension;
+		std::vector<float> embedding;
+  };
+ * struct Entry {
+       uint64_t offset;        // Offset in WAL file
+       Operation operation;    // The operation (insert, delete, update)
+       uint32_t crc32;        // CRC32 checksum of the entry data
+ * }
+ *
+ *
+ * 
+ */
+ 
 
 struct Entry {
     EntryType type;
@@ -78,7 +96,7 @@ struct Entry {
 
 private:
   std::filesystem::path walPath_;
-  
+	uint64_t offset=1;
 };
 
 } // namespace arrow
