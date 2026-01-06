@@ -8,97 +8,99 @@
 
 namespace arrow {
 class WAL {
-	using json = arrow::utils::json;
+  using json = arrow::utils::json;
+
 public:
-struct Header {
-  uint32_t magic = 0x01; 
-  uint16_t version = 1;
-  uint8_t endianness = 0;  // 0 = little-endian, 1 = big-endian (default to little-endian)
-  uint32_t crc32 = 0;
+  struct Header {
+    uint32_t magic = 0x41574C01;
+    uint16_t version = 1;
+    uint16_t flags = 0;
+    uint64_t creationTime = 0;
+    uint32_t headerCrc32 = 0;
+    uint32_t _padding = 0;
 
-	void write(BinaryWriter& w) const;
-	void read(BinaryReader& r);
-	void print() const;
-	
-	// Detect host endianness
-	static uint8_t detectEndianness();
-	// Check if file endianness matches host endianness
-	bool isEndiannessCompatible() const;
-};
+    Header();
+    void write(BinaryWriter &w) const;
+    void read(BinaryReader &r);
+    void print() const;
 
-  static constexpr size_t HEADERSIZE = sizeof(uint32_t) + sizeof(uint16_t) + sizeof(uint8_t) + sizeof(uint32_t);
-  static constexpr size_t FILECRC32SIZE = sizeof(uint32_t);  // CRC32 at end of file
+    void computeHeaderCrc32();
+    json toJson() const;
+  };
+
+  static constexpr size_t HEADERSIZE = 24;
   enum class Status {
     SUCCESS,
     FAILURE,
   };
-  enum class EntryType {
-    INSERT = 1 << 0,
-    DELETE = 1 << 1,
-    UPDATE = 1 << 2,
-  };
-/*
- *
- * struct Operation { 
-    OperationType type;
-    VectorID id;
-		uint32_t dimension;
-		std::vector<float> embedding;
-  };
- * struct Entry {
-       uint64_t offset;        // Offset in WAL file
-       Operation operation;    // The operation (insert, delete, update)
-       uint32_t crc32;        // CRC32 checksum of the entry data
- * }
- *
- *
- * 
- */
- 
 
-struct Entry {
-    EntryType type;
-    VectorID id;
-		uint32_t dimension;
-		std::vector<float> embedding;
+  enum class OperationType : uint16_t {
+    COMMIT_TXN = 1,
+    ABORT_TXN = 2,
+    INSERT = 3,
+    DELETE = 4,
+    UPDATE = 5,
+    BATCH_INSERT = 6
+  };
+
+  struct Entry {
+    OperationType type; // uint16_t
+    uint16_t version;
+    uint64_t lsn;
+    uint64_t txid;
+    uint32_t headerCrc;
+
+    uint32_t payloadLength;
+    VectorID vectorId;
+    uint32_t dimension;
+    uint8_t padding;
+    std::vector<float> embedding;
+    uint32_t payloadCrc;
 
     // Constructors
-    Entry(EntryType t, VectorID vid, uint32_t dims, const std::vector<float>& v)
-        : type(t), id(vid), dimension(dims), embedding(v) {
-					assert(dims == v.size());
-				}
-    
-    Entry(BinaryReader& r);
-    Entry(std::ifstream& inFile);
+    Entry(OperationType t, uint64_t seq, uint64_t tid, VectorID vid, uint32_t dims, const std::vector<float> &v)
+        : payloadLength(0), type(t), version(1), lsn(seq), txid(tid), headerCrc(0), vectorId(vid), dimension(dims), padding(0), embedding(v), payloadCrc(0) {
+      assert(dims == v.size());
+    }
 
-    // Methods (declarations only, implementations in .cpp)
-    Status write(BinaryWriter& w) const;
-    Status read(BinaryReader& r);
+    Entry(BinaryReader &r);
+    Entry(std::ifstream &inFile);
+
+    Status write(BinaryWriter &w);
+    Status read(BinaryReader &r);
     std::string typeToString() const;
     json toJson() const;
     void print() const;
-    
-    // Compute CRC32 over all entry data in a single pass
-    uint32_t computeCrc32() const;
+
+    inline uint32_t computePayloadLength() const {
+      return (embedding.size() * sizeof(float)); 
+    }
+
+    uint32_t computeHeaderCrc() const;
+    uint32_t computePayloadCrc() const;
+
   };
-  // Helper to load header from file
-	std::variant<Header, Status> readHeader(std::string pathParam = "") const;
-  std::variant<Header, Status> readHeader(std::ifstream& is) const;
 
-  Status log(const Entry &entry, std::string pathParam = "", bool reset = false); 
-	using EntryPtr = std::unique_ptr<Entry>;
-  std::variant<EntryPtr, Status> read(std::string pathParam = ""); 
-  std::variant<std::vector<EntryPtr>, Status> readAll(std::string pathParam = "") const;
-	void print() const;
+  std::variant<Header, Status> readHeader(std::string pathParam = "") const;
+  std::variant<Header, Status> readHeader(std::ifstream &is) const;
 
-  WAL(); 
+  Status log(const Entry &entry, std::string pathParam = "",
+             bool reset = false);
+  using EntryPtr = std::unique_ptr<Entry>;
+  std::variant<EntryPtr, Status> read(std::string pathParam = "");
+  std::variant<std::vector<EntryPtr>, Status>
+  readAll(std::string pathParam = "") const;
+  void print() const;
+
+  WAL();
   ~WAL() = default;
 
 private:
   std::filesystem::path walPath_;
-	uint64_t offset=1;
+  uint64_t offset = 1;
 };
 
 } // namespace arrow
 
 #endif // WAL_H
+
