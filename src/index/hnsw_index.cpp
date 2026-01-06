@@ -36,11 +36,14 @@ HNSWIndex::~HNSWIndex() = default;
 HNSWIndex::HNSWIndex(HNSWIndex&&) noexcept = default;
 HNSWIndex& HNSWIndex::operator=(HNSWIndex&&) noexcept = default;
 
-void HNSWIndex::insert(VectorID id, const std::vector<float>& vec) {
+bool HNSWIndex::insert(VectorID id, const std::vector<float>& vec) {
     if (vec.size() != dim_) {
-        throw std::invalid_argument("Dimension mismatch");
+				std::cerr << "Vector dimension mismatch: expected " << dim_ 
+				          << ", got " << vec.size() << "\n";
+        return false;
     }
     hnsw_->addPoint(vec.data(), static_cast<hnswlib::labeltype>(id));
+		return true;
 }
 
 std::vector<SearchResult> HNSWIndex::search(

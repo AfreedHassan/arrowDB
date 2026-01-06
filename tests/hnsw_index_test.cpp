@@ -106,7 +106,7 @@ TEST_F(HNSWIndexTest, RecallAt10) {
 TEST_F(HNSWIndexTest, DimensionMismatch) {
     HNSWIndex index(3, DistanceMetric::Cosine);
     
-    EXPECT_THROW(index.insert(1, {1.0f, 0.0f}), std::invalid_argument);
+    EXPECT_EQ(index.insert(1, {1.0f, 0.0f}), false);
     EXPECT_THROW(index.search({1.0f, 0.0f}, 1), std::invalid_argument);
 }
 
