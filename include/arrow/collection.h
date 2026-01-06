@@ -210,7 +210,7 @@ public:
   /// @note Insert throughput: ~3-14k vectors/second depending on dataset size.
   ///       For large batch inserts, consider future batch API.
   void insert(VectorID id, const std::vector<float> &vec) {
-    wal_->log(WAL::Entry(WAL::EntryType::INSERT, id, config_.dimensions, vec));
+    //wal_->log(WAL::Entry(WAL::OperationType::INSERT, id, vec));
     if (index_->insert(id, vec)) {
 			return;
 		} else {
