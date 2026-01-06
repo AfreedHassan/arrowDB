@@ -5,7 +5,7 @@ project(arrowDB LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON) # compile_commands.json for clangd
-set(CMAKE_CXX_CLANG_TIDY "clang-tidy;-checks=*")
+#set(CMAKE_CXX_CLANG_TIDY "clang-tidy;-checks=*")
 
 # Default to Release build if not specified
 if(NOT CMAKE_BUILD_TYPE)

@@ -6,3 +6,14 @@ notes/
 *.md
 data/
 Makefile
+protos/
+services/
+scripts/
+examples/
+genproto/
+notes/
+.DS_Store
+.clangd
+.crsr
+.gitignore
+AGENTS.md
