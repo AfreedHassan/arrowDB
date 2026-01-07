@@ -1,3 +1,4 @@
+// Copyright 2025 ArrowDB
 #include "arrow/wal.h"
 #include "arrow/utils/crc32.h"
 #include "arrow/utils/filesync.h"
@@ -5,59 +6,50 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <sstream>
+#include <string>
 #include <unistd.h>
-#include <variant>
+#include <utility>
 #include <vector>
 
-namespace arrow {
+namespace arrow::wal {
+using namespace utils;
 
 static constexpr size_t FILECRC32SIZE = sizeof(uint32_t);
 
-void WAL::Header::computeHeaderCrc32() {
-  this->headerCrc32 =
-      utils::crc32(reinterpret_cast<const void *>(this), 16);
+// Header helpers
+uint32_t Header::computeCrc32() const noexcept {
+  return utils::crc32((const void *)this, 16);
 }
 
-WAL::Header::Header()
-    : magic(0x41574C01), version(1), flags(0), creationTime(0), headerCrc32(0),
-      _padding(0) {
-  computeHeaderCrc32();
-}
-
-void WAL::Header::write(BinaryWriter &w) const {
-  w.write(magic);
-  w.write(version);
-  w.write(flags);
-  w.write(creationTime);
-  w.write(headerCrc32);
-  w.write(_padding);
-}
-
-void WAL::Header::read(BinaryReader &r) {
-  if (!r.read(magic) || !r.read(version) || !r.read(flags) ||
-      !r.read(creationTime) || !r.read(headerCrc32) || !r.read(_padding)) {
-    magic = 0;
-  }
-}
-
-utils::json WAL::Header::toJson() const {
+utils::json Header::toJson() const {
   json j = json::object();
   j["magic"] = magic;
   j["version"] = version;
   j["flags"] = flags;
   j["creationTime"] = creationTime;
   j["headerCrc32"] = headerCrc32;
+  j["padding"] = padding;
   return j;
 }
 
-void WAL::Header::print() const { std::cout << this->toJson().dump(2) << "\n"; }
-WAL::Entry::Entry(BinaryReader &r) { read(r); }
-WAL::Entry::Entry(std::ifstream &inFile) {
-  BinaryReader r(inFile);
-  read(r);
+void Header::print() const noexcept {
+  std::cout << this->toJson().dump(2) << "\n";
 }
 
-uint32_t WAL::Entry::computeHeaderCrc() const {
+//////////////////////////////////////////////////////////////////////////
+// Entry helpers
+//////////////////////////////////////////////////////////////////////////
+
+uint32_t Entry::computePayloadCrc() const noexcept {
+  uint32_t crc = 0;
+  if (!embedding.empty()) {
+    crc = utils::crc32(embedding.data(), embedding.size() * sizeof(float), crc);
+  }
+  return crc;
+}
+
+uint32_t Entry::computeHeaderCrc() const noexcept {
   uint32_t crc = 0;
   crc = utils::crc32(&type, sizeof(type), crc);
   crc = utils::crc32(&version, sizeof(version), crc);
@@ -66,113 +58,317 @@ uint32_t WAL::Entry::computeHeaderCrc() const {
   return crc;
 }
 
-uint32_t WAL::Entry::computePayloadCrc() const {
-  uint32_t crc = 0;
-  if (!embedding.empty()) {
-    crc = utils::crc32(embedding.data(), embedding.size() * sizeof(float),
-                            crc);
-  }
-  return crc;
-}
-
-WAL::Status WAL::Entry::write(BinaryWriter &w) {
-  assert(dimension == embedding.size());
-  w.write(type);
-  w.write(version);
-  w.write(lsn);
-  w.write(txid);
-  headerCrc = computeHeaderCrc();
-  w.write(headerCrc);
-  payloadLength = computePayloadLength();
-  w.write(payloadLength);
-  w.write(vectorId);
-  w.write(dimension);
-  w.write(padding);
-  w.write(embedding);
-  payloadCrc = computePayloadCrc();
-  w.write(payloadCrc);
-  return Status::SUCCESS;
-}
-
-WAL::Status WAL::Entry::read(BinaryReader &r) {
-  if (!r.read(payloadLength) || !r.read(type) || !r.read(version) ||
-      !r.read(lsn) || !r.read(txid)) {
-    std::cerr << "Failed to read entry header fields\n";
-    return Status::FAILURE;
-  }
-
-  if (!r.read(headerCrc) || !r.read(vectorId) || !r.read(dimension) ||
-      !r.read(padding)) {
-    std::cerr << "Failed to read entry metadata fields\n";
-    return Status::FAILURE;
-  }
-
-  embedding.resize(dimension);
-  if (!r.read(embedding)) {
-    std::cerr << "Failed to read entry embedding data\n";
-    return Status::FAILURE;
-  }
-
-  if (!r.read(payloadCrc)) {
-    std::cerr << "Failed to read entry payload CRC\n";
-    return Status::FAILURE;
-  }
-
-  uint32_t computedHeaderCrc = computeHeaderCrc();
-  if (headerCrc != computedHeaderCrc) {
-    std::cerr << "Header CRC mismatch: stored=" << headerCrc
-              << ", computed=" << computedHeaderCrc << "\n";
-    return Status::FAILURE;
-  }
-
-  uint32_t computedPayloadCrc = computePayloadCrc();
-  if (payloadCrc != computedPayloadCrc) {
-    std::cerr << "Payload CRC mismatch: stored=" << payloadCrc
-              << ", computed=" << computedPayloadCrc << "\n";
-    return Status::FAILURE;
-  }
-
-  return Status::SUCCESS;
-}
-
-std::string WAL::Entry::typeToString() const {
+utils::json Entry::toJson() const {
+  json j = json::object();
+  std::string typeStr;
   switch (type) {
   case OperationType::COMMIT_TXN:
-    return "COMMIT_TXN";
+    typeStr = "COMMIT_TXN";
+    break;
   case OperationType::ABORT_TXN:
-    return "ABORT_TXN";
+    typeStr = "ABORT_TXN";
+    break;
   case OperationType::INSERT:
-    return "INSERT";
+    typeStr = "INSERT";
+    break;
   case OperationType::DELETE:
-    return "DELETE";
+    typeStr = "DELETE";
+    break;
   case OperationType::UPDATE:
-    return "UPDATE";
+    typeStr = "UPDATE";
+    break;
   case OperationType::BATCH_INSERT:
-    return "BATCH_INSERT";
+    typeStr = "BATCH_INSERT";
+    break;
   default:
-    return "INVALID OPERATION";
+    typeStr = "INVALID";
+    break;
   }
-}
-
-utils::json WAL::Entry::toJson() const {
-  json j = json::object();
-  j["type"] = typeToString();
+  j["type"] = typeStr;
   j["lsn"] = lsn;
   j["txid"] = txid;
-  j["vectorId"] = vectorId;
+  j["vectorId"] = vectorID;
   j["dimension"] = dimension;
   j["embedding"] = embedding;
   return j;
 }
 
-void WAL::Entry::print() const { 
-  std::cout << toJson().dump(2) << "\n"; 
+void Entry::print() const noexcept { std::cout << toJson().dump(2) << "\n"; }
+
+//////////////////////////////////////////////////////////////////////////
+// Protocol: Header
+//////////////////////////////////////////////////////////////////////////
+
+Result<Header> ParseHeader(BinaryReader &r) {
+  Header h;
+  if (!r.read(h.magic))
+    return Status(StatusCode::kBadHeader, "Failed to read WAL header magic");
+
+  if (h.magic != 0x41574C01)
+    return Status(StatusCode::kBadHeader, "Invalid WAL magic number");
+  
+  if (!r.read(h.version))
+    return Status(StatusCode::kBadHeader, "Failed to read WAL header version");
+
+  if (!r.read(h.flags))
+    return Status(StatusCode::kBadHeader, "Failed to read WAL header flags");
+
+  if (!r.read(h.creationTime))
+    return Status(StatusCode::kBadHeader, "Failed to read WAL header creationTime"); 
+
+  if (!r.read(h.headerCrc32))
+    return Status(StatusCode::kBadHeader, "Failed to read WAL header headerCrc32");
+
+  if (!r.read(h.padding))
+    return Status(StatusCode::kBadHeader, "Failed to read WAL header padding");
+  
+  return std::move(h);
 }
 
-WAL::Status WAL::log(const WAL::Entry &entry, std::string pathParam,
-                     bool reset) {
+Status WriteHeader(const Header &h, BinaryWriter &w) {
+  w.write(h.magic);
+  w.write(h.version);
+  w.write(h.flags);
+  w.write(h.creationTime);
+  w.write(h.headerCrc32);
+  w.write(h.padding);
+  return OkStatus();
+}
+
+Status IsHeaderValid(const Header &h) noexcept {
+  if (h.magic != 0x41574C01) {
+    return Status(StatusCode::kBadHeader, "Invalid WAL magic number");
+  }
+  uint32_t computedCrc = utils::crc32((const void *)&h, 16);
+  if (computedCrc != h.headerCrc32) {
+    return Status(StatusCode::kChecksumMismatch, "Header CRC32 mismatch");
+  }
+  return OkStatus();
+}
+
+//////////////////////////////////////////////////////////////////////////
+// Protocol: Entry
+//////////////////////////////////////////////////////////////////////////
+
+Result<Entry> ParseEntry(BinaryReader &r) {
+  const std::streampos startPos = r.tell();
+
+  Entry e;
+
+  if (!r.read(e.type) || !r.read(e.version) || !r.read(e.lsn) ||
+      !r.read(e.txid)) {
+    return Status(StatusCode::kIoError, "Failed to read entry header fields");
+  }
+
+  if (!r.read(e.headerCRC) || !r.read(e.payloadLength) || !r.read(e.vectorID) ||
+      !r.read(e.dimension) || !r.read(e.padding)) {
+    return Status(StatusCode::kIoError, "Failed to read entry metadata fields");
+  }
+
+  e.embedding.resize(e.dimension);
+  if (!r.read(e.embedding)) {
+    return Status(StatusCode::kIoError, "Failed to read entry embedding data");
+  }
+
+  if (!r.read(e.payloadCRC)) {
+    return Status(StatusCode::kIoError, "Failed to read entry payload CRC");
+  }
+
+  const std::streampos endPos = r.tell();
+  if (endPos <= startPos) {
+    return Status(StatusCode::kCorruption,
+                  "no forward progress while reading WAL entry");
+  }
+
+  uint32_t computedHeaderCrc = e.computeHeaderCrc();
+  if (e.headerCRC != computedHeaderCrc) {
+    return Status(StatusCode::kChecksumMismatch,
+                  "Header CRC mismatch: stored=" + std::to_string(e.headerCRC) +
+                      ", computed=" + std::to_string(computedHeaderCrc));
+  }
+
+  uint32_t computedPayloadCrc = e.computePayloadCrc();
+  if (e.payloadCRC != computedPayloadCrc) {
+    return Status(StatusCode::kChecksumMismatch, "Payload CRC mismatch");
+  }
+
+  if (e.dimension != e.embedding.size()) {
+    return Status(StatusCode::kBadRecord, "embedding dimension mismatch");
+  }
+
+  return std::move(e);
+}
+
+Status WriteEntry(const Entry &e, BinaryWriter &w) {
+  assert(e.dimension == e.embedding.size());
+  w.write(e.type);
+  w.write(e.version);
+  w.write(e.lsn);
+  w.write(e.txid);
+  w.write(e.computeHeaderCrc());
+  w.write(e.computePayloadLength());
+  w.write(e.vectorID);
+  w.write(e.dimension);
+  w.write(e.padding);
+  w.write(e.embedding);
+  w.write(e.computePayloadCrc());
+  return OkStatus();
+}
+
+Status IsEntryValid(const Entry &e) noexcept {
+  if (e.dimension != e.embedding.size()) {
+    return Status(StatusCode::kBadRecord, "embedding dimension mismatch");
+  }
+  uint32_t computedHeaderCrc = e.computeHeaderCrc();
+  if (e.headerCRC != computedHeaderCrc) {
+    return Status(StatusCode::kChecksumMismatch, "Header CRC mismatch");
+  }
+  uint32_t computedPayloadCrc = e.computePayloadCrc();
+  if (e.payloadCRC != computedPayloadCrc) {
+    return Status(StatusCode::kChecksumMismatch, "Payload CRC mismatch");
+  }
+  return OkStatus();
+}
+
+//////////////////////////////////////////////////////////////////////////
+// Filesystem helpers
+//////////////////////////////////////////////////////////////////////////
+
+Result<BinaryReader> OpenBinaryReader(const std::filesystem::path &dir,
+                                      const std::string &filename) {
+  namespace fs = std::filesystem;
+  if (!fs::exists(dir)) {
+    return Status(StatusCode::kNotFound, "WAL directory does not exist");
+  }
+
+  if (!fs::is_directory(dir)) {
+    return Status(StatusCode::kNotFound,
+                  "WAL path exists but is not a directory");
+  }
+
+  fs::path filePath = dir / filename;
+
+  std::ifstream walFile(filePath, std::ios::in | std::ios::binary);
+  if (!walFile.is_open()) {
+    return Status(StatusCode::kIoError, "Failed to open WAL file");
+  }
+  return BinaryReader(walFile);
+}
+
+Result<BinaryWriter> OpenBinaryWriter(const std::filesystem::path &dir,
+                                      const std::string &filename,
+                                      bool append) {
+  namespace fs = std::filesystem;
+
+  if (!fs::exists(dir)) {
+    try {
+      fs::create_directories(dir);
+    } catch (const std::exception &e) {
+      return Status(StatusCode::kIoError,
+                    "Failed to create WAL directory: " + std::string(e.what()));
+    }
+  } else if (!fs::is_directory(dir)) {
+    return Status(StatusCode::kIoError,
+                  "WAL path exists but is not a directory");
+  }
+
+  fs::path p = dir / filename;
+
+  std::ios::openmode mode = std::ios::out | std::ios::binary |
+                            (append ? std::ios::app : std::ios::trunc);
+
+  std::ofstream ofs(p, mode);
+  if (!ofs.is_open()) {
+    return Status(StatusCode::kIoError, "failed to open WAL file");
+  }
+
+  return BinaryWriter(ofs);
+}
+
+Result<Header> LoadHeader(const std::filesystem::path &dir, const std::string &filename) {
+
+  namespace fs = std::filesystem;
+  if (!fs::exists(dir)) {
+    return Status(StatusCode::kNotFound, "WAL directory does not exist");
+  }
+
+  if (!fs::is_directory(dir)) {
+    return Status(StatusCode::kNotFound,
+                  "WAL path exists but is not a directory");
+  }
+
+  fs::path filePath = dir / filename;
+
+  std::ifstream walFile(filePath, std::ios::in | std::ios::binary);
+  if (!walFile.is_open()) {
+    return Status(StatusCode::kIoError, "Failed to open WAL file");
+  }
+  BinaryReader r(walFile);
+  r.seek(0, std::ios::end);
+  size_t fileSize = r.tell();
+  if (fileSize < kHeaderWireSize) {
+    return Status(StatusCode::kBadHeader,
+                  "WAL file is too small to contain a valid header");
+  }
+  r.seek(0, std::ios::beg);
+  return ParseHeader(r);
+}
+
+//////////////////////////////////////////////////////////////////////////
+// WAL orchestration
+//////////////////////////////////////////////////////////////////////////
+
+WAL::WAL(std::filesystem::path db_path) : walPath_(std::move(db_path)) {
+  namespace fs = std::filesystem;
+  if (!fs::exists(walPath_)) {
+    fs::create_directories(walPath_);
+    std::cout << "Created WAL directory at " << fs::absolute(walPath_) << "\n";
+  }
+}
+
+WAL::~WAL() = default;
+
+Result<Header> WAL::loadHeader(std::string pathParam) const {
   namespace fs = std::filesystem;
   fs::path path = walPath_;
+
+  if (pathParam != "") {
+    path = fs::path(pathParam);
+  }
+
+  return LoadHeader(path);
+}
+
+Status WAL::writeHeader(const Header &header, std::string path_param) const {
+  namespace fs = std::filesystem;
+  fs::path path = walPath_;
+
+  if (path_param != "") {
+    path = fs::path(path_param);
+  }
+
+  const std::string filename = "db.wal";
+  Result<BinaryWriter> res = OpenBinaryWriter(path, filename, false);
+  if (!res.ok()) {
+    return res.status();
+  }
+  BinaryWriter &w = res.value();
+
+  Status writeStatus = WriteHeader(header, w);
+  if (!writeStatus.ok()) {
+    return writeStatus;
+  }
+
+  w.flush();
+  utils::syncFile((path / filename).string());
+
+  return OkStatus();
+}
+
+Status WAL::log(const Entry &entry, std::string pathParam, bool reset) {
+  namespace fs = std::filesystem;
+  fs::path path = walPath_;
+  const std::string filename = "db.wal";
 
   if (pathParam != "") {
     path = fs::path(pathParam);
@@ -182,372 +378,136 @@ WAL::Status WAL::log(const WAL::Entry &entry, std::string pathParam,
     try {
       fs::create_directories(path);
     } catch (const std::exception &e) {
-      std::cerr << "Failed to create WAL directory: " << path << " - "
-                << e.what() << "\n";
-      return Status::FAILURE;
+      return Status(StatusCode::kIoError,
+                    "Failed to create WAL directory: " + std::string(e.what()));
     }
   } else if (!fs::is_directory(path)) {
-    std::cerr << "WAL path exists but is not a directory: " << path << "\n";
-    return Status::FAILURE;
+    return Status(StatusCode::kIoError,
+                  "WAL path exists but is not a directory");
   }
-  const std::string filename = "db.wal";
-  fs::path filePath = path / filename;
+
+  fs::path p = path / filename;
+
+  std::ios::openmode mode = std::ios::out | std::ios::binary |
+                            (!reset ? std::ios::app : std::ios::trunc);
+
+  std::ofstream ofs(p, mode);
+  if (!ofs.is_open()) {
+    return Status(StatusCode::kIoError, "failed to open WAL file");
+  }
+
+  BinaryWriter w(ofs);
 
   if (reset) {
-    std::ofstream walFile(filePath,
-                          std::ios::out | std::ios::binary | std::ios::trunc);
-
-    if (!walFile.is_open()) {
-      std::cerr << "Failed to open WAL file: " << filePath << "\n";
-      return Status::FAILURE;
-    }
-
-    BinaryWriter writer(walFile);
-
     Header header;
-    header.creationTime = std::time(nullptr);
-    header.computeHeaderCrc32();
-    header.write(writer);
-
-    Status writeStatus = const_cast<Entry &>(entry).write(writer);
-    if (writeStatus == Status::FAILURE) {
-      std::cerr << "Failed to write WAL entry to file: " << filePath << "\n";
-      return Status::FAILURE;
+    header.creationTime = 919191;
+    header.headerCrc32 = header.computeCrc32();
+    header.padding = 2;
+    Status writeStatus = WriteHeader(header, w);
+    if (!writeStatus.ok()) {
+      return Status(StatusCode::kIoError, "Failed to write WAL header to file");
     }
-
-    utils::syncFile(walFile, filePath);
-  } else {
-    std::fstream walFile(filePath, std::ios::in | std::ios::out |
-                                       std::ios::binary | std::ios::app);
-
-    if (!walFile.is_open()) {
-      std::cerr << "Failed to open WAL file: " << filePath << "\n";
-      return Status::FAILURE;
-    }
-
-    walFile.seekp(0, std::ios::end);
-
-    BinaryWriter writer(walFile);
-
-    Status writeStatus = const_cast<Entry &>(entry).write(writer);
-    if (writeStatus == Status::FAILURE) {
-      std::cerr << "Failed to write WAL entry to file: " << filePath << "\n";
-      return Status::FAILURE;
-    }
-
-    walFile.flush();
   }
 
-  return Status::SUCCESS;
+  Status writeStatus = WriteEntry(entry, w);
+  if (!writeStatus.ok()) {
+    return Status(StatusCode::kIoError, "Failed to write WAL entry to file");
+  }
+
+  w.flush();
+  utils::syncFile((path / filename).string());
+  return OkStatus();
 }
 
-std::variant<WAL::Header, WAL::Status>
-WAL::readHeader(std::string pathParam) const {
+Result<Entry> WAL::readNext(BinaryReader &r) const { return ParseEntry(r); }
+
+Result<std::vector<Entry>> WAL::readAll(std::string pathParam) const {
   namespace fs = std::filesystem;
   fs::path path = walPath_;
-
   if (pathParam != "") {
     path = fs::path(pathParam);
+  }
+  const std::string filename = "db.wal";
+
+  // Check if file exists before attempting to read
+  fs::path filePath = path / filename;
+  if (!fs::exists(filePath) ) {
+    return Status(StatusCode::kEof, "WAL file is empty, no entries to read");
+  }
+
+  if (fs::file_size(filePath) < kHeaderWireSize) {
+    return Status(StatusCode::kEof, "WAL file is empty, no entries to read");
   }
 
   if (!fs::exists(path)) {
-    std::cerr << "WAL directory does not exist: " << path << "\n";
-    return Status::FAILURE;
+    return Status(StatusCode::kNotFound, "WAL directory does not exist");
   }
 
   if (!fs::is_directory(path)) {
-    std::cerr << "WAL path exists but is not a directory: " << path << "\n";
-    return Status::FAILURE;
+    return Status(StatusCode::kNotFound,
+                  "WAL path exists but is not a directory");
   }
 
-  const std::string filename = "db.wal";
-  fs::path filePath = path / filename;
   std::ifstream walFile(filePath, std::ios::in | std::ios::binary);
-
   if (!walFile.is_open()) {
-    std::cerr << "Failed to open WAL file: " << filePath << "\n";
-    return Status::FAILURE;
+    return Status(StatusCode::kIoError, "Failed to open WAL file");
   }
-
-  walFile.seekg(0, std::ios::end);
-  if (walFile.tellg() == 0) {
-    Header defaultHeader;
-    defaultHeader.creationTime = std::time(nullptr);
-    defaultHeader.computeHeaderCrc32();
-    return defaultHeader;
-  }
-
-  walFile.seekg(0, std::ios::beg);
-  BinaryReader r(walFile);
-  Header header;
-  header.read(r);
-  std::cout << "Reading default header\n:";
-
-  if (!r.good() || header.magic == 0) {
-    std::cerr << "Failed to read WAL header or header is invalid\n";
-    return Status::FAILURE;
-  }
-
-  if (header.magic != 0x41574C01) {
-    std::cerr << "Invalid WAL magic number: 0x" << std::hex << header.magic
-              << std::dec << "\n";
-    return Status::FAILURE;
-  }
-
-  uint32_t computedCrc =
-      utils::crc32(reinterpret_cast<const void *>(&header), 16);
-  if (header.headerCrc32 != computedCrc) {
-    std::cerr << "Header CRC32 mismatch: stored=0x" << std::hex
-              << header.headerCrc32 << ", computed=0x" << computedCrc
-              << std::dec << "\n";
-    return Status::FAILURE;
-  }
-  return header;
-}
-
-std::variant<WAL::Header, WAL::Status>
-WAL::readHeader(std::ifstream &is) const {
-  BinaryReader r(is);
-  Header header;
-  header.read(r);
-
-  if (header.magic != 0x41574C01) {
-    std::cerr << "Invalid WAL magic number: 0x" << std::hex << header.magic
-              << std::dec << "\n";
-    return Status::FAILURE;
-  }
-
-  uint32_t computedCrc =
-      utils::crc32(reinterpret_cast<const void *>(&header), 16);
-  if (header.headerCrc32 != computedCrc) {
-    std::cerr << "Header CRC32 mismatch\n";
-    return Status::FAILURE;
-  }
-
-  return header;
-}
-
-std::variant<WAL::EntryPtr, WAL::Status> WAL::read(std::string pathParam) {
-  namespace fs = std::filesystem;
-  fs::path path = walPath_;
-
-  if (pathParam != "") {
-    path = fs::path(pathParam);
-  }
-
-  if (!fs::exists(path) || !fs::is_directory(path)) {
-    std::cerr << "WAL directory does not exist: " << path << "\n";
-    return Status::FAILURE;
-  }
-
-  const std::string filename = "db.wal";
-  fs::path filePath = path / filename;
-  std::ifstream walFile(filePath, std::ios::in | std::ios::binary);
-
-  if (!walFile.is_open()) {
-    std::cerr << "Failed to open WAL file: " << filePath << "\n";
-    return Status::FAILURE;
-  }
-
-  BinaryReader r(walFile);
-  Header header;
-
-  // Read header if file has content
-  walFile.seekg(0, std::ios::end);
-  size_t fileSize = walFile.tellg();
-
-  // Calculate header size: magic(4) + version(2) + endianness(1) + crc32(4) =
-  // 11 bytes
-
-  if (fileSize == 0) {
-    std::cerr << "WAL file is empty, no entries to read\n";
-    return Status::FAILURE;
-  }
-
-  if (fileSize < HEADERSIZE) {
-    std::cerr << "WAL file is too small to contain a valid header\n";
-    return Status::FAILURE;
-  }
-
-  walFile.seekg(0, std::ios::beg);
-  header.read(r);
-
-  if (header.magic != 0x41574C01) {
-    std::cerr << "Invalid WAL magic number: 0x" << std::hex << header.magic
-              << std::dec << "\n";
-    return Status::FAILURE;
-  }
-
-  size_t remainingSize = fileSize - HEADERSIZE;
-  if (remainingSize == 0) {
-    std::cerr << "WAL file contains only header, no entries\n";
-    return Status::FAILURE;
-  }
-
-  EntryPtr pEntry = std::make_unique<Entry>(r);
-
-  if (!r.good() && !walFile.eof()) {
-    std::cerr << "Failed to read entry from WAL file\n";
-    return Status::FAILURE;
-  }
-
-  if (pEntry->dimension != pEntry->embedding.size()) {
-    std::cerr << "Entry dimension mismatch after read\n";
-    return Status::FAILURE;
-  }
-
-  return pEntry;
-}
-
-std::variant<std::vector<WAL::EntryPtr>, WAL::Status>
-WAL::readAll(std::string pathParam) const {
-  namespace fs = std::filesystem;
-  fs::path path = walPath_;
-
-  if (pathParam != "") {
-    path = fs::path(pathParam);
-  }
-
-  if (!fs::exists(path)) {
-    std::cerr << "WAL directory does not exist: " << path << "\n";
-    return Status::FAILURE;
-  }
-
-  if (!fs::is_directory(path)) {
-    std::cerr << "WAL path exists but is not a directory: " << path << "\n";
-    return Status::FAILURE;
-  }
-
-  const std::string &filename = "db.wal";
-  fs::path filePath = path / filename;
-  std::ifstream walFile(filePath, std::ios::in | std::ios::binary);
-
-  if (!walFile.is_open()) {
-    std::cerr << "Failed to open WAL file: " << filePath << "\n";
-    return Status::FAILURE;
-  }
-
   BinaryReader r(walFile);
 
-  walFile.seekg(0, std::ios::end);
-  size_t fileSize = walFile.tellg();
-  Header header;
+  // Use filesystem for reliable file size detection
+  auto fileSize = fs::file_size(filePath);
+  r.seek(0, std::ios::end);
+  const std::streampos fileEnd = r.tell();
+  r.seek(0, std::ios::beg);
 
-  if (fileSize == 0) {
-    return std::vector<EntryPtr>{};
+  Result<Header> resHeader = ParseHeader(r);
+  if (!resHeader.ok()) {
+    return resHeader.status();
   }
+  Header &header = resHeader.value();
 
-  if (fileSize < HEADERSIZE) {
-    std::cerr << "WAL file is too small to contain a valid header\n";
-    return Status::FAILURE;
+  if (!r.good()) {
+    return Status(StatusCode::kEof, "Failed to seek past header");
   }
-
-  walFile.seekg(0, std::ios::beg);
-  header.read(r);
-
-  if (!r.good() || header.magic == 0) {
-    std::cerr << "Failed to read WAL header or header is invalid\n";
-    return Status::FAILURE;
-  }
-
-  if (header.magic != 0x41574C01) {
-    std::cerr << "Invalid WAL magic number: 0x" << std::hex << header.magic
-              << std::dec << "\n";
-    return Status::FAILURE;
-  }
-
-  std::vector<EntryPtr> entries;
-
-  walFile.seekg(HEADERSIZE, std::ios::beg);
-  if (!walFile.good()) {
-    std::cerr << "Failed to seek past header\n";
-    return Status::FAILURE;
-  }
-
-  std::streampos lastPos = walFile.tellg();
-  size_t consecutiveNoProgress = 0;
-
-  while (walFile.good() && !walFile.eof()) {
-    std::streampos currentPos = walFile.tellg();
-    walFile.seekg(0, std::ios::end);
-    std::streampos fileEnd = walFile.tellg();
-    walFile.seekg(currentPos, std::ios::beg);
-
-    if (currentPos >= fileEnd) {
-      break;
-    }
-
-    if (walFile.peek() == EOF) {
-      break;
-    }
-
-    EntryPtr pEntry = std::make_unique<Entry>(r);
-
-    if (!r.good() && !walFile.eof()) {
-      std::cerr << "Stream error while reading WAL entry\n";
-      return Status::FAILURE;
-    }
-
-    if (pEntry->dimension != pEntry->embedding.size()) {
-      std::cerr << "Entry dimension mismatch after read\n"
-                << pEntry->toJson().dump(2) << "\n";
+  std::vector<Entry> entries;
+  // Add stream health check to loop condition
+  while (r.good() && r.tell() < fileEnd) {
+    auto curPos = r.tell();
+    Result<Entry> resEntry = ParseEntry(r);
+    if (!resEntry.ok()) {
+      std::cerr << resEntry.status().message() << "\n";
+      if (r.tell() == curPos) {
+        break;
+      }
       continue;
     }
-
-    currentPos = walFile.tellg();
-    if (currentPos == lastPos) {
-      consecutiveNoProgress++;
-      if (consecutiveNoProgress > 10) {
-        std::cerr << "No progress reading entries, possible infinite loop\n";
-        return Status::FAILURE;
-      }
-    } else {
-      consecutiveNoProgress = 0;
-      lastPos = currentPos;
-    }
-
-    entries.push_back(std::move(pEntry));
-
-    if (entries.size() > 1000000) {
-      std::cerr << "Too many entries read, possible infinite loop\n";
-      return Status::FAILURE;
-    }
+    entries.push_back(std::move(resEntry.value()));
   }
-
   return entries;
 }
 
+
 void WAL::print() const {
-  // Load and print header
-  auto h = readHeader();
-  if (std::holds_alternative<Header>(h)) {
-    const auto &header = std::get<Header>(h);
-    header.print();
-  } else {
-    std::cout << "WAL Header: (not available)\n\n";
+  Result<Header> h = loadHeader();
+
+  if (!h.ok()) {
+    std::cerr << h.status().message() << "\n";
+    return;
   }
 
-  // Print all entries
   auto entries = readAll();
-  if (std::holds_alternative<std::vector<EntryPtr>>(entries)) {
-    const auto &entryVec = std::get<std::vector<EntryPtr>>(entries);
-    std::cout << "WAL Entries (" << entryVec.size() << "):\n";
-    for (const auto &entry : entryVec) {
-      entry->print();
-    }
-  } else {
-    std::cout << "No entries found or error reading entries.\n";
+  if (!entries.ok()) {
+    std::cerr << entries.status().message() << "\n";
+    return;
+  }
+
+  h.value().print();
+
+  const auto &entryVec = entries.value();
+  std::cout << "WAL Entries (" << entryVec.size() << "):\n";
+  for (const auto &entry : entryVec) {
+    entry.print();
   }
 }
 
-WAL::WAL() {
-  namespace fs = std::filesystem;
-  fs::path defaultPath = "wal";
-  if (!fs::exists(defaultPath)) {
-    fs::create_directories(defaultPath);
-    std::cout << "Created WAL directory at " << fs::absolute(defaultPath)
-              << "\n";
-  }
-  walPath_ = defaultPath;
-}
-} // namespace arrow
+} // namespace arrow::wal
