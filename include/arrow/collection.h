@@ -1,13 +1,15 @@
 #ifndef ARROWDB_H
 #define ARROWDB_H
-#include "hnsw_index.h"
-#include "utils/utils.h"
-#include "wal.h"
+
 #include <filesystem>
 #include <iostream>
 #include <memory>
 #include <string>
 #include <vector>
+
+#include "hnsw_index.h"
+#include "utils/utils.h"
+#include "wal.h"
 
 namespace arrow {
 class CollectionConfig;
@@ -212,9 +214,9 @@ public:
   void insert(VectorID id, const std::vector<float> &vec) {
     //wal_->log(WAL::Entry(WAL::OperationType::INSERT, id, vec));
     if (index_->insert(id, vec)) {
-			return;
-		} else {
-		}
+      return;
+    } else {
+    }
   }
 
   /// Set metadata for a vector.
@@ -344,42 +346,17 @@ public:
     }
   }
 
-private:
+ private:
   const CollectionConfig config_;
   HNSWConfig hnswConfig_;
   std::unique_ptr<HNSWIndex> index_;
-  std::unique_ptr<WAL> wal_;
+  std::unique_ptr<wal::WAL> wal_;
   std::unordered_map<VectorID, Metadata> metadata_;
 
   // ----- Internal state (added later) -----
   // VectorStore vector_store_;
   // HNSWIndex hnsw_;
   // WAL wal_;
-}; // class Collection
-
-/**
- * @brief Legacy vector database class.
- * @deprecated This class appears to be legacy code and may be removed.
- */
-class arrowDB {
-public:
-  std::vector<int> store; ///< Internal storage
-
-  /**
-   * @brief Constructs an arrowDB with initial capacity.
-   * @param n Initial capacity for the store.
-   */
-  arrowDB(int n) { store.reserve(n); };
-  arrowDB(const arrowDB &) = default;
-  arrowDB(arrowDB &&) = default;
-  arrowDB &operator=(const arrowDB &) = default;
-  arrowDB &operator=(arrowDB &&) = default;
-
-  /**
-   * @brief Inserts a value into the store.
-   * @param n The value to insert.
-   */
-  void insert(int n) { this->store.push_back(n); }
 };
 
 } // namespace arrow
