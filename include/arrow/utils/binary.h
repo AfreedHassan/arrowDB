@@ -30,6 +30,8 @@ public:
     write(size);
     os.write(sv.data(), size);
   }
+
+  void flush() { os.flush(); }
 };
 
 class BinaryReader {
@@ -41,6 +43,12 @@ public:
   bool good() const { return is.good(); }
   bool fail() const { return is.fail(); }
   bool eof() const { return is.eof(); }
+
+  //forwards args to is.seekg
+  template <typename... Args>
+  void seek(Args&&... args) { is.seekg(std::forward<Args>(args)...); }
+  std::istream::pos_type tell() const { return is.tellg(); }
+  std::istream::int_type peek() const { return is.peek(); }
 
   template <typename T>
   bool read(T& v) {
