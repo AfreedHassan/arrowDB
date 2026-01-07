@@ -1,106 +1,122 @@
-#ifndef WAL_H
-#define WAL_H
+#ifndef ARROW_WAL_H
+#define ARROW_WAL_H
+
+#include <cstddef>
+#include <cstdint>
+#include <filesystem>
+#include <string>
+#include <vector>
 
 #include "types.h"
 #include "utils/binary.h"
-#include <filesystem>
-#include <string>
+#include "utils/result.h"
 
 namespace arrow {
-class WAL {
-  using json = arrow::utils::json;
+namespace wal {
 
-public:
-  struct Header {
-    uint32_t magic = 0x41574C01;
-    uint16_t version = 1;
-    uint16_t flags = 0;
-    uint64_t creationTime = 0;
-    uint32_t headerCrc32 = 0;
-    uint32_t _padding = 0;
+using Status = utils::Status;
+using StatusCode = utils::StatusCode;
+template <typename T> using Result = utils::Result<T>;
 
-    Header();
-    void write(BinaryWriter &w) const;
-    void read(BinaryReader &r);
-    void print() const;
+struct Header {
+  uint32_t magic = 0x41574C01;
+  uint16_t version = 1;
+  uint16_t flags = 0;
+  uint64_t creationTime = 0;
+  uint32_t headerCrc32 = 0;
+  uint32_t padding = 0;
 
-    void computeHeaderCrc32();
-    json toJson() const;
-  };
-
-  static constexpr size_t HEADERSIZE = 24;
-  enum class Status {
-    SUCCESS,
-    FAILURE,
-  };
-
-  enum class OperationType : uint16_t {
-    COMMIT_TXN = 1,
-    ABORT_TXN = 2,
-    INSERT = 3,
-    DELETE = 4,
-    UPDATE = 5,
-    BATCH_INSERT = 6
-  };
-
-  struct Entry {
-    OperationType type; // uint16_t
-    uint16_t version;
-    uint64_t lsn;
-    uint64_t txid;
-    uint32_t headerCrc;
-
-    uint32_t payloadLength;
-    VectorID vectorId;
-    uint32_t dimension;
-    uint8_t padding;
-    std::vector<float> embedding;
-    uint32_t payloadCrc;
-
-    // Constructors
-    Entry(OperationType t, uint64_t seq, uint64_t tid, VectorID vid, uint32_t dims, const std::vector<float> &v)
-        : payloadLength(0), type(t), version(1), lsn(seq), txid(tid), headerCrc(0), vectorId(vid), dimension(dims), padding(0), embedding(v), payloadCrc(0) {
-      assert(dims == v.size());
-    }
-
-    Entry(BinaryReader &r);
-    Entry(std::ifstream &inFile);
-
-    Status write(BinaryWriter &w);
-    Status read(BinaryReader &r);
-    std::string typeToString() const;
-    json toJson() const;
-    void print() const;
-
-    inline uint32_t computePayloadLength() const {
-      return (embedding.size() * sizeof(float)); 
-    }
-
-    uint32_t computeHeaderCrc() const;
-    uint32_t computePayloadCrc() const;
-
-  };
-
-  std::variant<Header, Status> readHeader(std::string pathParam = "") const;
-  std::variant<Header, Status> readHeader(std::ifstream &is) const;
-
-  Status log(const Entry &entry, std::string pathParam = "",
-             bool reset = false);
-  using EntryPtr = std::unique_ptr<Entry>;
-  std::variant<EntryPtr, Status> read(std::string pathParam = "");
-  std::variant<std::vector<EntryPtr>, Status>
-  readAll(std::string pathParam = "") const;
-  void print() const;
-
-  WAL();
-  ~WAL() = default;
-
-private:
-  std::filesystem::path walPath_;
-  uint64_t offset = 1;
+  uint32_t computeCrc32() const noexcept;
+  utils::json toJson() const;
+  void print() const noexcept;
 };
 
-} // namespace arrow
+static_assert(sizeof(Header) >= 24, "Header wire size must be >= 24 bytes");
+static constexpr std::size_t kHeaderWireSize = 24;
 
-#endif // WAL_H
+enum class OperationType : uint16_t {
+  COMMIT_TXN = 1,
+  ABORT_TXN = 2,
+  INSERT = 3,
+  DELETE = 4,
+  UPDATE = 5,
+  BATCH_INSERT = 6
+};
 
+struct Entry {
+  OperationType type;
+  uint16_t version;
+  uint64_t lsn;
+  uint64_t txid;
+  uint32_t headerCRC;
+  uint32_t payloadLength = 0;
+  VectorID vectorID = 0;
+  uint32_t dimension = 0;
+  uint8_t padding;
+  std::vector<float> embedding;
+  uint32_t payloadCRC = 0;
+
+  uint32_t computePayloadLength() const noexcept {
+    return static_cast<uint32_t>(embedding.size() * sizeof(float));
+  }
+  uint32_t computePayloadCrc() const noexcept;
+  uint32_t computeHeaderCrc() const noexcept;
+  utils::json toJson() const;
+  void print() const noexcept;
+};
+
+//////////////////////////////////////////////////////////////////////////
+// Domain helpers / protocol: free functions only
+//////////////////////////////////////////////////////////////////////////
+
+Result<Header> ParseHeader(BinaryReader& r);
+Status WriteHeader(const Header& h, BinaryWriter& w);
+Status IsHeaderValid(const Header& h) noexcept;
+
+Result<Entry> ParseEntry(BinaryReader& r);
+Status WriteEntry(const Entry& e, BinaryWriter& w);
+Status IsEntryValid(const Entry& e) noexcept;
+
+//////////////////////////////////////////////////////////////////////////
+// Filesystem helpers (domain namespace, not utils)
+//////////////////////////////////////////////////////////////////////////
+
+Result<BinaryReader> OpenBinaryReader(const std::filesystem::path& dir,
+                                           const std::string& filename);
+Result<BinaryWriter> OpenBinaryWriter(const std::filesystem::path& dir,
+                                           const std::string& filename,
+                                           bool append = true);
+
+Result<Header> LoadHeader(const std::filesystem::path& dir,
+                          const std::string& filename = "db.wal");
+
+//////////////////////////////////////////////////////////////////////////
+// WAL orchestration object (coordinator, no parsing internals)
+//////////////////////////////////////////////////////////////////////////
+
+class WAL {
+ public:
+  explicit WAL(std::filesystem::path db_path);
+  ~WAL();
+
+  [[nodiscard]] Result<Header> loadHeader(std::string path_param = "") const;
+  [[nodiscard]] Status writeHeader(const Header& header,
+                                   std::string path_param = "") const;
+
+  [[nodiscard]] Result<std::vector<Entry>> readAll(std::string path_param = "") const;
+  [[nodiscard]] Result<Entry> readNext(BinaryReader& r) const;
+  [[nodiscard]] Status log(const Entry& entry, std::string path_param = "",
+                           bool reset = false);
+
+  void print() const;
+  Status ValidateOrCreatePath(const std::filesystem::path& base_path, const std::string& path_param, std::filesystem::path& out_path) const;
+
+ private:
+  std::filesystem::path walPath_;
+  uint64_t offset_ = 1;
+};
+
+}  // namespace wal
+}  // namespace arrow
+
+#endif  // ARROW_WAL_H
