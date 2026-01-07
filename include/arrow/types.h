@@ -43,9 +43,6 @@ namespace arrow {
 		DimensionMismatch, NotFound, DuplicateID, StorageError 
 	};
 
-	template<typename T>
-	using Result = std::expected<T, ErrorCode>;
-
 	namespace utils {
 	using json = nlohmann::json;
 	}
