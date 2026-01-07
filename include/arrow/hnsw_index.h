@@ -29,9 +29,9 @@ enum class DistanceMetric;
 /// For smaller datasets (<10K), M=32 may be sufficient and uses less memory.
 /// For very large datasets (1M+), consider M=64 with efConstruction=400.
 struct HNSWConfig {
-    size_t maxElements = 1000000;  	// Initial capacity
+    size_t maxElements = 1000000;   // Initial capacity
     size_t M = 64;                  // Max connections per node (optimized for 100K+ vectors)
-    size_t efConstruction = 200;   	// Construction beam width
+    size_t efConstruction = 200;    // Construction beam width
 };
 
 /// HNSW index wrapper around hnswlib.
@@ -67,15 +67,15 @@ public:
     /// Vector dimension.
     inline size_t dimension() const { return dim_; }
 
-	/// Save the index to disk.
-	/// @param path File path where the index will be saved
-	void saveIndex(const std::string& path) const;
-	
-	/// Load an index from disk.
-	/// @param path File path to load the index from
-	/// @note This replaces the current index with the loaded one.
-	///       The dimension and metric must match the saved index.
-	void loadIndex(const std::string& path);
+  /// Save the index to disk.
+  /// @param path File path where the index will be saved
+  void saveIndex(const std::string& path) const;
+  
+  /// Load an index from disk.
+  /// @param path File path to load the index from
+  /// @note This replaces the current index with the loaded one.
+  ///       The dimension and metric must match the saved index.
+  void loadIndex(const std::string& path);
 
     // Number of vectors in the index.
     size_t size() const; 
