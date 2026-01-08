@@ -105,7 +105,7 @@ class WAL {
 
   [[nodiscard]] Result<std::vector<Entry>> readAll(std::string path_param = "") const;
   [[nodiscard]] Result<Entry> readNext(BinaryReader& r) const;
-  [[nodiscard]] Status log(const Entry& entry, std::string path_param = "",
+  [[nodiscard]] Status log(const Entry& entry, std::string pathParam = "",
                            bool reset = false);
 
   void print() const;
