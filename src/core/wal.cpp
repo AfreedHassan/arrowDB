@@ -6,7 +6,6 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
-#include <sstream>
 #include <string>
 #include <unistd.h>
 #include <utility>
@@ -106,7 +105,7 @@ Result<Header> ParseHeader(BinaryReader &r) {
 
   if (h.magic != 0x41574C01)
     return Status(StatusCode::kBadHeader, "Invalid WAL magic number");
-  
+
   if (!r.read(h.version))
     return Status(StatusCode::kBadHeader, "Failed to read WAL header version");
 
@@ -114,14 +113,16 @@ Result<Header> ParseHeader(BinaryReader &r) {
     return Status(StatusCode::kBadHeader, "Failed to read WAL header flags");
 
   if (!r.read(h.creationTime))
-    return Status(StatusCode::kBadHeader, "Failed to read WAL header creationTime"); 
+    return Status(StatusCode::kBadHeader,
+                  "Failed to read WAL header creationTime");
 
   if (!r.read(h.headerCrc32))
-    return Status(StatusCode::kBadHeader, "Failed to read WAL header headerCrc32");
+    return Status(StatusCode::kBadHeader,
+                  "Failed to read WAL header headerCrc32");
 
   if (!r.read(h.padding))
     return Status(StatusCode::kBadHeader, "Failed to read WAL header padding");
-  
+
   return std::move(h);
 }
 
@@ -162,6 +163,7 @@ Result<Entry> ParseEntry(BinaryReader &r) {
 
   if (!r.read(e.headerCRC) || !r.read(e.payloadLength) || !r.read(e.vectorID) ||
       !r.read(e.dimension) || !r.read(e.padding)) {
+    e.print();
     return Status(StatusCode::kIoError, "Failed to read entry metadata fields");
   }
 
@@ -248,11 +250,13 @@ Result<BinaryReader> OpenBinaryReader(const std::filesystem::path &dir,
 
   fs::path filePath = dir / filename;
 
-  std::ifstream walFile(filePath, std::ios::in | std::ios::binary);
-  if (!walFile.is_open()) {
+  auto pWalFile = std::make_unique<std::ifstream>(filePath, std::ios::in | std::ios::binary);
+
+  if (!pWalFile->is_open()) {
     return Status(StatusCode::kIoError, "Failed to open WAL file");
   }
-  return BinaryReader(walFile);
+
+  return BinaryReader(std::move(pWalFile));
 }
 
 Result<BinaryWriter> OpenBinaryWriter(const std::filesystem::path &dir,
@@ -277,33 +281,24 @@ Result<BinaryWriter> OpenBinaryWriter(const std::filesystem::path &dir,
   std::ios::openmode mode = std::ios::out | std::ios::binary |
                             (append ? std::ios::app : std::ios::trunc);
 
-  std::ofstream ofs(p, mode);
-  if (!ofs.is_open()) {
+  auto ofs = std::make_unique<std::ofstream>(p, mode);
+  if (!ofs->is_open()) {
     return Status(StatusCode::kIoError, "failed to open WAL file");
   }
 
-  return BinaryWriter(ofs);
+  return BinaryWriter(std::move(ofs));
 }
 
-Result<Header> LoadHeader(const std::filesystem::path &dir, const std::string &filename) {
+Result<Header> LoadHeader(const std::filesystem::path &dir,
+                          const std::string &filename) {
 
-  namespace fs = std::filesystem;
-  if (!fs::exists(dir)) {
-    return Status(StatusCode::kNotFound, "WAL directory does not exist");
+  Result<BinaryReader> res = OpenBinaryReader(dir, filename);
+
+  if (!res.ok()) {
+    return res.status();
   }
 
-  if (!fs::is_directory(dir)) {
-    return Status(StatusCode::kNotFound,
-                  "WAL path exists but is not a directory");
-  }
-
-  fs::path filePath = dir / filename;
-
-  std::ifstream walFile(filePath, std::ios::in | std::ios::binary);
-  if (!walFile.is_open()) {
-    return Status(StatusCode::kIoError, "Failed to open WAL file");
-  }
-  BinaryReader r(walFile);
+  BinaryReader &r = res.value();
   r.seek(0, std::ios::end);
   size_t fileSize = r.tell();
   if (fileSize < kHeaderWireSize) {
@@ -318,7 +313,7 @@ Result<Header> LoadHeader(const std::filesystem::path &dir, const std::string &f
 // WAL orchestration
 //////////////////////////////////////////////////////////////////////////
 
-WAL::WAL(std::filesystem::path db_path) : walPath_(std::move(db_path)) {
+WAL::WAL(std::filesystem::path dbPath) : walPath_(std::move(dbPath)) {
   namespace fs = std::filesystem;
   if (!fs::exists(walPath_)) {
     fs::create_directories(walPath_);
@@ -369,37 +364,20 @@ Status WAL::log(const Entry &entry, std::string pathParam, bool reset) {
   namespace fs = std::filesystem;
   fs::path path = walPath_;
   const std::string filename = "db.wal";
-
+  
   if (pathParam != "") {
-    path = fs::path(pathParam);
+    path = pathParam;
   }
 
-  if (!fs::exists(path)) {
-    try {
-      fs::create_directories(path);
-    } catch (const std::exception &e) {
-      return Status(StatusCode::kIoError,
-                    "Failed to create WAL directory: " + std::string(e.what()));
+  Result<BinaryWriter> res = OpenBinaryWriter(path, filename, !reset);
+  if (!res.ok()) {
+    return res.status();
     }
-  } else if (!fs::is_directory(path)) {
-    return Status(StatusCode::kIoError,
-                  "WAL path exists but is not a directory");
-  }
-
-  fs::path p = path / filename;
-
-  std::ios::openmode mode = std::ios::out | std::ios::binary |
-                            (!reset ? std::ios::app : std::ios::trunc);
-
-  std::ofstream ofs(p, mode);
-  if (!ofs.is_open()) {
-    return Status(StatusCode::kIoError, "failed to open WAL file");
-  }
-
-  BinaryWriter w(ofs);
+  BinaryWriter &w = res.value();
 
   if (reset) {
     Header header;
+    header.magic = 0x41574C01;
     header.creationTime = 919191;
     header.headerCrc32 = header.computeCrc32();
     header.padding = 2;
@@ -424,38 +402,26 @@ Result<Entry> WAL::readNext(BinaryReader &r) const { return ParseEntry(r); }
 Result<std::vector<Entry>> WAL::readAll(std::string pathParam) const {
   namespace fs = std::filesystem;
   fs::path path = walPath_;
+
   if (pathParam != "") {
     path = fs::path(pathParam);
   }
   const std::string filename = "db.wal";
 
-  // Check if file exists before attempting to read
+  Result<BinaryReader> res = OpenBinaryReader(path, filename);
+  if (!res.ok()) {
+    return res.status();
+  }
+  BinaryReader &r = res.value();
+
   fs::path filePath = path / filename;
-  if (!fs::exists(filePath) ) {
-    return Status(StatusCode::kEof, "WAL file is empty, no entries to read");
-  }
-
-  if (fs::file_size(filePath) < kHeaderWireSize) {
-    return Status(StatusCode::kEof, "WAL file is empty, no entries to read");
-  }
-
-  if (!fs::exists(path)) {
-    return Status(StatusCode::kNotFound, "WAL directory does not exist");
-  }
-
-  if (!fs::is_directory(path)) {
-    return Status(StatusCode::kNotFound,
-                  "WAL path exists but is not a directory");
-  }
-
-  std::ifstream walFile(filePath, std::ios::in | std::ios::binary);
-  if (!walFile.is_open()) {
-    return Status(StatusCode::kIoError, "Failed to open WAL file");
-  }
-  BinaryReader r(walFile);
-
   // Use filesystem for reliable file size detection
   auto fileSize = fs::file_size(filePath);
+  
+  if (fileSize == 0) {
+    return Status(StatusCode::kEof, "File is empty");
+  }
+
   r.seek(0, std::ios::end);
   const std::streampos fileEnd = r.tell();
   r.seek(0, std::ios::beg);
@@ -475,17 +441,20 @@ Result<std::vector<Entry>> WAL::readAll(std::string pathParam) const {
     auto curPos = r.tell();
     Result<Entry> resEntry = ParseEntry(r);
     if (!resEntry.ok()) {
-      std::cerr << resEntry.status().message() << "\n";
-      if (r.tell() == curPos) {
-        break;
-      }
-      continue;
+        std::cerr << resEntry.status().message() << "\n";
+        
+        if (r.tell() == curPos) {
+            break;  // No progress, give up
+        }
+        const size_t kEntryHeaderSize = 45;
+        size_t skipSize = kEntryHeaderSize + 4;  
+        r.seek(skipSize, std::ios::cur);
+        continue;
     }
     entries.push_back(std::move(resEntry.value()));
   }
   return entries;
 }
-
 
 void WAL::print() const {
   Result<Header> h = loadHeader();

@@ -5,6 +5,7 @@
 #include "test_util.h"
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 #include <vector>
 #include <random>
 
@@ -80,29 +81,45 @@ TEST_F(WALTest, HeaderWriteReadRoundTrip) {
     original.creationTime = 1234567890;
     original.padding = 0;
 
-    std::stringstream buffer(std::ios::binary | std::ios::in | std::ios::out);
-    BinaryWriter writer(buffer);
-    wal::WriteHeader(original, writer);
+    std::string path = GetTestPath("header_roundtrip.bin");
+    {
+        std::ofstream file(path, std::ios::binary);
+        BinaryWriter writer(std::make_unique<std::ofstream>(std::move(file)));
+        wal::WriteHeader(original, writer);
+    }
 
-    buffer.seekg(0);
-    BinaryReader reader(buffer);
-    auto result = wal::ParseHeader(reader);
-    ASSERT_TRUE(result.ok());
-    const auto& read = result.value();
+    {
+        std::ifstream file(path, std::ios::binary);
+        BinaryReader reader(std::make_unique<std::ifstream>(std::move(file)));
+        auto result = wal::ParseHeader(reader);
+        if (!result.ok()) {
+            std::cout << "ParseHeader failed: " << result.status().message() << "\n";
+        }
+        ASSERT_TRUE(result.ok());
+        const auto& read = result.value();
 
-    EXPECT_EQ(read.magic, original.magic);
-    EXPECT_EQ(read.version, original.version);
-    EXPECT_EQ(read.flags, original.flags);
-    EXPECT_EQ(read.creationTime, original.creationTime);
-    EXPECT_EQ(read.padding, original.padding);
+        EXPECT_EQ(read.magic, original.magic);
+        EXPECT_EQ(read.version, original.version);
+        EXPECT_EQ(read.flags, original.flags);
+        EXPECT_EQ(read.creationTime, original.creationTime);
+        EXPECT_EQ(read.padding, original.padding);
+    }
 }
 
 TEST_F(WALTest, HeaderReadFailure) {
-    std::stringstream buffer;
-    BinaryReader reader(buffer);
-    auto result = wal::ParseHeader(reader);
+    std::string path = GetTestPath("header_empty.bin");
+    {
+        std::ofstream file(path, std::ios::binary);
+        file.close();
+    }
 
-    EXPECT_FALSE(result.ok());
+    {
+        std::ifstream file(path, std::ios::binary);
+        BinaryReader reader(std::make_unique<std::ifstream>(std::move(file)));
+        auto result = wal::ParseHeader(reader);
+
+        EXPECT_FALSE(result.ok());
+    }
 }
 
 TEST_F(WALTest, EntryConstructor) {
@@ -237,25 +254,30 @@ TEST_F(WALTest, EntryWriteReadRoundTrip) {
     original.headerCRC = original.computeHeaderCrc();
     original.payloadCRC = original.computePayloadCrc();
 
-    std::stringstream buffer(std::ios::binary | std::ios::in | std::ios::out);
-    BinaryWriter writer(buffer);
+    std::string path = GetTestPath("entry_roundtrip.bin");
+    {
+        std::ofstream file(path, std::ios::binary);
+        BinaryWriter writer(std::make_unique<std::ofstream>(std::move(file)));
+        utils::Status writeStatus = wal::WriteEntry(original, writer);
+        EXPECT_TRUE(writeStatus.ok());
+    }
 
-    utils::Status writeStatus = wal::WriteEntry(original, writer);
-    EXPECT_TRUE(writeStatus.ok());
+    {
+        std::ifstream file(path, std::ios::binary);
+        BinaryReader reader(std::make_unique<std::ifstream>(std::move(file)));
+        auto readResult = wal::ParseEntry(reader);
+        EXPECT_TRUE(readResult.ok());
+        wal::Entry read = readResult.value();
 
-    buffer.seekg(0);
-    BinaryReader reader(buffer);
-    auto readResult = wal::ParseEntry(reader);
-    EXPECT_TRUE(readResult.ok());
-    wal::Entry read = readResult.value();
-
-    EXPECT_EQ(read.type, original.type);
-    EXPECT_EQ(read.lsn, original.lsn);
-    EXPECT_EQ(read.txid, original.txid);
-    EXPECT_EQ(read.vectorID, original.vectorID);
-    EXPECT_EQ(read.dimension, original.dimension);
-    EXPECT_EQ(read.embedding, original.embedding);
+        EXPECT_EQ(read.type, original.type);
+        EXPECT_EQ(read.lsn, original.lsn);
+        EXPECT_EQ(read.txid, original.txid);
+        EXPECT_EQ(read.vectorID, original.vectorID);
+        EXPECT_EQ(read.dimension, original.dimension);
+        EXPECT_EQ(read.embedding, original.embedding);
+    }
 }
+
 
 TEST_F(WALTest, EntryReadWithCrcMismatch) {
     std::vector<float> embedding = {1.0f, 2.0f};
@@ -275,40 +297,53 @@ TEST_F(WALTest, EntryReadWithCrcMismatch) {
     original.headerCRC = original.computeHeaderCrc();
     original.payloadCRC = original.computePayloadCrc();
 
-    std::stringstream buffer(std::ios::binary | std::ios::in | std::ios::out);
-    BinaryWriter writer(buffer);
-    wal::WriteEntry(original, writer);
+    std::string path = GetTestPath("entry_crc_mismatch.bin");
+    {
+        std::ofstream file(path, std::ios::binary);
+        BinaryWriter writer(std::make_unique<std::ofstream>(std::move(file)));
+        wal::WriteEntry(original, writer);
+    }
 
-    buffer.seekp(-4, std::ios::end);
-    uint32_t badCrc = 0xFFFFFFFF;
-    buffer.write(reinterpret_cast<char*>(&badCrc), sizeof(badCrc));
+    {
+        std::fstream file(path, std::ios::in | std::ios::out | std::ios::binary);
+        file.seekp(-4, std::ios::end);
+        uint32_t badCrc = 0xFFFFFFFF;
+        file.write(reinterpret_cast<char*>(&badCrc), sizeof(badCrc));
+    }
 
-    buffer.seekg(0);
-    BinaryReader reader(buffer);
-    auto readResult = wal::ParseEntry(reader);
-    EXPECT_FALSE(readResult.ok());
+    {
+        std::ifstream file(path, std::ios::binary);
+        BinaryReader reader(std::make_unique<std::ifstream>(std::move(file)));
+        auto readResult = wal::ParseEntry(reader);
+        EXPECT_FALSE(readResult.ok());
+    }
 }
 
 TEST_F(WALTest, EntryDimensionMismatch) {
-    std::stringstream buffer(std::ios::binary | std::ios::in | std::ios::out);
-    BinaryWriter writer(buffer);
+    std::string path = GetTestPath("entry_dimension_mismatch.bin");
+    {
+        std::ofstream file(path, std::ios::binary);
+        BinaryWriter writer(std::make_unique<std::ofstream>(std::move(file)));
 
-    writer.write(wal::OperationType::INSERT);
-    writer.write(static_cast<uint16_t>(1));
-    writer.write(static_cast<uint64_t>(1));
-    writer.write(static_cast<uint64_t>(1));
-    writer.write(static_cast<uint32_t>(0));
-    writer.write(static_cast<uint32_t>(3 * sizeof(float)));
-    writer.write(static_cast<VectorID>(1));
-    writer.write(static_cast<uint32_t>(2));
-    writer.write(static_cast<uint8_t>(0));
-    writer.write(std::vector<float>({1.0f, 2.0f, 3.0f}));
-    writer.write(static_cast<uint32_t>(0));
+        writer.write(wal::OperationType::INSERT);
+        writer.write(static_cast<uint16_t>(1));
+        writer.write(static_cast<uint64_t>(1));
+        writer.write(static_cast<uint64_t>(1));
+        writer.write(static_cast<uint32_t>(0));
+        writer.write(static_cast<uint32_t>(3 * sizeof(float)));
+        writer.write(static_cast<VectorID>(1));
+        writer.write(static_cast<uint32_t>(2));
+        writer.write(static_cast<uint8_t>(0));
+        writer.write(std::vector<float>({1.0f, 2.0f, 3.0f}));
+        writer.write(static_cast<uint32_t>(0));
+    }
 
-    buffer.seekg(0);
-    BinaryReader reader(buffer);
-    auto parseResult = wal::ParseEntry(reader);
-    EXPECT_FALSE(parseResult.ok());
+    {
+        std::ifstream file(path, std::ios::binary);
+        BinaryReader reader(std::make_unique<std::ifstream>(std::move(file)));
+        auto parseResult = wal::ParseEntry(reader);
+        EXPECT_FALSE(parseResult.ok());
+    }
 }
 
 TEST_F(WALTest, WALLogCreatesDirectory) {
@@ -317,7 +352,6 @@ TEST_F(WALTest, WALLogCreatesDirectory) {
 
     std::string walPath = GetTestPath("test_wal_dir");
     std::string dbPath = (std::filesystem::path(walPath) / "db.wal").string();
-
     auto result = wal.log(entry, walPath, true);
     EXPECT_TRUE(result.ok());
     EXPECT_TRUE(std::filesystem::exists(walPath));
@@ -763,22 +797,27 @@ TEST_F(WALTest, EntryWithAllFields) {
     EXPECT_EQ(entry.version, 1);
     EXPECT_EQ(entry.padding, 0);
 
-    std::stringstream buffer(std::ios::binary | std::ios::in | std::ios::out);
-    BinaryWriter writer(buffer);
-    EXPECT_TRUE(wal::WriteEntry(entry, writer).ok());
+    std::string path = GetTestPath("entry_all_fields.bin");
+    {
+        std::ofstream file(path, std::ios::binary);
+        BinaryWriter writer(std::make_unique<std::ofstream>(std::move(file)));
+        EXPECT_TRUE(wal::WriteEntry(entry, writer).ok());
+    }
 
-    buffer.seekg(0);
-    BinaryReader reader(buffer);
-    auto readEntryResult = wal::ParseEntry(reader);
-    EXPECT_TRUE(readEntryResult.ok());
-    auto& readEntry = readEntryResult.value();
+    {
+        std::ifstream file(path, std::ios::binary);
+        BinaryReader reader(std::make_unique<std::ifstream>(std::move(file)));
+        auto readEntryResult = wal::ParseEntry(reader);
+        EXPECT_TRUE(readEntryResult.ok());
+        auto& readEntry = readEntryResult.value();
 
-    EXPECT_EQ(readEntry.type, entry.type);
-    EXPECT_EQ(readEntry.lsn, entry.lsn);
-    EXPECT_EQ(readEntry.txid, entry.txid);
-    EXPECT_EQ(readEntry.vectorID, entry.vectorID);
-    EXPECT_EQ(readEntry.dimension, entry.dimension);
-    EXPECT_EQ(readEntry.embedding, entry.embedding);
+        EXPECT_EQ(readEntry.type, entry.type);
+        EXPECT_EQ(readEntry.lsn, entry.lsn);
+        EXPECT_EQ(readEntry.txid, entry.txid);
+        EXPECT_EQ(readEntry.vectorID, entry.vectorID);
+        EXPECT_EQ(readEntry.dimension, entry.dimension);
+        EXPECT_EQ(readEntry.embedding, entry.embedding);
+    }
 }
 
 TEST_F(WALTest, HeaderComputeCrc) {
@@ -792,15 +831,20 @@ TEST_F(WALTest, HeaderComputeCrc) {
     header.headerCrc32 = header.computeCrc32();
     EXPECT_NE(header.headerCrc32, 0);
 
-    std::stringstream buffer(std::ios::binary | std::ios::in | std::ios::out);
-    BinaryWriter writer(buffer);
-    wal::WriteHeader(header, writer);
-
-    buffer.seekg(0);
-    BinaryReader reader(buffer);
-    auto resHeaderResult = wal::ParseHeader(reader);
-    if (!resHeaderResult.ok()) {
-      std::cerr << resHeaderResult.status().message() << "\n";
+    std::string path = GetTestPath("header_compute_crc.bin");
+    {
+        std::ofstream file(path, std::ios::binary);
+        BinaryWriter writer(std::make_unique<std::ofstream>(std::move(file)));
+        wal::WriteHeader(header, writer);
     }
-    EXPECT_EQ(resHeaderResult.value().headerCrc32, header.headerCrc32);
+
+    {
+        std::ifstream file(path, std::ios::binary);
+        BinaryReader reader(std::make_unique<std::ifstream>(std::move(file)));
+        auto resHeaderResult = wal::ParseHeader(reader);
+        if (!resHeaderResult.ok()) {
+            std::cerr << resHeaderResult.status().message() << "\n";
+        }
+        EXPECT_EQ(resHeaderResult.value().headerCrc32, header.headerCrc32);
+    }
 }

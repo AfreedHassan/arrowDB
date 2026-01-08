@@ -120,6 +120,7 @@ void test() {
   }
 }
 
+/*
 void write_test() {
   using namespace arrow;
   std::filesystem::path testPath = "/tmp/test_wal_dir";
@@ -143,8 +144,8 @@ void write_test() {
   std::cout << "File size after writing header: "
             << std::filesystem::file_size(walFile) << " bytes" << std::endl;
 
-  std::ifstream readfile2(walFile, std::ios::binary);
-  BinaryReader reader(readfile2);
+  auto f = std::make_unique<std::ifstream>(walFile, std::ios::binary);
+  BinaryReader reader(std::move(f));
   auto result = wal::ParseHeader(reader);
   if (result.ok()) {
     std::cout << "ParseHeader succeeded" << std::endl;
@@ -155,10 +156,11 @@ void write_test() {
 
   std::filesystem::remove_all(testPath);
 }
+*/
 
 using namespace arrow::wal;
 
 int main() {
-  write_test();
+  //write_test();
   return 0;
 }

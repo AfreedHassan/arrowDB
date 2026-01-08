@@ -91,6 +91,7 @@ add_test(NAME CollectionTests COMMAND tests --gtest_filter=CollectionTest.*)
 add_test(NAME MetadataTests COMMAND tests --gtest_filter=MetadataTest.*)
 add_test(NAME MetadataIntegrationTests COMMAND tests --gtest_filter=MetadataIntegrationTest.*)
 add_test(NAME WALUnitTests COMMAND tests --gtest_filter=WALTest.*)
+add_test(NAME BinaryTests COMMAND tests --gtest_filter=BinaryTest.*)
 #add_test(NAME SIFTTests COMMAND tests --gtest_filter=SIFTTest.*)
 
 # Grouped test entries for convenience

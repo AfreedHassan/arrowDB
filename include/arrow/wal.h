@@ -96,20 +96,20 @@ Result<Header> LoadHeader(const std::filesystem::path& dir,
 
 class WAL {
  public:
-  explicit WAL(std::filesystem::path db_path);
+  explicit WAL(std::filesystem::path dbPath);
   ~WAL();
 
-  [[nodiscard]] Result<Header> loadHeader(std::string path_param = "") const;
+  [[nodiscard]] Result<Header> loadHeader(std::string pathParam = "") const;
   [[nodiscard]] Status writeHeader(const Header& header,
                                    std::string path_param = "") const;
 
-  [[nodiscard]] Result<std::vector<Entry>> readAll(std::string path_param = "") const;
+  [[nodiscard]] Result<std::vector<Entry>> readAll(std::string pathParam = "") const;
   [[nodiscard]] Result<Entry> readNext(BinaryReader& r) const;
-  [[nodiscard]] Status log(const Entry& entry, std::string path_param = "",
+  [[nodiscard]] Status log(const Entry& entry, std::string pathParam = "",
                            bool reset = false);
 
   void print() const;
-  Status ValidateOrCreatePath(const std::filesystem::path& base_path, const std::string& path_param, std::filesystem::path& out_path) const;
+  Status ValidateOrCreatePath(const std::filesystem::path& basePath, const std::string& pathParam, std::filesystem::path& outPath) const;
 
  private:
   std::filesystem::path walPath_;
