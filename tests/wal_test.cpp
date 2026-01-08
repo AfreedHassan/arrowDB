@@ -64,7 +64,7 @@ TEST_F(WALTest, HeaderDefaults) {
     header.headerCrc32 = header.computeCrc32();
     EXPECT_EQ(sizeof(wal::Header), 24);
     EXPECT_EQ(sizeof(header), 24);
-    EXPECT_EQ(header.magic, 0x41574C01);
+    EXPECT_EQ(header.magic, wal::kWalMagic);
     EXPECT_EQ(header.version, 1);
     EXPECT_EQ(header.flags, 0);
     EXPECT_EQ(header.creationTime, 0);
@@ -75,11 +75,12 @@ TEST_F(WALTest, HeaderDefaults) {
 
 TEST_F(WALTest, HeaderWriteReadRoundTrip) {
     wal::Header original;
-    original.magic = 0x41574C01;
+    original.magic = wal::kWalMagic;
     original.version = 2;
     original.flags = 0x1234;
     original.creationTime = 1234567890;
     original.padding = 0;
+    original.headerCrc32 = original.computeCrc32();  // Compute CRC before writing
 
     std::string path = GetTestPath("header_roundtrip.bin");
     {
@@ -102,6 +103,7 @@ TEST_F(WALTest, HeaderWriteReadRoundTrip) {
         EXPECT_EQ(read.version, original.version);
         EXPECT_EQ(read.flags, original.flags);
         EXPECT_EQ(read.creationTime, original.creationTime);
+        EXPECT_EQ(read.headerCrc32, original.headerCrc32);
         EXPECT_EQ(read.padding, original.padding);
     }
 }
@@ -576,7 +578,7 @@ TEST_F(WALTest, WALReadHeaderSuccess) {
     EXPECT_TRUE(headerResult.ok());
 
     const wal::Header& header = headerResult.value();
-    EXPECT_EQ(header.magic, 0x41574C01);
+    EXPECT_EQ(header.magic, wal::kWalMagic);
     EXPECT_EQ(header.version, 1);
 }
 
@@ -652,7 +654,8 @@ TEST_F(WALTest, WALReadHeaderRoundTrip) {
 
     std::string walPath = GetTestPath("read_header_roundtrip");
 
-    wal::Header header{.magic = 0x41574C01, .version = 1, .flags = 0, .creationTime = 1234567890, .headerCrc32 = 0, .padding = 0};
+    wal::Header header{.magic = wal::kWalMagic, .version = 1, .flags = 0, .creationTime = 1234567890, .headerCrc32 = 0, .padding = 0};
+    header.headerCrc32 = header.computeCrc32();  // Compute CRC before writing
     wal.writeHeader(header, walPath);
     wal.log(entry, walPath, true);
 
@@ -663,7 +666,7 @@ TEST_F(WALTest, WALReadHeaderRoundTrip) {
     EXPECT_TRUE(headerResult.ok());
 
     const wal::Header& res = headerResult.value();
-    EXPECT_EQ(res.magic, 0x41574C01);
+    EXPECT_EQ(res.magic, wal::kWalMagic);
     EXPECT_EQ(res.version, 1);
 }
 
@@ -681,7 +684,7 @@ TEST_F(WALTest, DISABLED_WALReadHeaderWithStream) {
     EXPECT_TRUE(headerResult.ok());
 
     const wal::Header& header = headerResult.value();
-    EXPECT_EQ(header.magic, 0x41574C01);
+    EXPECT_EQ(header.magic, wal::kWalMagic);
     EXPECT_EQ(header.version, 1);
 }
 
@@ -822,7 +825,7 @@ TEST_F(WALTest, EntryWithAllFields) {
 
 TEST_F(WALTest, HeaderComputeCrc) {
     wal::Header header;
-    header.magic = 0x41574C01;
+    header.magic = wal::kWalMagic;
     header.version = 1;
     header.flags = 0;
     header.creationTime = 1234567890;

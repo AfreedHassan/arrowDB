@@ -18,8 +18,20 @@ using Status = utils::Status;
 using StatusCode = utils::StatusCode;
 template <typename T> using Result = utils::Result<T>;
 
+/// Magic number for WAL file format: "AWL" + version byte (0x01)
+static constexpr uint32_t kWalMagic = 0x41574C01;
+
+/// Maximum allowed embedding dimension to prevent memory exhaustion attacks
+static constexpr uint32_t kMaxDimension = 65536;
+
+/// Minimum valid OperationType enum value
+static constexpr uint16_t kMinOperationType = 1;
+
+/// Maximum valid OperationType enum value
+static constexpr uint16_t kMaxOperationType = 6;
+
 struct Header {
-  uint32_t magic = 0x41574C01;
+  uint32_t magic = kWalMagic;
   uint16_t version = 1;
   uint16_t flags = 0;
   uint64_t creationTime = 0;
@@ -99,21 +111,25 @@ class WAL {
   explicit WAL(std::filesystem::path dbPath);
   ~WAL();
 
-  [[nodiscard]] Result<Header> loadHeader(std::string pathParam = "") const;
+  [[nodiscard]] Result<Header> loadHeader(const std::string& pathParam = "") const;
   [[nodiscard]] Status writeHeader(const Header& header,
-                                   std::string path_param = "") const;
+                                   const std::string& pathParam = "") const;
 
-  [[nodiscard]] Result<std::vector<Entry>> readAll(std::string pathParam = "") const;
+  [[nodiscard]] Result<std::vector<Entry>> readAll(const std::string& pathParam = "") const;
   [[nodiscard]] Result<Entry> readNext(BinaryReader& r) const;
-  [[nodiscard]] Status log(const Entry& entry, std::string pathParam = "",
+  [[nodiscard]] Status log(const Entry& entry, const std::string& pathParam = "",
                            bool reset = false);
 
   void print() const;
+
+  /// Truncate WAL to header-only state (checkpoint operation).
+  /// Creates a fresh WAL with only a header, discarding all entries.
+  [[nodiscard]] Status truncate();
+
   Status ValidateOrCreatePath(const std::filesystem::path& basePath, const std::string& pathParam, std::filesystem::path& outPath) const;
 
  private:
   std::filesystem::path walPath_;
-  uint64_t offset_ = 1;
 };
 
 }  // namespace wal

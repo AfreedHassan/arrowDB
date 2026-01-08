@@ -103,7 +103,7 @@ Result<Header> ParseHeader(BinaryReader &r) {
   if (!r.read(h.magic))
     return Status(StatusCode::kBadHeader, "Failed to read WAL header magic");
 
-  if (h.magic != 0x41574C01)
+  if (h.magic != kWalMagic)
     return Status(StatusCode::kBadHeader, "Invalid WAL magic number");
 
   if (!r.read(h.version))
@@ -123,7 +123,13 @@ Result<Header> ParseHeader(BinaryReader &r) {
   if (!r.read(h.padding))
     return Status(StatusCode::kBadHeader, "Failed to read WAL header padding");
 
-  return std::move(h);
+  // Validate header CRC after reading all fields
+  Status validationStatus = IsHeaderValid(h);
+  if (!validationStatus.ok()) {
+    return validationStatus;
+  }
+
+  return h;
 }
 
 Status WriteHeader(const Header &h, BinaryWriter &w) {
@@ -137,7 +143,7 @@ Status WriteHeader(const Header &h, BinaryWriter &w) {
 }
 
 Status IsHeaderValid(const Header &h) noexcept {
-  if (h.magic != 0x41574C01) {
+  if (h.magic != kWalMagic) {
     return Status(StatusCode::kBadHeader, "Invalid WAL magic number");
   }
   uint32_t computedCrc = utils::crc32((const void *)&h, 16);
@@ -161,10 +167,22 @@ Result<Entry> ParseEntry(BinaryReader &r) {
     return Status(StatusCode::kIoError, "Failed to read entry header fields");
   }
 
+  // Validate OperationType enum to prevent undefined behavior from corrupt data
+  uint16_t typeValue = static_cast<uint16_t>(e.type);
+  if (typeValue < kMinOperationType || typeValue > kMaxOperationType) {
+    return Status(StatusCode::kBadRecord, "Invalid operation type");
+  }
+
   if (!r.read(e.headerCRC) || !r.read(e.payloadLength) || !r.read(e.vectorID) ||
       !r.read(e.dimension) || !r.read(e.padding)) {
     e.print();
     return Status(StatusCode::kIoError, "Failed to read entry metadata fields");
+  }
+
+  // Validate dimension before allocating memory to prevent memory exhaustion
+  if (e.dimension > kMaxDimension) {
+    return Status(StatusCode::kBadRecord,
+                  "Dimension exceeds maximum allowed: " + std::to_string(e.dimension));
   }
 
   e.embedding.resize(e.dimension);
@@ -198,9 +216,15 @@ Result<Entry> ParseEntry(BinaryReader &r) {
     return Status(StatusCode::kBadRecord, "embedding dimension mismatch");
   }
 
-  return std::move(e);
+  return e;
 }
 
+/// Writes an Entry to the binary stream.
+///
+/// Note: This function computes headerCRC, payloadLength, and payloadCRC
+/// on-the-fly from the Entry's data. The corresponding fields in the Entry
+/// struct (e.headerCRC, e.payloadLength, e.payloadCRC) are ignored.
+/// Callers do not need to pre-compute these values.
 Status WriteEntry(const Entry &e, BinaryWriter &w) {
   assert(e.dimension == e.embedding.size());
   w.write(e.type);
@@ -323,23 +347,23 @@ WAL::WAL(std::filesystem::path dbPath) : walPath_(std::move(dbPath)) {
 
 WAL::~WAL() = default;
 
-Result<Header> WAL::loadHeader(std::string pathParam) const {
+Result<Header> WAL::loadHeader(const std::string& pathParam) const {
   namespace fs = std::filesystem;
   fs::path path = walPath_;
 
-  if (pathParam != "") {
+  if (!pathParam.empty()) {
     path = fs::path(pathParam);
   }
 
   return LoadHeader(path);
 }
 
-Status WAL::writeHeader(const Header &header, std::string path_param) const {
+Status WAL::writeHeader(const Header &header, const std::string& pathParam) const {
   namespace fs = std::filesystem;
   fs::path path = walPath_;
 
-  if (path_param != "") {
-    path = fs::path(path_param);
+  if (!pathParam.empty()) {
+    path = fs::path(pathParam);
   }
 
   const std::string filename = "db.wal";
@@ -360,24 +384,24 @@ Status WAL::writeHeader(const Header &header, std::string path_param) const {
   return OkStatus();
 }
 
-Status WAL::log(const Entry &entry, std::string pathParam, bool reset) {
+Status WAL::log(const Entry &entry, const std::string& pathParam, bool reset) {
   namespace fs = std::filesystem;
   fs::path path = walPath_;
   const std::string filename = "db.wal";
-  
-  if (pathParam != "") {
+
+  if (!pathParam.empty()) {
     path = pathParam;
   }
 
   Result<BinaryWriter> res = OpenBinaryWriter(path, filename, !reset);
   if (!res.ok()) {
     return res.status();
-    }
+  }
   BinaryWriter &w = res.value();
 
   if (reset) {
     Header header;
-    header.magic = 0x41574C01;
+    header.magic = kWalMagic;
     header.creationTime = time(nullptr);
     header.headerCrc32 = header.computeCrc32();
     header.padding = 2;
@@ -399,11 +423,11 @@ Status WAL::log(const Entry &entry, std::string pathParam, bool reset) {
 
 Result<Entry> WAL::readNext(BinaryReader &r) const { return ParseEntry(r); }
 
-Result<std::vector<Entry>> WAL::readAll(std::string pathParam) const {
+Result<std::vector<Entry>> WAL::readAll(const std::string& pathParam) const {
   namespace fs = std::filesystem;
   fs::path path = walPath_;
 
-  if (pathParam != "") {
+  if (!pathParam.empty()) {
     path = fs::path(pathParam);
   }
   const std::string filename = "db.wal";
@@ -417,7 +441,7 @@ Result<std::vector<Entry>> WAL::readAll(std::string pathParam) const {
   fs::path filePath = path / filename;
   // Use filesystem for reliable file size detection
   auto fileSize = fs::file_size(filePath);
-  
+
   if (fileSize == 0) {
     return Status(StatusCode::kEof, "File is empty");
   }
@@ -430,26 +454,22 @@ Result<std::vector<Entry>> WAL::readAll(std::string pathParam) const {
   if (!resHeader.ok()) {
     return resHeader.status();
   }
-  Header &header = resHeader.value();
 
   if (!r.good()) {
     return Status(StatusCode::kEof, "Failed to seek past header");
   }
   std::vector<Entry> entries;
-  // Add stream health check to loop condition
+  // Parse entries - fail fast on corruption rather than trying to recover
   while (r.good() && r.tell() < fileEnd) {
     auto curPos = r.tell();
     Result<Entry> resEntry = ParseEntry(r);
     if (!resEntry.ok()) {
-        std::cerr << resEntry.status().message() << "\n";
-        
-        if (r.tell() == curPos) {
-            break;  // No progress, give up
-        }
-        const size_t kEntryHeaderSize = 45;
-        size_t skipSize = kEntryHeaderSize + 4;  
-        r.seek(skipSize, std::ios::cur);
-        continue;
+      // If no progress was made, we're stuck - return what we have
+      if (r.tell() == curPos) {
+        break;
+      }
+      // Otherwise, corruption detected - fail fast
+      return resEntry.status();
     }
     entries.push_back(std::move(resEntry.value()));
   }
@@ -477,6 +497,34 @@ void WAL::print() const {
   for (const auto &entry : entryVec) {
     entry.print();
   }
+}
+
+Status WAL::truncate() {
+  const std::string filename = "db.wal";
+
+  // Open in truncate mode (not append)
+  Result<BinaryWriter> res = OpenBinaryWriter(walPath_, filename, false);
+  if (!res.ok()) {
+    return res.status();
+  }
+  BinaryWriter &w = res.value();
+
+  // Write fresh header
+  Header header;
+  header.magic = kWalMagic;
+  header.creationTime = time(nullptr);
+  header.headerCrc32 = header.computeCrc32();
+  header.padding = 0;
+
+  Status writeStatus = WriteHeader(header, w);
+  if (!writeStatus.ok()) {
+    return writeStatus;
+  }
+
+  w.flush();
+  utils::syncFile((walPath_ / filename).string());
+
+  return OkStatus();
 }
 
 } // namespace arrow::wal

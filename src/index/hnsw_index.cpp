@@ -1,5 +1,6 @@
 // Copyright 2025 ArrowDB
 #include "arrow/hnsw_index.h"
+#include "arrow/utils/status.h"
 
 #include <hnswlib/hnswlib.h>
 #include <algorithm>
@@ -101,5 +102,17 @@ size_t HNSWIndex::size() const {
 
 void HNSWIndex::reserve(size_t max_elements) {
     hnsw_->resizeIndex(max_elements);
+}
+
+utils::Status HNSWIndex::markDelete(VectorID id) {
+    const std::string_view labelNotFoundError = "Label not found";
+    try {
+      hnsw_->markDelete(static_cast<hnswlib::labeltype>(id));
+    } catch (const std::exception& e) {
+      if (e.what() == labelNotFoundError) {
+        return utils::Status(utils::StatusCode::kNotFound, e.what());
+      }
+    }
+    return utils::OkStatus();
 }
 }  // namespace arrow

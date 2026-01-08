@@ -4,6 +4,7 @@
 #include <vector>
 #include <memory>
 #include "types.h"
+#include "utils/status.h"
 
 // Forward declare hnswlib types to avoid header pollution
 namespace hnswlib {
@@ -82,6 +83,14 @@ public:
 
     /// Resize index capacity.
     void reserve(size_t max_elements);
+
+    /// Mark a vector as deleted (lazy deletion).
+    ///
+    /// The vector remains in the index but is excluded from search results.
+    /// The space is reclaimed when the index is rebuilt or compacted.
+    ///
+    /// @param id Vector identifier to mark as deleted
+    utils::Status markDelete(VectorID id);
 };
 
 }  // namespace arrow
