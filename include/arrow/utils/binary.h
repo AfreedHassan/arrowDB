@@ -42,12 +42,6 @@ public:
   }
 
   void flush() { pOstream_->flush(); }
-  
-  // ONLY FOR TESTING
-  std::string str() const {
-    auto* ss = dynamic_cast<std::stringstream*>(pOstream_.get());
-    return ss ? ss->str() : "";
-  }
 };
 
 class BinaryReader {

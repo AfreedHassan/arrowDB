@@ -42,7 +42,7 @@ class Status {
   }
 
   constexpr StatusCode code() const noexcept { return code_; }
-  const std::string_view& message() const noexcept { return message_; }
+  const std::string_view message() const noexcept { return message_; }
 
  private:
   StatusCode code_;

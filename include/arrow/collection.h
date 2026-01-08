@@ -152,9 +152,10 @@ public:
    * @param config The configuration for this collection.
    */
   explicit Collection(CollectionConfig config)
-      : config_(std::move(config)), hnswConfig_({}),
-        index_(
-            std::make_unique<HNSWIndex>(config_.dimensions, config_.metric)) {}
+      : config_(std::move(config)), 
+        hnswConfig_({}), 
+        wal_(std::make_unique<wal::WAL>(wal::WAL("db.wal"))),
+        index_( std::make_unique<HNSWIndex>(config_.dimensions, config_.metric)) {}
 
   /**
    * @brief Constructs a Collection with custom HNSW configuration.
@@ -216,6 +217,8 @@ public:
     if (index_->insert(id, vec)) {
       return;
     } else {
+      //handle failure
+      return;
     }
   }
 

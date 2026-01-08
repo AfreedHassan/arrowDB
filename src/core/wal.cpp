@@ -378,7 +378,7 @@ Status WAL::log(const Entry &entry, std::string pathParam, bool reset) {
   if (reset) {
     Header header;
     header.magic = 0x41574C01;
-    header.creationTime = 919191;
+    header.creationTime = time(nullptr);
     header.headerCrc32 = header.computeCrc32();
     header.padding = 2;
     Status writeStatus = WriteHeader(header, w);

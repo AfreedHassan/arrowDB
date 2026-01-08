@@ -61,7 +61,7 @@ void test() {
                        DataType::Float16);
 
   Collection collection(cfg);
-  collection.printCollectionInfo();
+  //collection.printCollectionInfo();
 
   std::cout << "ArrowDB demo - Collection created successfully.\n";
   std::cout << "Run './tests' to execute integration tests.\n";
