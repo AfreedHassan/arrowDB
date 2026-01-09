@@ -6,6 +6,7 @@ genembeddings/*.txt
 benchmarks/
 notes/
 *.md
+!README.md
 data/
 Makefile
 protos/

@@ -4,10 +4,12 @@ A lightweight vector database implementation in C++.
 
 ## Features
 
-- Vector storage with configurable dimensions
-- Flat search with cosine similarity (dot product)
-- REPL interface for interactive use
-- C++23 standard
+- Vector Storage: Configurable dimensions, support for multiple distance metrics (Cosine, L2, Inner Product)
+- Similarity Search: Fast approximate nearest neighbor search
+- Batch Operations: Efficient bulk insert and search for improved throughput
+- Persistence: Save and load collections with write-ahead logging for durability
+- Data Ingestion: Tools to load embeddings and metadata from external sources
+- Semantic Search: Search with query embeddings to find similar content
 
 ## Building
 
@@ -20,21 +22,31 @@ make
 
 ## Usage
 
-Run the executable:
+### Executables
+  - arrowDB - Main database tool
+  - tests - Test suite
+  - benchmarks - Performance benchmarks
+
+### Ingest Data
 ```bash
-.build/arrowDB
+ ./arrowDB 
 ```
 
-The program currently creates a collection and displays its configuration. A REPL interface is available for interactive commands (type `.exit` to quit).
+### Search Collection
+```bash
+./search "your query text here" 
+```
 
-## Project Structure
+###  Testing
+Run the full test suite:
+```bash
+./tests
+```
 
-- `src/main.cpp` - Main entry point and REPL
-- `includes/vector_store.h` - Vector storage implementation
-- `includes/flat_search.h` - Flat search algorithms
-- `includes/arrow_utils.h` - Utility functions for vector operations
-- `includes/vdb.h` - Core database structures
-
+Run specific tests:
+```bash   
+./tests --gtest_filter=CollectionTest.*
+```
 ## Requirements
 
 - C++23 compatible compiler
