@@ -421,6 +421,52 @@ Status WAL::log(const Entry &entry, const std::string& pathParam, bool reset) {
   return OkStatus();
 }
 
+Status WAL::logBatch(const std::vector<Entry>& entries, const std::string& pathParam) {
+  namespace fs = std::filesystem;
+  fs::path path = walPath_;
+  const std::string filename = "db.wal";
+
+  if (!pathParam.empty()) {
+    path = pathParam;
+  }
+
+  // Check if we need to write a header (file doesn't exist yet)
+  fs::path filePath = path / filename;
+  bool needsHeader = !fs::exists(filePath);
+
+  Result<BinaryWriter> res = OpenBinaryWriter(path, filename, !needsHeader);
+  if (!res.ok()) {
+    return res.status();
+  }
+  BinaryWriter& w = res.value();
+
+  // Write header if needed (first time creating the file)
+  if (needsHeader) {
+    Header header;
+    header.magic = kWalMagic;
+    header.creationTime = time(nullptr);
+    header.headerCrc32 = header.computeCrc32();
+    header.padding = 0;
+    Status headerStatus = WriteHeader(header, w);
+    if (!headerStatus.ok()) {
+      return headerStatus;
+    }
+  }
+
+  // Write all entries
+  for (const Entry& entry : entries) {
+    Status writeStatus = WriteEntry(entry, w);
+    if (!writeStatus.ok()) {
+      return writeStatus;
+    }
+  }
+
+  // Single flush and fsync for entire batch
+  w.flush();
+  utils::syncFile((path / filename).string());
+  return OkStatus();
+}
+
 Result<Entry> WAL::readNext(BinaryReader &r) const { return ParseEntry(r); }
 
 Result<std::vector<Entry>> WAL::readAll(const std::string& pathParam) const {

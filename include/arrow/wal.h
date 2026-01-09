@@ -120,6 +120,11 @@ class WAL {
   [[nodiscard]] Status log(const Entry& entry, const std::string& pathParam = "",
                            bool reset = false);
 
+  /// Log multiple entries in batch with single fsync.
+  /// More efficient than calling log() multiple times (N-1 fewer fsyncs).
+  [[nodiscard]] Status logBatch(const std::vector<Entry>& entries,
+                                const std::string& pathParam = "");
+
   void print() const;
 
   /// Truncate WAL to header-only state (checkpoint operation).
