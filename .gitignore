@@ -1,5 +1,6 @@
 build/
 *.idx
+*.bin
 .plans/
 benchmarks/
 notes/
