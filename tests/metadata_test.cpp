@@ -217,13 +217,13 @@ TEST_F(MetadataUnit, JsonToDistanceMetricInvalid) {
 
 // Test DataType enum conversion
 TEST_F(MetadataUnit, DataTypeToJson) {
-    EXPECT_EQ(utils::dataTypeToJson(DataType::Int16), "Int16");
-    EXPECT_EQ(utils::dataTypeToJson(DataType::Float16), "Float16");
+    EXPECT_EQ(utils::dataTypeToJson(DataType::Int32), "Int32");
+    EXPECT_EQ(utils::dataTypeToJson(DataType::Float32), "Float32");
 }
 
 TEST_F(MetadataUnit, JsonToDataType) {
-    EXPECT_EQ(utils::jsonToDataType("Int16"), DataType::Int16);
-    EXPECT_EQ(utils::jsonToDataType("Float16"), DataType::Float16);
+    EXPECT_EQ(utils::jsonToDataType("Int32"), DataType::Int32);
+    EXPECT_EQ(utils::jsonToDataType("Float32"), DataType::Float32);
 }
 
 TEST_F(MetadataUnit, JsonToDataTypeInvalid) {

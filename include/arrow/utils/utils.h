@@ -131,10 +131,10 @@ inline DistanceMetric jsonToDistanceMetric(const json& j) {
  */
 inline json dataTypeToJson(DataType dtype) {
     switch (dtype) {
-        case DataType::Int16:
-            return "Int16";
-        case DataType::Float16:
-            return "Float16";
+        case DataType::Int32:
+            return "Int32";
+        case DataType::Float32:
+            return "Float32";
         default:
             throw std::runtime_error("Unknown DataType");
     }
@@ -145,10 +145,10 @@ inline json dataTypeToJson(DataType dtype) {
  */
 inline DataType jsonToDataType(const json& j) {
     std::string dtypeStr = j.get<std::string>();
-    if (dtypeStr == "Int16") {
-        return DataType::Int16;
-    } else if (dtypeStr == "Float16") {
-        return DataType::Float16;
+    if (dtypeStr == "Int32") {
+        return DataType::Int32;
+    } else if (dtypeStr == "Float32") {
+        return DataType::Float32;
     } else {
         throw std::runtime_error("Unknown DataType: " + dtypeStr);
     }

@@ -209,7 +209,7 @@ TEST(SIFTTest, DISABLED_SIFT1M_Recall) {
     
     // Create collection with optimized config for 1M vectors
     // NOTE: SIFT ground truth uses L2 distance, so we must use L2 here too
-    CollectionConfig collectionCfg("sift1m", 128, DistanceMetric::L2, DataType::Float16);
+    CollectionConfig collectionCfg("sift1m", 128, DistanceMetric::L2, DataType::Float32);
     HNSWConfig hnswCfg;
     hnswCfg.M = 64;
     hnswCfg.efConstruction = 200;
@@ -273,7 +273,7 @@ TEST(SIFTTest, DISABLED_SIFT_Performance) {
         auto vectors = LoadSIFTVectors(SIFT1M_VECTORS, size);
         
         // SIFT uses L2 distance (ground truth is computed with L2)
-        CollectionConfig cfg("sift_bench", 128, DistanceMetric::L2, DataType::Float16);
+        CollectionConfig cfg("sift_bench", 128, DistanceMetric::L2, DataType::Float32);
         HNSWConfig hnsw_cfg;
         hnsw_cfg.M = 64;
         hnsw_cfg.maxElements = vectors.size();

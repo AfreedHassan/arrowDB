@@ -1,0 +1,28 @@
+#!/bin/bash
+
+# Simple search script for ArrowDB
+# Usage: ./search "query text here"
+
+if [ $# -eq 0 ]; then
+    echo "Usage: $0 \"query text\""
+    exit 1
+fi
+
+QUERY="$1"
+
+echo "Processing query: $QUERY"
+echo ""
+
+# Change to genembeddings directory and generate embedding
+echo "Generating embedding..."
+cd "$(dirname "$0")/genembeddings" || exit 1
+uv run python query.py "$QUERY" || exit 1
+
+# Copy query.bin to build directory
+echo "Copying query.bin to build/"
+cp query.bin ../build/query.bin || exit 1
+
+# Change to build directory and run search
+echo "Searching..."
+cd ../build || exit 1
+./arrowDB query query.bin

@@ -851,3 +851,47 @@ TEST_F(WALTest, HeaderComputeCrc) {
         EXPECT_EQ(resHeaderResult.value().headerCrc32, header.headerCrc32);
     }
 }
+
+TEST_F(WALTest, BatchLogMultipleEntries) {
+  wal::WAL wal(testDir);
+
+  // Create entries to batch log
+  std::vector<wal::Entry> entries;
+  for (uint64_t i = 0; i < 10; ++i) {
+    wal::Entry entry{
+      .type = wal::OperationType::INSERT,
+      .version = 1,
+      .lsn = i + 1,
+      .txid = i + 1,
+      .headerCRC = 0,
+      .payloadLength = 0,
+      .vectorID = i,
+      .dimension = 128,
+      .padding = 0,
+      .embedding = std::vector<float>(128, 1.0f),
+      .payloadCRC = 0
+    };
+    entry.headerCRC = entry.computeHeaderCrc();
+    entry.payloadCRC = entry.computePayloadCrc();
+    entry.payloadLength = entry.computePayloadLength();
+    entries.push_back(entry);
+  }
+
+  // Batch log all entries (this initializes the WAL with header automatically)
+  wal::Status status = wal.logBatch(entries);
+  ASSERT_TRUE(status.ok()) << status.message();
+
+  // Read all entries back
+  auto readResult = wal.readAll();
+  ASSERT_TRUE(readResult.ok()) << readResult.status().message();
+  const auto& readEntries = readResult.value();
+  EXPECT_EQ(readEntries.size(), 10);
+
+  // Verify all entries were read correctly
+  for (size_t i = 0; i < readEntries.size(); ++i) {
+    EXPECT_EQ(readEntries[i].vectorID, i);
+    EXPECT_EQ(readEntries[i].lsn, i + 1);
+    EXPECT_EQ(readEntries[i].txid, i + 1);
+    EXPECT_EQ(readEntries[i].dimension, 128);
+  }
+}
