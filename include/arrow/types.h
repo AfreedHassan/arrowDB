@@ -1,4 +1,4 @@
-#ifndef TYPES_H	
+#ifndef TYPES_H
 #define TYPES_H
 
 #include <cstdint>
@@ -6,6 +6,8 @@
 #include <variant>
 #include <unordered_map>
 #include <expected>
+#include <vector>
+#include "utils/status.h"
 
 namespace arrow {
 	using VectorID = uint64_t;
@@ -24,8 +26,8 @@ namespace arrow {
 	 * @brief Data types for vector storage.
 	 */
 	enum class DataType {
-		Int16,  ///< 16-bit signed integer
-		Float16 ///< 16-bit floating point
+		Int32,  ///< 32-bit signed integer
+		Float32 ///< 32-bit floating point
 	};
 
 	/**
@@ -51,6 +53,19 @@ namespace arrow {
 		VectorID id;										///< Unique identifier for the record
 		std::vector<float> embedding;		///< The vector embedding
 	//Metadata metadata;							///< Metadata (not yet implemented)
+	};
+
+	/// Result of a single insert operation in a batch operation
+	struct InsertResult {
+		VectorID id;           ///< Vector ID that was attempted
+		utils::Status status;  ///< Success or error status
+	};
+
+	/// Aggregate result of batch insert operation
+	struct BatchInsertResult {
+		std::vector<InsertResult> results;  ///< Per-vector results
+		size_t successCount;                ///< Number of successful inserts
+		size_t failureCount;                ///< Number of failed inserts
 	};
 }
 
