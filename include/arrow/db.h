@@ -2,6 +2,7 @@
 #ifndef ARROW_DB_H
 #define ARROW_DB_H
 
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <vector>

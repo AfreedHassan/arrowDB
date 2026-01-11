@@ -33,7 +33,7 @@ namespace arrow {
 	/**
 	 * @brief Index types for vector search.
 	 */
-	enum IndexType {
+	enum class IndexType {
 		HNSW ///< Hierarchical Navigable Small World graph index
 	};
 	// Metadata value types
@@ -66,6 +66,26 @@ namespace arrow {
 		std::vector<InsertResult> results;  ///< Per-vector results
 		size_t successCount;                ///< Number of successful inserts
 		size_t failureCount;                ///< Number of failed inserts
+	};
+
+	/// A document with its similarity score and metadata from a search result
+	struct ScoredDocument {
+		VectorID id;                        ///< Document/vector identifier
+		float score;                        ///< Similarity score (higher = more similar)
+		nlohmann::json metadata;            ///< Associated metadata
+	};
+
+	/// Result of a search operation
+	struct SearchResult {
+		std::vector<ScoredDocument> hits;   ///< Matching documents sorted by score
+		// Future: uint64_t elapsed_ms;     ///< Query execution time
+		// Future: size_t total_count;      ///< Total matches (for pagination)
+	};
+
+	/// Result from index search (id + score only, no metadata)
+	struct IndexSearchResult {
+		VectorID id;    ///< Vector identifier
+		float score;    ///< Similarity score
 	};
 }
 
