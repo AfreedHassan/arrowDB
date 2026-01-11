@@ -35,21 +35,12 @@ public:
             return utils::Status(utils::StatusCode::kAlreadyExists,
                                 "Collection already exists: " + name);
         }
-        // Create the internal CollectionConfig (used by Collection internally)
-        // Bridge from public CollectionConfig to InternalCollectionConfig
-        arrow::InternalCollectionConfig internalConfig(
-            config.name.empty() ? name : config.name,
-            config.dimensions,
-            config.metric,
-            DataType::Float32  // Default to Float32
-        );
 
-        // Create HNSWConfig from IndexOptions
-        HNSWConfig hnswConfig{
-            .maxElements = indexOptions.max_elements,
-            .M = indexOptions.M,
-            .efConstruction = indexOptions.ef_construction
-        };
+        // Create config with name if not set
+        CollectionConfig effectiveConfig = config;
+        if (effectiveConfig.name.empty()) {
+            effectiveConfig.name = name;
+        }
 
         // Determine persistence path
         std::filesystem::path collectionPath;
@@ -57,12 +48,12 @@ public:
             collectionPath = options_.data_dir / name;
         }
 
-        // Create the collection
+        // Create the collection using new Pimpl-based API
         std::unique_ptr<Collection> collection;
         if (collectionPath.empty()) {
-            collection = std::make_unique<Collection>(internalConfig, hnswConfig);
+            collection = std::make_unique<Collection>(effectiveConfig, indexOptions);
         } else {
-            collection = std::make_unique<Collection>(internalConfig, hnswConfig, collectionPath);
+            collection = std::make_unique<Collection>(effectiveConfig, indexOptions, collectionPath);
         }
 
         Collection* ptr = collection.get();
