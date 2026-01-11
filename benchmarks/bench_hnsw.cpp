@@ -1,6 +1,6 @@
 // Copyright 2025 ArrowDB
 #include <benchmark/benchmark.h>
-#include "arrow/hnsw_index.h"
+#include "internal/hnsw_index.h"
 #include "arrow/collection.h"
 
 #include <memory>
