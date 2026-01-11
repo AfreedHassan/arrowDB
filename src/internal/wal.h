@@ -7,9 +7,9 @@
 #include <string>
 #include <vector>
 
-#include "types.h"
-#include "utils/binary.h"
-#include "utils/result.h"
+#include "arrow/types.h"
+#include "binary.h"
+#include "arrow/utils/result.h"
 
 namespace arrow {
 namespace wal {

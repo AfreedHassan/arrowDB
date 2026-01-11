@@ -3,8 +3,8 @@
 
 #include <vector>
 #include <memory>
-#include "types.h"
-#include "utils/status.h"
+#include "arrow/types.h"
+#include "arrow/utils/status.h"
 
 // Forward declare hnswlib types to avoid header pollution
 namespace hnswlib {
@@ -13,13 +13,6 @@ namespace hnswlib {
 }
 
 namespace arrow {
-
-struct SearchResult {
-    VectorID id;
-    float score;
-};
-
-enum class DistanceMetric;
 
 /// Configuration for HNSW index construction.
 /// 
@@ -59,9 +52,9 @@ public:
     /// Search for k nearest neighbors.
     /// @param ef Search beam width (higher = better recall, slower)
     ///            Default 200 provides ~91% recall@10 for 100K vectors with M=64
-    std::vector<SearchResult> search(
-        const std::vector<float>& query, 
-        size_t k, 
+    std::vector<IndexSearchResult> search(
+        const std::vector<float>& query,
+        size_t k,
         size_t ef = 200  // Optimized for 100K+ vectors (benchmark-optimized)
     ) const;
     
