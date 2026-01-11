@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "arrow/hnsw_index.h"
+#include "internal/hnsw_index.h"
 #include "test_util.h"
 #include <filesystem>
 #include <fstream>
@@ -96,7 +96,7 @@ TEST_F(HNSWIndexTest, RecallAt10) {
     
     for (size_t q = 0; q < num_queries; ++q) {
         std::vector<float> query = RandomVector(dim, gen);
-        std::vector<SearchResult> results = index.search(query, k, 100);
+        std::vector<IndexSearchResult> results = index.search(query, k, 100);
         
         // Verify we got k results
         EXPECT_EQ(results.size(), k);

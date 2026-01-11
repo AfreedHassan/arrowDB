@@ -1,7 +1,9 @@
 #include "arrow/collection.h"
+#include "internal/wal.h"
 #include "test_util.h"
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <gtest/gtest.h>
 
 using namespace arrow;
@@ -29,21 +31,18 @@ protected:
 };
 
 TEST_F(CollectionTest, CreateCollection) {
-  CollectionConfig cfg("test_collection", 128, DistanceMetric::Cosine,
-                       DataType::Float32);
+  CollectionConfig cfg{.name = "test_collection", .dimensions = 128, .metric = DistanceMetric::Cosine};
 
   Collection collection(cfg);
 
   EXPECT_EQ(collection.name(), "test_collection");
   EXPECT_EQ(collection.dimension(), 128);
   EXPECT_EQ(collection.metric(), DistanceMetric::Cosine);
-  EXPECT_EQ(collection.dtype(), DataType::Float32);
   EXPECT_EQ(collection.size(), 0);
 }
 
 TEST_F(CollectionTest, InsertVectors) {
-  CollectionConfig cfg("test_collection", 128, DistanceMetric::Cosine,
-                       DataType::Float32);
+  CollectionConfig cfg{.name = "test_collection", .dimensions = 128, .metric = DistanceMetric::Cosine};
 
   Collection collection(cfg);
 
@@ -60,8 +59,7 @@ TEST_F(CollectionTest, InsertVectors) {
 }
 
 TEST_F(CollectionTest, SearchFunctionality) {
-  CollectionConfig cfg("test_collection", 128, DistanceMetric::Cosine,
-                       DataType::Float32);
+  CollectionConfig cfg{.name = "test_collection", .dimensions = 128, .metric = DistanceMetric::Cosine};
 
   Collection collection(cfg);
 
@@ -78,7 +76,7 @@ TEST_F(CollectionTest, SearchFunctionality) {
   // Perform search
   std::vector<float> query = RandomVector(dim, gen);
   const size_t k = 10;
-  std::vector<SearchResult> results = collection.search(query, k);
+  std::vector<IndexSearchResult> results = collection.search(query, k);
 
   EXPECT_EQ(results.size(), k);
 
@@ -90,8 +88,7 @@ TEST_F(CollectionTest, SearchFunctionality) {
 }
 
 TEST_F(CollectionTest, SearchWithDifferentEf) {
-  CollectionConfig cfg("test_collection", 128, DistanceMetric::Cosine,
-                       DataType::Float32);
+  CollectionConfig cfg{.name = "test_collection", .dimensions = 128, .metric = DistanceMetric::Cosine};
 
   Collection collection(cfg);
 
@@ -110,14 +107,13 @@ TEST_F(CollectionTest, SearchWithDifferentEf) {
 
   // Test with different ef values
   for (size_t ef : {10, 50, 100}) {
-    std::vector<SearchResult> results = collection.search(query, k, ef);
+    std::vector<IndexSearchResult> results = collection.search(query, k, ef);
     EXPECT_EQ(results.size(), k) << "ef=" << ef;
   }
 }
 
 TEST_F(CollectionTest, SearchPerformance) {
-  CollectionConfig cfg("test_collection", 128, DistanceMetric::Cosine,
-                       DataType::Float32);
+  CollectionConfig cfg{.name = "test_collection", .dimensions = 128, .metric = DistanceMetric::Cosine};
 
   Collection collection(cfg);
 
@@ -136,7 +132,7 @@ TEST_F(CollectionTest, SearchPerformance) {
 
   // Measure search latency with ef=100
   auto start = std::chrono::high_resolution_clock::now();
-  std::vector<SearchResult> results = collection.search(query, k, 100);
+  std::vector<IndexSearchResult> results = collection.search(query, k, 100);
   auto end = std::chrono::high_resolution_clock::now();
   auto duration =
       std::chrono::duration_cast<std::chrono::microseconds>(end - start);
@@ -152,8 +148,7 @@ TEST_F(CollectionTest, SearchPerformance) {
 // ============================================================================
 
 TEST_F(CollectionTest, SaveCreatesDirectory) {
-  CollectionConfig cfg("test_collection", 128, DistanceMetric::Cosine,
-                       DataType::Float32);
+  CollectionConfig cfg{.name = "test_collection", .dimensions = 128, .metric = DistanceMetric::Cosine};
   Collection collection(cfg);
 
   std::string save_path = GetTestPath("test_collection");
@@ -165,8 +160,7 @@ TEST_F(CollectionTest, SaveCreatesDirectory) {
 }
 
 TEST_F(CollectionTest, SaveCreatesRequiredFiles) {
-  CollectionConfig cfg("test_collection", 128, DistanceMetric::Cosine,
-                       DataType::Float32);
+  CollectionConfig cfg{.name = "test_collection", .dimensions = 128, .metric = DistanceMetric::Cosine};
   Collection collection(cfg);
 
   // Insert some vectors
@@ -190,8 +184,7 @@ TEST_F(CollectionTest, SaveCreatesRequiredFiles) {
 }
 
 TEST_F(CollectionTest, SaveIncludesMetadata) {
-  CollectionConfig cfg("test_collection", 128, DistanceMetric::Cosine,
-                       DataType::Float32);
+  CollectionConfig cfg{.name = "test_collection", .dimensions = 128, .metric = DistanceMetric::Cosine};
   Collection collection(cfg);
 
   // Insert vectors with metadata
@@ -216,8 +209,7 @@ TEST_F(CollectionTest, SaveIncludesMetadata) {
 
 TEST_F(CollectionTest, LoadFromDirectory) {
   // Create and save a collection
-  CollectionConfig cfg("test_collection", 128, DistanceMetric::Cosine,
-                       DataType::Float32);
+  CollectionConfig cfg{.name = "test_collection", .dimensions = 128, .metric = DistanceMetric::Cosine};
   Collection original(cfg);
 
   std::mt19937 gen(42);
@@ -238,18 +230,14 @@ TEST_F(CollectionTest, LoadFromDirectory) {
   EXPECT_EQ(loaded.name(), "test_collection");
   EXPECT_EQ(loaded.dimension(), 128);
   EXPECT_EQ(loaded.metric(), DistanceMetric::Cosine);
-  EXPECT_EQ(loaded.dtype(), DataType::Float32);
   EXPECT_EQ(loaded.size(), 100);
 }
 
 TEST_F(CollectionTest, RoundTripPreservesData) {
-  // Create collection with custom HNSW config
-  CollectionConfig cfg("test_collection", 64, DistanceMetric::Cosine,
-                       DataType::Float32);
-  HNSWConfig hnsw_cfg;
-  hnsw_cfg.M = 32;
-  hnsw_cfg.efConstruction = 200;
-  Collection original(cfg, hnsw_cfg);
+  // Create collection with custom index options
+  CollectionConfig cfg{.name = "test_collection", .dimensions = 64, .metric = DistanceMetric::Cosine};
+  IndexOptions indexOpts{.max_elements = 1000000, .M = 32, .ef_construction = 200};
+  Collection original(cfg, indexOpts);
 
   std::mt19937 gen(42);
   std::vector<std::vector<float>> vectors;
@@ -267,8 +255,6 @@ TEST_F(CollectionTest, RoundTripPreservesData) {
   ASSERT_TRUE(loadResult.ok()) << loadResult.status().message();
   Collection loaded = std::move(loadResult.value());
   EXPECT_EQ(loaded.size(), 50);
-  EXPECT_EQ(loaded.hnswConfig().M, 32);
-  EXPECT_EQ(loaded.hnswConfig().efConstruction, 200);
 
   // Verify search results match
   for (size_t i = 0; i < std::min(size_t(10), vectors.size()); ++i) {
@@ -284,8 +270,7 @@ TEST_F(CollectionTest, RoundTripPreservesData) {
 }
 
 TEST_F(CollectionTest, RoundTripPreservesMetadata) {
-  CollectionConfig cfg("test_collection", 128, DistanceMetric::Cosine,
-                       DataType::Float32);
+  CollectionConfig cfg{.name = "test_collection", .dimensions = 128, .metric = DistanceMetric::Cosine};
   Collection original(cfg);
 
   std::mt19937 gen(42);
@@ -334,17 +319,23 @@ TEST_F(CollectionTest, LoadReturnsErrorOnMissingMetaJson) {
 }
 
 TEST_F(CollectionTest, LoadReturnsErrorOnMissingIndexBin) {
-  CollectionConfig cfg("test_collection", 128, DistanceMetric::Cosine,
-                       DataType::Float32);
-  Collection collection(cfg);
-
   std::string save_path = GetTestPath("incomplete_collection");
   std::filesystem::create_directories(save_path);
 
-  // Save only meta.json
+  // Manually create meta.json without index.bin
   std::string meta_path =
       (std::filesystem::path(save_path) / "meta.json").string();
-  utils::exportCollectionConfigToJson(cfg, HNSWConfig{}, meta_path);
+  std::ofstream metaFile(meta_path);
+  metaFile << R"({
+    "name": "test_collection",
+    "dimensions": 128,
+    "metric": "Cosine",
+    "dtype": "Float32",
+    "idxType": "HNSW",
+    "hnsw": {"maxElements": 1000000, "M": 64, "efConstruction": 200},
+    "recovery": {"lastPersistedLsn": 0, "lastPersistedTxid": 0, "cleanShutdown": true}
+  })";
+  metaFile.close();
 
   auto result = Collection::load(save_path);
   EXPECT_FALSE(result.ok());
@@ -384,8 +375,7 @@ protected:
   }
 
   CollectionConfig GetTestConfig(const std::string &name = "test_collection") {
-    return CollectionConfig(name, 128, DistanceMetric::Cosine,
-                            DataType::Float32);
+    return CollectionConfig{.name = name, .dimensions = 128, .metric = DistanceMetric::Cosine};
   }
 };
 
@@ -540,9 +530,7 @@ TEST_F(CollectionWalTest, CrashRecoveryReplaysWal) {
 
     auto saveStatus = collection.save(persistencePath);
     ASSERT_TRUE(saveStatus.ok()) << saveStatus.message();
-
-    EXPECT_EQ(collection.currentLsn(), 11);
-    EXPECT_EQ(collection.currentTxid(), 11);
+    EXPECT_EQ(collection.size(), 10);
   }
 
   // Phase 2: Load saved state, insert 10 more vectors, then "crash" (no save)
@@ -558,8 +546,6 @@ TEST_F(CollectionWalTest, CrashRecoveryReplaysWal) {
     }
 
     EXPECT_EQ(collection2.size(), 20);
-    EXPECT_EQ(collection2.currentLsn(), 21);
-    EXPECT_EQ(collection2.currentTxid(), 21);
     // No save - simulating crash
   }
 
@@ -570,8 +556,6 @@ TEST_F(CollectionWalTest, CrashRecoveryReplaysWal) {
 
   EXPECT_EQ(recovered.size(), 20);
   EXPECT_TRUE(recovered.recoveredFromWal());
-  EXPECT_EQ(recovered.currentLsn(), 21);
-  EXPECT_EQ(recovered.currentTxid(), 21);
 }
 
 TEST_F(CollectionWalTest, LoadWithoutCrashDoesNotReplayWal) {
@@ -597,8 +581,6 @@ TEST_F(CollectionWalTest, LoadWithoutCrashDoesNotReplayWal) {
 
   EXPECT_EQ(recovered.size(), 5);
   EXPECT_FALSE(recovered.recoveredFromWal());
-  EXPECT_EQ(recovered.currentLsn(), 6);
-  EXPECT_EQ(recovered.currentTxid(), 6);
 }
 
 TEST_F(CollectionWalTest, WalReplayPreservesMetadata) {
@@ -702,17 +684,13 @@ TEST_F(CollectionWalTest, DeleteReplayMarksVectorAsDeleted) {
   }
 }
 
-TEST_F(CollectionWalTest, LsnTxidContinuityAcrossRestarts) {
+TEST_F(CollectionWalTest, ContinuityAcrossRestarts) {
   auto config = GetTestConfig();
   std::string persistencePath = GetTestPath("continuity");
 
-  uint64_t expectedLsn = 1;
-  uint64_t expectedTxid = 1;
-
+  // Phase 1: Create, insert 5 vectors, save
   {
     Collection collection(config, persistencePath);
-    EXPECT_EQ(collection.currentLsn(), expectedLsn);
-    EXPECT_EQ(collection.currentTxid(), expectedTxid);
 
     for (size_t i = 0; i < 5; ++i) {
       std::vector<float> vec = RandomVector(128, gen);
@@ -720,32 +698,38 @@ TEST_F(CollectionWalTest, LsnTxidContinuityAcrossRestarts) {
       ASSERT_TRUE(status.ok()) << status.message();
     }
 
-    expectedLsn += 5;
-    expectedTxid += 5;
-    EXPECT_EQ(collection.currentLsn(), expectedLsn);
-    EXPECT_EQ(collection.currentTxid(), expectedTxid);
+    EXPECT_EQ(collection.size(), 5);
 
     auto saveStatus = collection.save(persistencePath);
     ASSERT_TRUE(saveStatus.ok()) << saveStatus.message();
   }
 
-  auto loadResult = Collection::load(persistencePath);
-  ASSERT_TRUE(loadResult.ok()) << loadResult.status().message();
-  Collection collection = std::move(loadResult.value());
+  // Phase 2: Load, insert 5 more, save
+  {
+    auto loadResult = Collection::load(persistencePath);
+    ASSERT_TRUE(loadResult.ok()) << loadResult.status().message();
+    Collection collection = std::move(loadResult.value());
 
-  EXPECT_EQ(collection.currentLsn(), expectedLsn);
-  EXPECT_EQ(collection.currentTxid(), expectedTxid);
+    EXPECT_EQ(collection.size(), 5);
 
-  for (size_t i = 5; i < 10; ++i) {
-    std::vector<float> vec = RandomVector(128, gen);
-    auto status = collection.insert(i, vec);
-    ASSERT_TRUE(status.ok()) << status.message();
+    for (size_t i = 5; i < 10; ++i) {
+      std::vector<float> vec = RandomVector(128, gen);
+      auto status = collection.insert(i, vec);
+      ASSERT_TRUE(status.ok()) << status.message();
+    }
+
+    EXPECT_EQ(collection.size(), 10);
+
+    auto saveStatus = collection.save(persistencePath);
+    ASSERT_TRUE(saveStatus.ok()) << saveStatus.message();
   }
 
-  expectedLsn += 5;
-  expectedTxid += 5;
-  EXPECT_EQ(collection.currentLsn(), expectedLsn);
-  EXPECT_EQ(collection.currentTxid(), expectedTxid);
+  // Phase 3: Load and verify total count
+  auto loadResult = Collection::load(persistencePath);
+  ASSERT_TRUE(loadResult.ok()) << loadResult.status().message();
+  Collection recovered = std::move(loadResult.value());
+
+  EXPECT_EQ(recovered.size(), 10);
 }
 
 TEST_F(CollectionWalTest, EmptyWalDoesNotCauseRecovery) {
@@ -833,7 +817,7 @@ protected:
 };
 
 TEST_F(CollectionBatchTest, InsertBatchSuccess) {
-  CollectionConfig cfg("test", 128, DistanceMetric::Cosine, DataType::Float32);
+  CollectionConfig cfg{.name = "test", .dimensions = 128, .metric = DistanceMetric::Cosine};
   Collection collection(cfg);
 
   // Prepare batch
@@ -854,7 +838,7 @@ TEST_F(CollectionBatchTest, InsertBatchSuccess) {
 }
 
 TEST_F(CollectionBatchTest, InsertBatchPartialFailure) {
-  CollectionConfig cfg("test", 128, DistanceMetric::Cosine, DataType::Float32);
+  CollectionConfig cfg{.name = "test", .dimensions = 128, .metric = DistanceMetric::Cosine};
   Collection collection(cfg);
 
   // Mixed valid and invalid dimensions
@@ -883,7 +867,7 @@ TEST_F(CollectionBatchTest, InsertBatchPartialFailure) {
 }
 
 TEST_F(CollectionBatchTest, SearchBatchParallel) {
-  CollectionConfig cfg("test", 128, DistanceMetric::Cosine, DataType::Float32);
+  CollectionConfig cfg{.name = "test", .dimensions = 128, .metric = DistanceMetric::Cosine};
   Collection collection(cfg);
 
   // Insert vectors using batch insert
@@ -917,7 +901,7 @@ TEST_F(CollectionBatchTest, SearchBatchParallel) {
 }
 
 TEST_F(CollectionBatchTest, SearchBatchDimensionMismatch) {
-  CollectionConfig cfg("test", 128, DistanceMetric::Cosine, DataType::Float32);
+  CollectionConfig cfg{.name = "test", .dimensions = 128, .metric = DistanceMetric::Cosine};
   Collection collection(cfg);
 
   // Insert a vector
@@ -935,7 +919,7 @@ TEST_F(CollectionBatchTest, SearchBatchDimensionMismatch) {
 }
 
 TEST_F(CollectionBatchTest, InsertBatchWithPersistence) {
-  auto config = CollectionConfig("test", 128, DistanceMetric::Cosine, DataType::Float32);
+  CollectionConfig config{.name = "test", .dimensions = 128, .metric = DistanceMetric::Cosine};
   std::string persistencePath = GetTestPath("batch_wal");
 
   // Insert batch with WAL

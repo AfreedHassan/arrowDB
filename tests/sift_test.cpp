@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 #include "arrow/collection.h"
-#include "arrow/hnsw_index.h"
+#include "internal/hnsw_index.h"
 #include <chrono>
 #include <iostream>
 #include <vector>
@@ -136,7 +136,7 @@ std::vector<std::vector<VectorID>> LoadSIFTGroundTruth(
  */
 double CalculateSIFTRecall(
     const std::vector<std::vector<VectorID>>& groundTruthFull,
-    const std::vector<std::vector<arrow::SearchResult>>& results,
+    const std::vector<std::vector<arrow::IndexSearchResult>>& results,
     size_t k
 ) {
     if (groundTruthFull.size() != results.size()) {
@@ -209,13 +209,10 @@ TEST(SIFTTest, DISABLED_SIFT1M_Recall) {
     
     // Create collection with optimized config for 1M vectors
     // NOTE: SIFT ground truth uses L2 distance, so we must use L2 here too
-    CollectionConfig collectionCfg("sift1m", 128, DistanceMetric::L2, DataType::Float32);
-    HNSWConfig hnswCfg;
-    hnswCfg.M = 64;
-    hnswCfg.efConstruction = 200;
-    hnswCfg.maxElements = vectors.size();
-    
-    Collection collection(collectionCfg, hnswCfg);
+    CollectionConfig collectionCfg{.name = "sift1m", .dimensions = 128, .metric = DistanceMetric::L2};
+    IndexOptions indexOpts{.max_elements = vectors.size(), .M = 64, .ef_construction = 200};
+
+    Collection collection(collectionCfg, indexOpts);
     
     // Insert vectors
     std::cout << "Building HNSW index..." << std::endl;
@@ -236,7 +233,7 @@ TEST(SIFTTest, DISABLED_SIFT1M_Recall) {
         std::cout << "Running searches..." << std::endl;
         start = std::chrono::high_resolution_clock::now();
         
-        std::vector<std::vector<SearchResult>> results;
+        std::vector<std::vector<IndexSearchResult>> results;
         results.reserve(queries.size());
         
         // For L2 distance with 1M vectors, use EF=400 for >90% recall@100
@@ -273,12 +270,10 @@ TEST(SIFTTest, DISABLED_SIFT_Performance) {
         auto vectors = LoadSIFTVectors(SIFT1M_VECTORS, size);
         
         // SIFT uses L2 distance (ground truth is computed with L2)
-        CollectionConfig cfg("sift_bench", 128, DistanceMetric::L2, DataType::Float32);
-        HNSWConfig hnsw_cfg;
-        hnsw_cfg.M = 64;
-        hnsw_cfg.maxElements = vectors.size();
-        
-        Collection collection(cfg, hnsw_cfg);
+        CollectionConfig cfg{.name = "sift_bench", .dimensions = 128, .metric = DistanceMetric::L2};
+        IndexOptions indexOpts{.max_elements = vectors.size(), .M = 64, .ef_construction = 200};
+
+        Collection collection(cfg, indexOpts);
         
         auto start = std::chrono::high_resolution_clock::now();
         for (size_t i = 0; i < vectors.size(); ++i) {

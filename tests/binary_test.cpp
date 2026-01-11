@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "arrow/utils/binary.h"
+#include "internal/binary.h"
 #include <filesystem>
 #include <sstream>
 #include <vector>
