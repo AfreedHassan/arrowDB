@@ -1,5 +1,6 @@
 // Copyright 2025 ArrowDB
-#include "arrow/collection.h"
+#include "arrow/arrow.h"
+#include "arrow_embed.h"
 #include <cstdio>
 #include <iostream>
 #include <string>
@@ -7,7 +8,57 @@
 #include <fstream>
 #include <vector>
 #include <chrono>
-#include <random>
+#include <embedder/embedder.h>
+
+#ifndef ARROW_EMBEDDING_MODEL_DIR
+#define ARROW_EMBEDDING_MODEL_DIR ""
+#endif
+
+#ifndef ARROW_EMBEDDING_DEFAULT_MODEL
+#define ARROW_EMBEDDING_DEFAULT_MODEL "all-MiniLM-L6-v2"
+#endif
+
+class CLIArgs {
+public:
+  std::unordered_map<std::string, std::string> flags;
+  std::string command;
+
+  CLIArgs(int argc, char* argv[]) {
+    if (argc < 2) return;
+    command = argv[1];
+
+    // Parse flags in format: -flag value
+    for (int i = 2; i < argc; ++i) {
+      std::string arg = argv[i];
+      if (arg[0] == '-' && i + 1 < argc) {
+        std::string flag = arg.substr(1);  // Remove leading '-'
+        std::string value = argv[++i];
+        flags[flag] = value;
+      }
+    }
+  }
+
+  std::string get(const std::string& flag, const std::string& defaultValue = "") const {
+    auto it = flags.find(flag);
+    return (it != flags.end()) ? it->second : defaultValue;
+  }
+
+  bool has(const std::string& flag) const {
+    return flags.find(flag) != flags.end();
+  }
+};
+
+// Rust FFI function declarations (from arrow_embed library)
+extern "C" {
+  int32_t arrow_embed_init(const char* model_path, const char* tokenizer_name);
+  EmbeddingResult arrow_embed_text(const char* text);
+  void arrow_embed_free(EmbeddingResult result);
+  size_t arrow_embed_dimension();
+}
+
+#ifndef ARROW_EMBEDDING_MODEL_DIR
+#define ARROW_EMBEDDING_MODEL_DIR = ""
+#endif
 
 typedef enum {
   META_COMMAND_SUCCESS,
@@ -38,22 +89,8 @@ public:
 
 void prompt() { std::cout << "db > "; }
 
-int repl() {
-  InputBuffer input;
-  while (true) {
-    prompt();
-    input.read();
-
-    if (input.buffer == ".exit") {
-      return EXIT_SUCCESS;
-    } else {
-      std::cout << "Unrecognized command '" << input.buffer << "'.\n";
-    }
-  }
-}
-
 using arrow::Collection;
-using arrow::CollectionConfig;
+using arrow::InternalCollectionConfig;
 using arrow::DataType;
 using arrow::DistanceMetric;
 using arrow::Metadata;
@@ -61,8 +98,8 @@ using arrow::VectorID;
 
 void test() {
   // Create a simple collection demo
-  CollectionConfig cfg("demo_collection", 128, DistanceMetric::Cosine,
-                       DataType::Float32);
+  InternalCollectionConfig cfg("demo_collection", 128, DistanceMetric::Cosine,
+                               DataType::Float32);
 
   Collection collection(cfg);
   //collection.printCollectionInfo();
@@ -124,45 +161,6 @@ void test() {
   }
 }
 
-/*
-void write_test() {
-  using namespace arrow;
-  std::filesystem::path testPath = "/tmp/test_wal_dir";
-  std::filesystem::create_directories(testPath);
-  std::string walFile = (testPath / "db.wal").string();
-
-  wal::Header header;
-  header.magic = 0x41574C01;
-  header.version = 1;
-  header.flags = 0;
-  header.creationTime = 1234567890;
-  header.headerCrc32 = header.computeCrc32();
-  header.padding = 0;
-
-  std::ofstream file(walFile, std::ios::binary | std::ios::trunc);
-  BinaryWriter writer(file);
-  wal::WriteHeader(header, writer);
-  writer.flush();
-  file.close();
-
-  std::cout << "File size after writing header: "
-            << std::filesystem::file_size(walFile) << " bytes" << std::endl;
-
-  auto f = std::make_unique<std::ifstream>(walFile, std::ios::binary);
-  BinaryReader reader(std::move(f));
-  auto result = wal::ParseHeader(reader);
-  if (result.ok()) {
-    std::cout << "ParseHeader succeeded" << std::endl;
-  } else {
-    std::cerr << "ParseHeader failed: " << result.status().message()
-              << std::endl;
-  }
-
-  std::filesystem::remove_all(testPath);
-}
-*/
-
-
 using namespace arrow::wal;
 
 // Helper function to read a specific line from a text file by line number
@@ -183,18 +181,18 @@ std::string getLineFromFile(const std::string& filePath, size_t lineNumber) {
   return line;
 }
 
-void ingest() {
+void ingest(const std::string& embeddingsPath = "embeddings.bin",
+            const std::string& textPath = "wikitext.txt",
+            const std::string& idsPath = "",
+            const std::string& outputPath = "wiki_collection") {
   const size_t dims = 384;
-  const std::string embeddingsPath = "embeddings.bin";
-  const std::string textPath = "wikitext.txt";
-  const std::string outputPath = "wiki_collection";
   const size_t batchSize = 10000;  // Insert 10K vectors at a time
 
   std::cout << "Starting ingestion from " << embeddingsPath << " and " << textPath
             << "...\n";
 
   // Create collection
-  CollectionConfig cfg("wiki", dims, DistanceMetric::Cosine, DataType::Float32);
+  InternalCollectionConfig cfg("owt", dims, DistanceMetric::L2, DataType::Float32);
   Collection collection(cfg);
 
   auto startTime = std::chrono::high_resolution_clock::now();
@@ -339,26 +337,63 @@ void searchWithQueryFile(const std::string& collectionPath,
   // Perform search
   auto searchResults = collection.search(query, k, ef);
 
+  std::ofstream outputFile("output.txt");
   std::cout << "Search Results:\n";
   std::cout << std::string(80, '=') << "\n";
   for (size_t i = 0; i < searchResults.size(); ++i) {
     const auto& sr = searchResults[i];
     std::string text = getLineFromFile(textPath, sr.id);
+    outputFile << text << "\n";
 
-    // Truncate text to 75 chars for display
+    /* Truncate text to 75 chars for display
     if (text.length() > 75) {
       text = text.substr(0, 75) + "...";
     }
+    */
 
     std::cout << (i + 1) << ". [Score: " << sr.score << "] "
               << text << "\n";
   }
   std::cout << std::string(80, '=') << "\n";
+  outputFile.close();
 }
 
-void searchExample() {
-  // Default example with random query
-  auto resultOrError = Collection::load("wiki_collection");
+
+std::string defaultModelPath() {
+  std::string defaultModelDir = ARROW_EMBEDDING_MODEL_DIR;
+  std::string defaultModel = ARROW_EMBEDDING_DEFAULT_MODEL;
+  std::string defaultPath = defaultModelDir+"/"+defaultModel;
+  return defaultPath;
+}
+// Initialize the Rust embedder with model and tokenizer
+bool initEmbedder(const std::string& modelPath = "models/all-MiniLM-L6-v2.onnx",
+                  const std::string& tokenizerName = "sentence-transformers/all-MiniLM-L6-v2") {
+  std::cout << "Initializing embedder...\n";
+  int32_t result = arrow_embed_init(modelPath.c_str(), tokenizerName.c_str());
+  if (result != 0) {
+    std::cerr << "Error: Failed to initialize embedder (code: " << result << ")\n";
+    return false;
+  }
+  std::cout << "✓ Embedder initialized (dim=" << arrow_embed_dimension() << ")\n";
+  return true;
+}
+
+void searchWithText(const std::string& queryText,
+                    const std::string& collectionPath = "owt_collection",
+                    const std::string& textPath = "openwebtext.txt",
+                    const std::string& modelPath = "",
+                    uint32_t k = 10,
+                    uint32_t ef = 200) {
+  // Resolve to default model 
+  if (modelPath == "") {
+
+  }
+  // Initialize embedder
+  Embedder embedder(modelPath); 
+  if (!embedder.ok()) return;
+
+  // Load collection
+  auto resultOrError = Collection::load(collectionPath);
   if (!resultOrError.ok()) {
     std::cerr << "Error loading collection: "
               << resultOrError.status().message() << "\n";
@@ -368,39 +403,100 @@ void searchExample() {
   Collection& collection = resultOrError.value();
   std::cout << "✓ Loaded collection: " << collection.name() << "\n";
   std::cout << "  Dimensions: " << collection.dimension() << "\n";
-  std::cout << "  Metric: Cosine\n";
   std::cout << "  Total vectors: " << collection.size() << "\n\n";
 
-  // Generate random query vector for demo
-  std::mt19937 rng(42);
-  std::uniform_real_distribution<float> uniform(0.0f, 1.0f);
-  std::vector<float> query(collection.dimension());
-  for (uint32_t i = 0; i < collection.dimension(); ++i) {
-    query[i] = uniform(rng);
-  }
+  // Embed query text
+  std::cout << "Embedding query: \"" << queryText << "\"\n";
+  std::vector<float> query = embedder.embed(queryText.c_str());
 
-  std::cout << "Searching for 10 nearest neighbors...\n\n";
-  auto searchResults = collection.search(query, 10, 200);
+  if (query.empty()) return;
 
-  std::cout << "Top 10 results:\n";
+  std::cout << "✓ Query embedded successfully\n";
+  std::cout << "Searching for " << k << " nearest neighbors...\n\n";
+
+  // Perform search
+  auto searchResults = collection.search(query, k, ef);
+
+  std::cout << "Search Results:\n";
+  std::cout << std::string(80, '=') << "\n";
   for (size_t i = 0; i < searchResults.size(); ++i) {
     const auto& sr = searchResults[i];
-    std::cout << (i + 1) << ". Vector ID: " << sr.id
-              << ", Score: " << -sr.score << "\n";
+    std::string text = getLineFromFile(textPath, sr.id);
+
+    std::cout << (i + 1) << ". [Score: " << sr.score << "] "
+              << text << "\n";
   }
+  std::cout << std::string(80, '=') << "\n";
 }
 
 int main(int argc, char* argv[]) {
-  if (argc >= 3 && std::string(argv[1]) == "query") {
-    // Usage: ./arrowDB query <query_file> [k] [ef]
-    std::string queryFile = argv[2];
-    uint32_t k = (argc >= 4) ? std::stoul(argv[3]) : 10;
-    uint32_t ef = (argc >= 5) ? std::stoul(argv[4]) : 200;
-    searchWithQueryFile("wiki_collection", queryFile, "wikitext.txt", k, ef);
-  } else if (argc > 1 && std::string(argv[1]) == "search") {
-    searchExample();
+  CLIArgs args(argc, argv);
+
+  if (args.command == "query") {
+    std::string queryFile = args.get("f");
+    std::string collectionPath = args.get("c", "wiki_collection");
+    std::string textFile = args.get("t", "wikitext.txt");
+
+    if (queryFile.empty()) {
+      std::cerr << "Error: query command requires -f <query_file>\n";
+      std::cerr << "Usage: ./arrowDB query -f <query_file> [-c <collection_path>] "
+                   "[-t <text_file>]\n";
+      return 1;
+    }
+
+    searchWithQueryFile(collectionPath, queryFile, textFile);
+  } else if (args.command == "ingest") {
+    std::string embeddingsFile = args.get("e");
+    std::string idsFile = args.get("i");
+    std::string textFile = args.get("t");
+    std::string outputPath = args.get("o");
+    
+
+    if (embeddingsFile.empty() || idsFile.empty() || textFile.empty()) {
+      std::cerr << "Error: ingest command requires -e, -i, and -t flags\n";
+      std::cerr << "Usage: ./arrowDB ingest -e <embeddings_file> -i <ids_file> "
+                   "-t <text_file> -o <output_path>\n";
+      return 1;
+    }
+
+    ingest(embeddingsFile, textFile, idsFile, outputPath);
+  } else if (args.command == "search") {
+    // Collect all remaining arguments as the query text
+    std::string queryText;
+    for (int i = 2; i < argc; ++i) {
+      std::string arg = argv[i];
+      // Skip flags and their values
+      if (arg[0] == '-' && i + 1 < argc) {
+        ++i;  // Skip the flag value
+        continue;
+      }
+      if (!queryText.empty()) queryText += " ";
+      queryText += arg;
+    }
+
+    if (queryText.empty()) {
+      std::cerr << "Error: search command requires a query string\n";
+      std::cerr << "Usage: ./arrowDB search <query_text> [-c <collection_path>] "
+                   "[-t <text_file>] [-m <model_path>]\n";
+      return 1;
+    }
+
+    std::string collectionPath = args.get("c", "owt_collection");
+    std::string textFile = args.get("t", "openwebtext.txt");
+    std::string modelPath = args.get("m", "models/all-MiniLM-L6-v2.onnx");
+
+    searchWithText(queryText, collectionPath, textFile, modelPath, 10, 200);
   } else {
-    ingest();
+    std::cerr << "Unknown command: " << args.command << "\n";
+    std::cerr << "Usage:\n";
+    std::cerr << "  ./arrowDB search <query_text> [-c <collection>] [-t <text_file>] "
+                 "[-m <model.onnx>]\n";
+    std::cerr << "  ./arrowDB query -f <query_file> [-c <collection>] "
+                 "[-t <text_file>]\n";
+    std::cerr << "  ./arrowDB ingest -e <embeddings_file> -i <ids_file> "
+                 "-t <text_file>\n";
+    return 1;
   }
+
   return 0;
 }
