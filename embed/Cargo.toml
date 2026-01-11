@@ -1,0 +1,23 @@
+[package]
+name = "arrow_embed"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "arrow_embed"
+crate-type = ["cdylib", "staticlib"]
+
+[[bin]]
+name = "arrow"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.100"
+ort = { version = "2.0.0-rc.11", features = ["ndarray"] }
+ndarray = "0.17"
+tokenizers = { version = "0.21", features = ["http"] }
+once_cell = "1.19"
+libc = "0.2"
+
+[build-dependencies]
+cbindgen = "0.27"
