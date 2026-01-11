@@ -1,7 +1,7 @@
 // Copyright 2025 ArrowDB
-#include "arrow/wal.h"
-#include "arrow/utils/crc32.h"
-#include "arrow/utils/filesync.h"
+#include "internal/wal.h"
+#include "internal/crc32.h"
+#include "internal/filesync.h"
 #include <cstdio>
 #include <cstring>
 #include <fstream>

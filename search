@@ -25,4 +25,4 @@ cp query.bin ../build/query.bin || exit 1
 # Change to build directory and run search
 echo "Searching..."
 cd ../build || exit 1
-./arrowDB query query.bin
+./arrowDB query -c owt_collection -f query.bin -t openwebtext.txt

@@ -227,5 +227,3 @@ inline std::unordered_map<VectorID, Metadata> importMetadataFromJson(
 
 
 #endif // ARROWDB_H
-
-#include "binary.h"

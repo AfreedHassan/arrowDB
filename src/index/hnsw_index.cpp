@@ -1,5 +1,5 @@
 // Copyright 2025 ArrowDB
-#include "arrow/hnsw_index.h"
+#include "internal/hnsw_index.h"
 #include "arrow/utils/status.h"
 
 #include <hnswlib/hnswlib.h>
@@ -52,7 +52,7 @@ bool HNSWIndex::insert(VectorID id, const std::vector<float>& vec) {
   return true;
 }
 
-std::vector<SearchResult> HNSWIndex::search(
+std::vector<IndexSearchResult> HNSWIndex::search(
     const std::vector<float>& query,
     size_t k,
     size_t ef) const {
@@ -66,19 +66,18 @@ std::vector<SearchResult> HNSWIndex::search(
   std::priority_queue<QueueItem> resultsQueue =
       hnsw_->searchKnn(query.data(), k);
 
-  std::vector<SearchResult> results;
+  std::vector<IndexSearchResult> results;
   results.reserve(resultsQueue.size());
 
+  // For InnerProduct/Cosine, hnswlib returns negative similarity (1 - cosine)
+  // For L2, hnswlib returns positive distance
+  // We negate for InnerProduct/Cosine to get proper similarity scores (higher = better)
   int8_t distToScoreConverter = (metric_ == DistanceMetric::L2) ? 1 : -1;
 
-  // Results come out in worst-to-best order, reverse them
+  // Results come out in worst-to-best order (max heap), reverse them
   while (!resultsQueue.empty()) {
-    // dist -> float, label -> hnswlib::labeltype
     auto [dist, label] = resultsQueue.top();
     resultsQueue.pop();
-    // For InnerProduct/Cosine,
-    // hnswlib returns negative distance (smaller = better)
-    // For L2, hnswlib returns positive distance (smaller = better)
     float score = distToScoreConverter * dist;
     results.push_back({static_cast<VectorID>(label), score});
   }

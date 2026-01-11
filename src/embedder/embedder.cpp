@@ -12,14 +12,15 @@ size_t arrow_embed_dimension();
 Embedder::Embedder(const std::string_view &modelPath,
                    const std::string_view &tokenizerName) {
   int32_t res = arrow_embed_init(modelPath.data(), tokenizerName.data());
-  if (res != 0) { 
-    std::cerr << "Error: Failed to initialize embedder (code: " << result << ")\n";
+  if (res != 0) {
+    std::cerr << "Error: Failed to initialize embedder (code: " << res << ")\n";
     ok_ = false;
+    return;
   }
   ok_ = true;
 }
 
-std::vector<float> embed(const char* text) {
+std::vector<float> Embedder::embed(const char* text) {
   EmbeddingResult res = arrow_embed_text(text);
 
   if (res.error_code != 0) {
