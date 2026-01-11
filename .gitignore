@@ -20,3 +20,7 @@ notes/
 .crsr
 .gitignore
 AGENTS.md
+target/
+*.onnx
+tools/genembeddings/models
+tools/genembeddings/*.txt
