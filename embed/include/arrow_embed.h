@@ -24,4 +24,18 @@ struct EmbeddingResult {
   int32_t error_code;
 };
 
+/// Result structure returned to C/C++ from dataset loading
+struct DatasetLoadResult {
+  /// Flat array of embeddings (num_chunks * embedding_dim * sizeof(float))
+  float *embeddings_ptr;
+  /// Array of C strings (num_chunks pointers to null-terminated strings)
+  char **chunks_ptr;
+  /// Number of chunks loaded
+  uintptr_t num_chunks;
+  /// Embedding dimension (384 for MiniLM)
+  uintptr_t embedding_dim;
+  /// Error code: 0 = success, non-zero = error
+  int32_t error_code;
+};
+
 #endif  // ARROW_EMBED_H

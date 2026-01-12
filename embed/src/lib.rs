@@ -3,6 +3,8 @@
 //! Provides functions to embed text using all-MiniLM-L6-v2 model,
 //! callable from C/C++.
 
+pub mod dataset;
+
 use std::ffi::{c_char, c_float, CStr};
 use std::ptr;
 use std::sync::Mutex;
