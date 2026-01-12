@@ -74,18 +74,19 @@ add_library(arrow STATIC
     src/core/db.cpp
     src/core/wal.cpp
     src/index/hnsw_index.cpp
+    src/embedder/embedder.cpp
 )
 
 # PUBLIC: Users of the library get these include paths
 # PRIVATE: Only the library itself gets these (for internal headers)
 target_include_directories(arrow
     PUBLIC include
-    PRIVATE src
+    PRIVATE src ${EMBED_INCLUDE_DIR}
 )
 
 target_link_libraries(arrow
     PUBLIC nlohmann_json::nlohmann_json
-    PRIVATE hnswlib
+    PRIVATE hnswlib ${ARROW_EMBED_LIB}
 )
 
 target_compile_options(arrow PRIVATE -O3 -march=native)
@@ -140,6 +141,7 @@ target_include_directories(tests PRIVATE
     include
     src
     tests
+    ${EMBED_INCLUDE_DIR}
 )
 
 target_link_libraries(tests PRIVATE
