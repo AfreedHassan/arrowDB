@@ -3,6 +3,7 @@
 
 #pragma once
 #include <vector>
+#include <optional>
 #include <arrow_embed.h>
 
 
@@ -15,12 +16,33 @@ public:
 
     std::vector<float> embed(const char* text);
 
+    /// Dataset loading result containing text chunks and embeddings
+    struct DatasetLoadResult {
+        std::vector<std::string> chunks;
+        std::vector<std::vector<float>> embeddings;
+    };
+
+    /// Load OpenWebText dataset from text and embeddings files
+    /// @param textPath Path to text file (one chunk per line)
+    /// @param embeddingsPath Path to binary embeddings file (float32 format)
+    /// @param numChunks Number of chunks to load
+    /// @param minLength Minimum text length (characters)
+    /// @param maxLength Maximum text length (characters)
+    /// @return Optional containing dataset or empty if failed
+    std::optional<DatasetLoadResult> loadOpenWebText(
+        const std::string_view &textPath,
+        const std::string_view &embeddingsPath,
+        size_t numChunks = 200000,
+        size_t minLength = 40,
+        size_t maxLength = 200
+    );
+
     inline bool ok() { return ok_ ;}
 
     // TODO
     // std::vector<std::vector<float>> embedBatch( const std::vector<std::string>& texts);
 private:
-    bool ok_; 
+    bool ok_;
 };
 
 
