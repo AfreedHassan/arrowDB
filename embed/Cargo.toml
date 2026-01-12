@@ -18,6 +18,13 @@ ndarray = "0.17"
 tokenizers = { version = "0.21", features = ["http"] }
 once_cell = "1.19"
 libc = "0.2"
+hf-hub = "0.3"
+parquet = "53"
+arrow = "53"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+rayon = "1.10"
+unicode-segmentation = "1.12"
 
 [build-dependencies]
 cbindgen = "0.27"
