@@ -18,7 +18,7 @@ namespace arrow {
  * @brief A collection of vectors with a specific configuration.
  *
  * Collection represents a named group of vectors that share the same
- * dimension, distance metric, and data type. It serves as the primary
+ * dimension, distance space, and data type. It serves as the primary
  * interface for vector database operations.
  *
  * Default HNSW parameters are optimized for large datasets (100K+ vectors):
@@ -29,18 +29,11 @@ namespace arrow {
 class Collection {
 public:
     /// Constructs a Collection with the given configuration.
+    /// IndexConfig is embedded in CollectionConfig.
     explicit Collection(const CollectionConfig& config);
-
-    /// Constructs a Collection with custom index options.
-    Collection(const CollectionConfig& config, const IndexOptions& indexOptions);
 
     /// Constructs a Collection with persistence path for durability.
     Collection(const CollectionConfig& config,
-               const std::filesystem::path& persistencePath);
-
-    /// Constructs a Collection with custom index options and persistence.
-    Collection(const CollectionConfig& config,
-               const IndexOptions& indexOptions,
                const std::filesystem::path& persistencePath);
 
     /// Destructor
@@ -60,8 +53,8 @@ public:
     /// Get the vector dimension.
     uint32_t dimension() const;
 
-    /// Get the distance metric.
-    DistanceMetric metric() const;
+    /// Get the distance space.
+    Space space() const;
 
     /// Get the number of vectors in the collection.
     size_t size() const;
@@ -72,6 +65,8 @@ public:
     /// @param vec Vector data (must match collection dimension)
     /// @return Status indicating success or failure
     utils::Status insert(VectorID id, const std::vector<float>& vec);
+
+    utils::Status insert(const std::vector<std::string>& data);
 
     /// Insert a batch of vectors with partial success semantics.
     ///
@@ -85,6 +80,7 @@ public:
     /// @param id Vector identifier
     /// @param metadata Metadata to associate with the vector
     void setMetadata(VectorID id, const Metadata& metadata);
+    Metadata getMetadata(VectorID id);
 
     /// Search for k nearest neighbors.
     ///
@@ -95,6 +91,10 @@ public:
     std::vector<IndexSearchResult> search(const std::vector<float>& query,
                                           uint32_t k,
                                           uint32_t ef = 200) const;
+
+    std::vector<IndexSearchResult> query(const std::string& query,
+                                          uint32_t k,
+                                          uint32_t ef = 200) const; 
 
     /// Query for k nearest neighbors with metadata.
     ///
