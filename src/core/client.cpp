@@ -1,5 +1,5 @@
 // Copyright 2025 ArrowDB
-#include "arrow/db.h"
+#include "arrow/client.h"
 #include "arrow/collection.h"
 
 #include <filesystem>
@@ -8,13 +8,13 @@
 namespace arrow {
 
 /// ArrowDB implementation
-class ArrowDB::Impl {
+class Client::Impl {
 public:
     explicit Impl(const ClientOptions& options)
         : options_(options) {
         // Create data directory if it doesn't exist
-        if (!options_.data_dir.empty()) {
-            std::filesystem::create_directories(options_.data_dir);
+        if (!options_.dataDir.empty()) {
+            std::filesystem::create_directories(options_.dataDir);
         }
         // Load existing collections from data directory
         loadExistingCollections();
@@ -28,8 +28,7 @@ public:
     }
 
     utils::Result<Collection*> createCollection(const std::string& name,
-                                                 const CollectionConfig& config,
-                                                 const IndexOptions& indexOptions) {
+                                                 const CollectionConfig& config) {
         // Check if collection already exists
         if (collections_.count(name) > 0) {
             return utils::Status(utils::StatusCode::kAlreadyExists,
@@ -44,16 +43,16 @@ public:
 
         // Determine persistence path
         std::filesystem::path collectionPath;
-        if (!options_.data_dir.empty()) {
-            collectionPath = options_.data_dir / name;
+        if (!options_.dataDir.empty()) {
+            collectionPath = options_.dataDir / name;
         }
 
-        // Create the collection using new Pimpl-based API
+        // Create the collection (IndexConfig is embedded in CollectionConfig)
         std::unique_ptr<Collection> collection;
         if (collectionPath.empty()) {
-            collection = std::make_unique<Collection>(effectiveConfig, indexOptions);
+            collection = std::make_unique<Collection>(effectiveConfig);
         } else {
-            collection = std::make_unique<Collection>(effectiveConfig, indexOptions, collectionPath);
+            collection = std::make_unique<Collection>(effectiveConfig, collectionPath);
         }
 
         Collection* ptr = collection.get();
@@ -83,8 +82,8 @@ public:
         collections_.erase(it);
 
         // Remove from disk if data_dir is set
-        if (!options_.data_dir.empty()) {
-            std::filesystem::path collectionPath = options_.data_dir / name;
+        if (!options_.dataDir.empty()) {
+            std::filesystem::path collectionPath = options_.dataDir / name;
             if (std::filesystem::exists(collectionPath)) {
                 std::filesystem::remove_all(collectionPath);
             }
@@ -118,7 +117,7 @@ public:
     }
 
     const std::filesystem::path& dataDir() const {
-        return options_.data_dir;
+        return options_.dataDir;
     }
 
 private:
@@ -126,11 +125,11 @@ private:
     std::unordered_map<std::string, std::unique_ptr<Collection>> collections_;
 
     void loadExistingCollections() {
-        if (options_.data_dir.empty() || !std::filesystem::exists(options_.data_dir)) {
+        if (options_.dataDir.empty() || !std::filesystem::exists(options_.dataDir)) {
             return;
         }
 
-        for (const auto& entry : std::filesystem::directory_iterator(options_.data_dir)) {
+        for (const auto& entry : std::filesystem::directory_iterator(options_.dataDir)) {
             if (!entry.is_directory()) continue;
 
             std::filesystem::path metaPath = entry.path() / "meta.json";
@@ -147,46 +146,40 @@ private:
 };
 
 // ArrowDB public interface implementation
-ArrowDB::ArrowDB(const ClientOptions& options)
+Client::Client(const ClientOptions& options)
     : pImpl_(std::make_unique<Impl>(options)) {}
 
-ArrowDB::~ArrowDB() = default;
+Client::~Client() = default;
 
-ArrowDB::ArrowDB(ArrowDB&&) noexcept = default;
-ArrowDB& ArrowDB::operator=(ArrowDB&&) noexcept = default;
+Client::Client(Client&&) noexcept = default;
+Client& Client::operator=(Client&&) noexcept = default;
 
-utils::Result<Collection*> ArrowDB::createCollection(const std::string& name,
+utils::Result<Collection*> Client::createCollection(const std::string& name,
                                                       const CollectionConfig& config) {
-    return pImpl_->createCollection(name, config, IndexOptions{});
+    return pImpl_->createCollection(name, config);
 }
 
-utils::Result<Collection*> ArrowDB::createCollection(const std::string& name,
-                                                      const CollectionConfig& config,
-                                                      const IndexOptions& indexOptions) {
-    return pImpl_->createCollection(name, config, indexOptions);
-}
-
-utils::Result<Collection*> ArrowDB::getCollection(const std::string& name) {
+utils::Result<Collection*> Client::getCollection(const std::string& name) {
     return pImpl_->getCollection(name);
 }
 
-utils::Status ArrowDB::dropCollection(const std::string& name) {
+utils::Status Client::dropCollection(const std::string& name) {
     return pImpl_->dropCollection(name);
 }
 
-std::vector<std::string> ArrowDB::listCollections() const {
+std::vector<std::string> Client::listCollections() const {
     return pImpl_->listCollections();
 }
 
-bool ArrowDB::hasCollection(const std::string& name) const {
+bool Client::hasCollection(const std::string& name) const {
     return pImpl_->hasCollection(name);
 }
 
-utils::Status ArrowDB::close() {
+utils::Status Client::close() {
     return pImpl_->close();
 }
 
-const std::filesystem::path& ArrowDB::dataDir() const {
+const std::filesystem::path& Client::dataDir() const {
     return pImpl_->dataDir();
 }
 

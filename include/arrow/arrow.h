@@ -16,8 +16,8 @@
 // Configuration
 #include "arrow/options.h"
 
-// Database interface
-#include "arrow/db.h"
+// Client interface
+#include "arrow/client.h"
 
 // Collection interface (public API only)
 // Note: Collection currently exposes some internals; this will be cleaned up

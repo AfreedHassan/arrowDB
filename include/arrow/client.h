@@ -1,6 +1,6 @@
 // Copyright 2025 ArrowDB
-#ifndef ARROW_DB_H
-#define ARROW_DB_H
+#ifndef ARROW_CLIENT_H
+#define ARROW_CLIENT_H
 
 #include <filesystem>
 #include <memory>
@@ -24,55 +24,46 @@ class Collection;
 /// Example usage:
 /// ```cpp
 /// ClientOptions options{.data_dir = "/path/to/data"};
-/// ArrowDB db(options);
+/// Client client(options);
 ///
-/// auto collection = db.createCollection("my_collection", {
+/// auto collection = client.createCollection("my_collection", {
 ///     .name = "my_collection",
 ///     .dimensions = 384,
-///     .metric = DistanceMetric::Cosine
+///     .space = IndexSpace::Cosine,
 /// });
 ///
 /// if (collection.ok()) {
 ///     collection.value()->insert(1, embedding);
 /// }
 ///
-/// db.close();
+/// client.close();
 /// ```
-class ArrowDB {
+class Client {
 public:
     /// Construct a new ArrowDB instance.
     ///
     /// @param options Client configuration options
-    explicit ArrowDB(const ClientOptions& options);
+    explicit Client(const ClientOptions& options);
 
     /// Destructor - closes all collections gracefully.
-    ~ArrowDB();
+    ~Client();
 
     // Non-copyable
-    ArrowDB(const ArrowDB&) = delete;
-    ArrowDB& operator=(const ArrowDB&) = delete;
+    Client(const Client&) = delete;
+    Client& operator=(const Client&) = delete;
 
     // Movable
-    ArrowDB(ArrowDB&&) noexcept;
-    ArrowDB& operator=(ArrowDB&&) noexcept;
+    Client(Client&&) noexcept;
+    Client& operator=(Client&&) noexcept;
 
     /// Create a new collection.
+    /// IndexConfig is embedded in CollectionConfig.
     ///
     /// @param name Collection name (must be unique)
-    /// @param config Collection configuration
+    /// @param config Collection configuration (includes index config)
     /// @return Pointer to the created collection, or error status
     utils::Result<Collection*> createCollection(const std::string& name,
                                                  const CollectionConfig& config);
-
-    /// Create a new collection with custom index options.
-    ///
-    /// @param name Collection name (must be unique)
-    /// @param config Collection configuration
-    /// @param indexOptions Custom index configuration
-    /// @return Pointer to the created collection, or error status
-    utils::Result<Collection*> createCollection(const std::string& name,
-                                                 const CollectionConfig& config,
-                                                 const IndexOptions& indexOptions);
 
     /// Get an existing collection by name.
     ///
@@ -113,4 +104,4 @@ private:
 
 } // namespace arrow
 
-#endif // ARROW_DB_H
+#endif // ARROW_CLIENT_H
