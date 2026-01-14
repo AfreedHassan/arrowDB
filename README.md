@@ -4,7 +4,7 @@ A lightweight vector database implementation in C++.
 
 ## Features
 
-- **Vector Storage**: Configurable dimensions, support for multiple distance metrics (Cosine, L2, Inner Product)
+- **Vector Storage**: Configurable dimensions, support for multiple types of spaces (Cosine, L2, Inner Product)
 - **Similarity Search**: Fast approximate nearest neighbor search using HNSW index
 - **Batch Operations**: Efficient bulk insert and search for improved throughput
 - **Persistence**: Save and load collections with write-ahead logging for durability
@@ -146,7 +146,7 @@ Run specific test suites:
 **HNSWIndex** - Hierarchical Navigable Small World graph
 - Approximate nearest neighbor search
 - Configurable M and ef parameters
-- Multiple distance metrics
+- Multiple space
 
 **Embedder** - Text embedding via ONNX Runtime
 - all-MiniLM-L6-v2 model integration
