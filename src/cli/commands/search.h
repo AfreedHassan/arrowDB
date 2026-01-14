@@ -96,6 +96,44 @@ inline void searchWithQueryFile(const std::string& collectionPath,
   outputFile.close();
 }
 
+inline void searchWithText(const std::string& queryText,
+                           const arrow::Collection& collection,
+                           const std::string& textPath = "openwebtext.txt",
+                           const std::string& modelPath = "",
+                           uint32_t k = 10,
+                           uint32_t ef = 200) {
+  // Initialize embedder
+  Embedder embedder(modelPath);
+  if (!embedder.ok()) return;
+
+  std::cout << "Loaded collection: " << collection.name() << "\n";
+  std::cout << "  Dimensions: " << collection.dimension() << "\n";
+  std::cout << "  Total vectors: " << collection.size() << "\n\n";
+
+  // Embed query text
+  std::cout << "Embedding query: \"" << queryText << "\"\n";
+  std::vector<float> query = embedder.embed(queryText.c_str());
+
+  if (query.empty()) return;
+
+  std::cout << "Query embedded successfully\n";
+  std::cout << "Searching for " << k << " nearest neighbors...\n\n";
+
+  // Perform search
+  auto searchResults = collection.search(query, k, ef);
+
+  std::cout << "Search Results:\n";
+  std::cout << std::string(80, '=') << "\n";
+  for (size_t i = 0; i < searchResults.size(); ++i) {
+    const auto& sr = searchResults[i];
+    std::string text = getLineFromFile(textPath, sr.id);
+
+    std::cout << (i + 1) << ". [Score: " << sr.score << "] "
+              << text << "\n";
+  }
+  std::cout << std::string(80, '=') << "\n";
+}
+
 /// Search with text query using embedder.
 ///
 /// @param queryText The text query to embed and search

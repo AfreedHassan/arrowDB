@@ -21,7 +21,7 @@ namespace arrow::cli {
 inline void ingest(const std::string& embeddingsPath = "embeddings.bin",
                    const std::string& textPath = "wikitext.txt",
                    const std::string& idsPath = "",
-                   const std::string& outputPath = "wiki_collection") {
+                   const std::string& collectionName = "wiki_collection") {
   const size_t dims = 384;
   const size_t batchSize = 10000;  // Insert 10K vectors at a time
 
@@ -29,7 +29,7 @@ inline void ingest(const std::string& embeddingsPath = "embeddings.bin",
             << "...\n";
 
   // Create collection
-  CollectionConfig cfg{.name = "owt", .dimensions = static_cast<uint32_t>(dims), .metric = DistanceMetric::L2};
+  CollectionConfig cfg{.name = collectionName, .dimensions = static_cast<uint32_t>(dims), .space = Space::L2};
   Collection collection(cfg);
 
   auto startTime = std::chrono::high_resolution_clock::now();
@@ -111,6 +111,7 @@ inline void ingest(const std::string& embeddingsPath = "embeddings.bin",
   textFile.close();
 
   // Save collection
+  auto outputPath = collectionName + "_collection";
   std::cout << "Saving collection to " << outputPath << "...\n";
   auto saveStatus = collection.save(outputPath);
   if (!saveStatus.ok()) {
