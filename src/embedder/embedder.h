@@ -37,6 +37,19 @@ public:
         size_t maxLength = 200
     );
 
+    /// Download OpenWebText from HuggingFace and return embeddings
+    /// @param modelPath Path to the ONNX model file
+    /// @param tokenizerName HuggingFace tokenizer name
+    /// @param numSamples Number of samples to download and embed
+    /// @param outputTextPath Optional path to save text chunks file (like Python embed.py)
+    /// @return Optional containing dataset or empty if failed
+    static std::optional<DatasetLoadResult> downloadAndEmbed(
+        const std::string_view &modelPath,
+        const std::string_view &tokenizerName,
+        size_t numSamples = 10000,
+        const std::string_view &outputTextPath = ""
+    );
+
     inline bool ok() { return ok_ ;}
 
     // TODO

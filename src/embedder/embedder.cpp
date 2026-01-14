@@ -16,6 +16,12 @@ DatasetLoadResult arrow_dataset_load_openwebtext(
     size_t max_length
 );
 void arrow_dataset_free(DatasetLoadResult result);
+DatasetLoadResult arrow_dataset_download_and_embed(
+    const char *model_path,
+    const char *tokenizer_name,
+    size_t num_samples,
+    const char *output_text_path
+);
 }
 
 Embedder::Embedder(const std::string_view &modelPath,
@@ -108,6 +114,64 @@ std::optional<Embedder::DatasetLoadResult> Embedder::loadOpenWebText(
               << EMBEDDING_DIM << ", got " << rustResult.embedding_dim << "\n";
     arrow_dataset_free(rustResult);
     return std::nullopt;
+  }
+
+  // Free Rust-allocated memory
+  arrow_dataset_free(rustResult);
+
+  // Return the dataset
+  return DatasetLoadResult{
+      .chunks = std::move(chunks),
+      .embeddings = std::move(embeddings)
+  };
+}
+
+std::optional<Embedder::DatasetLoadResult> Embedder::downloadAndEmbed(
+    const std::string_view &modelPath,
+    const std::string_view &tokenizerName,
+    size_t numSamples,
+    const std::string_view &outputTextPath
+) {
+  // Call Rust FFI function to download and embed
+  ::DatasetLoadResult rustResult = arrow_dataset_download_and_embed(
+      modelPath.data(),
+      tokenizerName.data(),
+      numSamples,
+      outputTextPath.empty() ? nullptr : outputTextPath.data()
+  );
+
+  // Check for errors
+  if (rustResult.error_code != 0) {
+    std::cerr << "Error: Failed to download and embed dataset (code: "
+              << rustResult.error_code << ")\n";
+    return std::nullopt;
+  }
+
+  if (rustResult.num_chunks == 0) {
+    std::cerr << "Error: No chunks downloaded\n";
+    return std::nullopt;
+  }
+
+  // Copy chunks from C strings to std::vector<std::string>
+  std::vector<std::string> chunks;
+  chunks.reserve(rustResult.num_chunks);
+
+  for (size_t i = 0; i < rustResult.num_chunks; ++i) {
+    if (rustResult.chunks_ptr[i] != nullptr) {
+      chunks.emplace_back(rustResult.chunks_ptr[i]);
+    }
+  }
+
+  // Copy embeddings from flat C array to std::vector<std::vector<float>>
+  std::vector<std::vector<float>> embeddings;
+  embeddings.reserve(rustResult.num_chunks);
+
+  for (size_t i = 0; i < rustResult.num_chunks; ++i) {
+    std::vector<float> embedding(
+        rustResult.embeddings_ptr + (i * rustResult.embedding_dim),
+        rustResult.embeddings_ptr + ((i + 1) * rustResult.embedding_dim)
+    );
+    embeddings.push_back(std::move(embedding));
   }
 
   // Free Rust-allocated memory
