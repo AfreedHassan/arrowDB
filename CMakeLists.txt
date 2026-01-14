@@ -71,7 +71,7 @@ set(ARROW_EMBEDDING_MODEL_DIR ${CMAKE_SOURCE_DIR}/embed/models)
 # ─────────────────────────────────────────────────────────────
 add_library(arrow STATIC
     src/core/collection.cpp
-    src/core/db.cpp
+    src/core/client.cpp
     src/core/wal.cpp
     src/index/hnsw_index.cpp
     src/embedder/embedder.cpp
