@@ -31,18 +31,18 @@ protected:
 };
 
 TEST_F(CollectionTest, CreateCollection) {
-  CollectionConfig cfg{.name = "test_collection", .dimensions = 128, .metric = DistanceMetric::Cosine};
+  CollectionConfig cfg{.name = "test_collection", .dimensions = 128, .space = Space::Cosine};
 
   Collection collection(cfg);
 
   EXPECT_EQ(collection.name(), "test_collection");
   EXPECT_EQ(collection.dimension(), 128);
-  EXPECT_EQ(collection.metric(), DistanceMetric::Cosine);
+  EXPECT_EQ(collection.space(), Space::Cosine);
   EXPECT_EQ(collection.size(), 0);
 }
 
 TEST_F(CollectionTest, InsertVectors) {
-  CollectionConfig cfg{.name = "test_collection", .dimensions = 128, .metric = DistanceMetric::Cosine};
+  CollectionConfig cfg{.name = "test_collection", .dimensions = 128, .space = Space::Cosine};
 
   Collection collection(cfg);
 
@@ -59,7 +59,7 @@ TEST_F(CollectionTest, InsertVectors) {
 }
 
 TEST_F(CollectionTest, SearchFunctionality) {
-  CollectionConfig cfg{.name = "test_collection", .dimensions = 128, .metric = DistanceMetric::Cosine};
+  CollectionConfig cfg{.name = "test_collection", .dimensions = 128, .space = Space::Cosine};
 
   Collection collection(cfg);
 
@@ -88,7 +88,7 @@ TEST_F(CollectionTest, SearchFunctionality) {
 }
 
 TEST_F(CollectionTest, SearchWithDifferentEf) {
-  CollectionConfig cfg{.name = "test_collection", .dimensions = 128, .metric = DistanceMetric::Cosine};
+  CollectionConfig cfg{.name = "test_collection", .dimensions = 128, .space = Space::Cosine};
 
   Collection collection(cfg);
 
@@ -113,7 +113,7 @@ TEST_F(CollectionTest, SearchWithDifferentEf) {
 }
 
 TEST_F(CollectionTest, SearchPerformance) {
-  CollectionConfig cfg{.name = "test_collection", .dimensions = 128, .metric = DistanceMetric::Cosine};
+  CollectionConfig cfg{.name = "test_collection", .dimensions = 128, .space = Space::Cosine};
 
   Collection collection(cfg);
 
@@ -148,7 +148,7 @@ TEST_F(CollectionTest, SearchPerformance) {
 // ============================================================================
 
 TEST_F(CollectionTest, SaveCreatesDirectory) {
-  CollectionConfig cfg{.name = "test_collection", .dimensions = 128, .metric = DistanceMetric::Cosine};
+  CollectionConfig cfg{.name = "test_collection", .dimensions = 128, .space = Space::Cosine};
   Collection collection(cfg);
 
   std::string save_path = GetTestPath("test_collection");
@@ -160,7 +160,7 @@ TEST_F(CollectionTest, SaveCreatesDirectory) {
 }
 
 TEST_F(CollectionTest, SaveCreatesRequiredFiles) {
-  CollectionConfig cfg{.name = "test_collection", .dimensions = 128, .metric = DistanceMetric::Cosine};
+  CollectionConfig cfg{.name = "test_collection", .dimensions = 128, .space = Space::Cosine};
   Collection collection(cfg);
 
   // Insert some vectors
@@ -184,7 +184,7 @@ TEST_F(CollectionTest, SaveCreatesRequiredFiles) {
 }
 
 TEST_F(CollectionTest, SaveIncludesMetadata) {
-  CollectionConfig cfg{.name = "test_collection", .dimensions = 128, .metric = DistanceMetric::Cosine};
+  CollectionConfig cfg{.name = "test_collection", .dimensions = 128, .space = Space::Cosine};
   Collection collection(cfg);
 
   // Insert vectors with metadata
@@ -209,7 +209,7 @@ TEST_F(CollectionTest, SaveIncludesMetadata) {
 
 TEST_F(CollectionTest, LoadFromDirectory) {
   // Create and save a collection
-  CollectionConfig cfg{.name = "test_collection", .dimensions = 128, .metric = DistanceMetric::Cosine};
+  CollectionConfig cfg{.name = "test_collection", .dimensions = 128, .space = Space::Cosine};
   Collection original(cfg);
 
   std::mt19937 gen(42);
@@ -229,15 +229,19 @@ TEST_F(CollectionTest, LoadFromDirectory) {
   // Verify basic properties
   EXPECT_EQ(loaded.name(), "test_collection");
   EXPECT_EQ(loaded.dimension(), 128);
-  EXPECT_EQ(loaded.metric(), DistanceMetric::Cosine);
+  EXPECT_EQ(loaded.space(), Space::Cosine);
   EXPECT_EQ(loaded.size(), 100);
 }
 
 TEST_F(CollectionTest, RoundTripPreservesData) {
-  // Create collection with custom index options
-  CollectionConfig cfg{.name = "test_collection", .dimensions = 64, .metric = DistanceMetric::Cosine};
-  IndexOptions indexOpts{.max_elements = 1000000, .M = 32, .ef_construction = 200};
-  Collection original(cfg, indexOpts);
+  // Create collection with custom index options embedded in config
+  CollectionConfig cfg{
+      .name = "test_collection",
+      .dimensions = 64,
+      .space = Space::Cosine,
+      .index = {.max_elements = 1000000, .M = 32, .ef_construction = 200}
+  };
+  Collection original(cfg);
 
   std::mt19937 gen(42);
   std::vector<std::vector<float>> vectors;
@@ -270,7 +274,7 @@ TEST_F(CollectionTest, RoundTripPreservesData) {
 }
 
 TEST_F(CollectionTest, RoundTripPreservesMetadata) {
-  CollectionConfig cfg{.name = "test_collection", .dimensions = 128, .metric = DistanceMetric::Cosine};
+  CollectionConfig cfg{.name = "test_collection", .dimensions = 128, .space = Space::Cosine};
   Collection original(cfg);
 
   std::mt19937 gen(42);
@@ -329,7 +333,7 @@ TEST_F(CollectionTest, LoadReturnsErrorOnMissingIndexBin) {
   metaFile << R"({
     "name": "test_collection",
     "dimensions": 128,
-    "metric": "Cosine",
+    "space": "Cosine",
     "dtype": "Float32",
     "idxType": "HNSW",
     "hnsw": {"maxElements": 1000000, "M": 64, "efConstruction": 200},
@@ -375,7 +379,7 @@ protected:
   }
 
   CollectionConfig GetTestConfig(const std::string &name = "test_collection") {
-    return CollectionConfig{.name = name, .dimensions = 128, .metric = DistanceMetric::Cosine};
+    return CollectionConfig{.name = name, .dimensions = 128, .space = Space::Cosine};
   }
 };
 
@@ -817,7 +821,7 @@ protected:
 };
 
 TEST_F(CollectionBatchTest, InsertBatchSuccess) {
-  CollectionConfig cfg{.name = "test", .dimensions = 128, .metric = DistanceMetric::Cosine};
+  CollectionConfig cfg{.name = "test", .dimensions = 128, .space = Space::Cosine};
   Collection collection(cfg);
 
   // Prepare batch
@@ -838,7 +842,7 @@ TEST_F(CollectionBatchTest, InsertBatchSuccess) {
 }
 
 TEST_F(CollectionBatchTest, InsertBatchPartialFailure) {
-  CollectionConfig cfg{.name = "test", .dimensions = 128, .metric = DistanceMetric::Cosine};
+  CollectionConfig cfg{.name = "test", .dimensions = 128, .space = Space::Cosine};
   Collection collection(cfg);
 
   // Mixed valid and invalid dimensions
@@ -867,7 +871,7 @@ TEST_F(CollectionBatchTest, InsertBatchPartialFailure) {
 }
 
 TEST_F(CollectionBatchTest, SearchBatchParallel) {
-  CollectionConfig cfg{.name = "test", .dimensions = 128, .metric = DistanceMetric::Cosine};
+  CollectionConfig cfg{.name = "test", .dimensions = 128, .space = Space::Cosine};
   Collection collection(cfg);
 
   // Insert vectors using batch insert
@@ -901,7 +905,7 @@ TEST_F(CollectionBatchTest, SearchBatchParallel) {
 }
 
 TEST_F(CollectionBatchTest, SearchBatchDimensionMismatch) {
-  CollectionConfig cfg{.name = "test", .dimensions = 128, .metric = DistanceMetric::Cosine};
+  CollectionConfig cfg{.name = "test", .dimensions = 128, .space = Space::Cosine};
   Collection collection(cfg);
 
   // Insert a vector
@@ -919,7 +923,7 @@ TEST_F(CollectionBatchTest, SearchBatchDimensionMismatch) {
 }
 
 TEST_F(CollectionBatchTest, InsertBatchWithPersistence) {
-  CollectionConfig config{.name = "test", .dimensions = 128, .metric = DistanceMetric::Cosine};
+  CollectionConfig config{.name = "test", .dimensions = 128, .space = Space::Cosine};
   std::string persistencePath = GetTestPath("batch_wal");
 
   // Insert batch with WAL

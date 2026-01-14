@@ -36,7 +36,7 @@ class HNSWBenchmark : public benchmark::Fixture {
 
     index_ = std::make_unique<arrow::HNSWIndex>(
         dim_,
-        arrow::DistanceMetric::Cosine,
+        arrow::Space::Cosine,
         arrow::HNSWConfig{n, 16, 200});
 
     // Build index
@@ -151,7 +151,7 @@ static void BM_HNSWInsert(benchmark::State& state) {
 
   for (auto _ : state) {
     state.PauseTiming();
-    arrow::HNSWIndex index(dim, arrow::DistanceMetric::Cosine,
+    arrow::HNSWIndex index(dim, arrow::Space::Cosine,
                            {batch_size, 16, 200});
     state.ResumeTiming();
 
@@ -179,7 +179,7 @@ static void BM_HNSWSearchDimensions(benchmark::State& state) {
 
   std::mt19937 gen(42);
 
-  arrow::HNSWIndex index(dim, arrow::DistanceMetric::Cosine, {n, 16, 200});
+  arrow::HNSWIndex index(dim, arrow::Space::Cosine, {n, 16, 200});
 
   // Build index
   for (size_t i = 0; i < n; ++i) {

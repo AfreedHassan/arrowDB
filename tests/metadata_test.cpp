@@ -195,23 +195,23 @@ TEST_F(MetadataUnit, MetadataRoundTrip) {
                      std::get<double>(original.at("duration")));
 }
 
-// Test DistanceMetric enum conversion
-TEST_F(MetadataUnit, DistanceMetricToJson) {
-    EXPECT_EQ(utils::distanceMetricToJson(DistanceMetric::Cosine), "Cosine");
-    EXPECT_EQ(utils::distanceMetricToJson(DistanceMetric::L2), "L2");
-    EXPECT_EQ(utils::distanceMetricToJson(DistanceMetric::InnerProduct), "InnerProduct");
+// Test Space enum conversion
+TEST_F(MetadataUnit, SpaceToJson) {
+    EXPECT_EQ(utils::spaceToJson(Space::Cosine), "Cosine");
+    EXPECT_EQ(utils::spaceToJson(Space::L2), "L2");
+    EXPECT_EQ(utils::spaceToJson(Space::InnerProduct), "InnerProduct");
 }
 
-TEST_F(MetadataUnit, JsonToDistanceMetric) {
-    EXPECT_EQ(utils::jsonToDistanceMetric("Cosine"), DistanceMetric::Cosine);
-    EXPECT_EQ(utils::jsonToDistanceMetric("L2"), DistanceMetric::L2);
-    EXPECT_EQ(utils::jsonToDistanceMetric("InnerProduct"), DistanceMetric::InnerProduct);
+TEST_F(MetadataUnit, JsonToSpaceIndex) {
+    EXPECT_EQ(utils::jsonToSpace("Cosine"), Space::Cosine);
+    EXPECT_EQ(utils::jsonToSpace("L2"), Space::L2);
+    EXPECT_EQ(utils::jsonToSpace("InnerProduct"), Space::InnerProduct);
 }
 
-TEST_F(MetadataUnit, JsonToDistanceMetricInvalid) {
-    utils::json j = "InvalidMetric";
+TEST_F(MetadataUnit, JsonToSpaceIndexInvalid) {
+    utils::json j = "Invalid Space";
     EXPECT_THROW({
-        utils::jsonToDistanceMetric(j);
+        utils::jsonToSpace(j);
     }, std::runtime_error);
 }
 

@@ -14,9 +14,9 @@ namespace arrow {
 	using Timestamp = uint64_t;
 
 	/**
-	 * @brief Distance metrics for vector similarity computation.
+	 * @brief Index spaces for vector similarity computation.
 	 */
-	enum class DistanceMetric {
+	enum class Space {
 		Cosine,      ///< Cosine similarity (dot product of normalized vectors)
 		L2,          ///< L2 (Euclidean) distance
 		InnerProduct ///< Inner product (dot product)

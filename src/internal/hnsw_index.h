@@ -33,11 +33,11 @@ struct HNSWConfig {
 class HNSWIndex {
 private:
     size_t dim_;
-    DistanceMetric metric_;
+    Space spaceKind_;
     std::unique_ptr<hnswlib::SpaceInterface<float>> space_;
     std::unique_ptr<hnswlib::HierarchicalNSW<float>> hnsw_;
 public:
-    HNSWIndex(size_t dim, DistanceMetric metric, const HNSWConfig& config = {});
+    HNSWIndex(size_t dim, Space space, const HNSWConfig& config = {});
     ~HNSWIndex();
     
     // Non-copyable, movable
@@ -68,7 +68,7 @@ public:
   /// Load an index from disk.
   /// @param path File path to load the index from
   /// @note This replaces the current index with the loaded one.
-  ///       The dimension and metric must match the saved index.
+  ///       The dimension and space must match the saved index.
   void loadIndex(const std::string& path);
 
     // Number of vectors in the index.

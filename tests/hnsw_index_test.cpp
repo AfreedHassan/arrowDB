@@ -42,7 +42,7 @@ protected:
 // ============================================================================
 
 TEST_F(HNSWIndexTest, InsertAndSearch) {
-    HNSWIndex index(3, DistanceMetric::Cosine);
+    HNSWIndex index(3, Space::Cosine);
     
     index.insert(1, {1.0f, 0.0f, 0.0f});
     index.insert(2, {0.0f, 1.0f, 0.0f});
@@ -56,7 +56,7 @@ TEST_F(HNSWIndexTest, InsertAndSearch) {
 }
 
 TEST_F(HNSWIndexTest, TopKOrdering) {
-    HNSWIndex index(3, DistanceMetric::Cosine);
+    HNSWIndex index(3, Space::Cosine);
     
     // Insert vectors at different angles from query
     index.insert(1, {1.0f, 0.0f, 0.0f});      // Exact match
@@ -80,7 +80,7 @@ TEST_F(HNSWIndexTest, RecallAt10) {
     
     HNSWIndex index(
         dim, 
-        DistanceMetric::Cosine, 
+        Space::Cosine, 
         {.M = 16, .efConstruction = 200}
     );
     
@@ -104,7 +104,7 @@ TEST_F(HNSWIndexTest, RecallAt10) {
 }
 
 TEST_F(HNSWIndexTest, DimensionMismatch) {
-    HNSWIndex index(3, DistanceMetric::Cosine);
+    HNSWIndex index(3, Space::Cosine);
     
     EXPECT_EQ(index.insert(1, {1.0f, 0.0f}), false);
     EXPECT_THROW(index.search({1.0f, 0.0f}, 1), std::invalid_argument);
@@ -115,7 +115,7 @@ TEST_F(HNSWIndexTest, DimensionMismatch) {
 // ============================================================================
 
 TEST_F(HNSWIndexTest, SaveIndexCreatesFile) {
-    HNSWIndex index(3, DistanceMetric::Cosine);
+    HNSWIndex index(3, Space::Cosine);
     index.insert(1, {1.0f, 0.0f, 0.0f});
     index.insert(2, {0.0f, 1.0f, 0.0f});
     index.insert(3, {0.0f, 0.0f, 1.0f});
@@ -132,7 +132,7 @@ TEST_F(HNSWIndexTest, SaveIndexCreatesFile) {
 
 TEST_F(HNSWIndexTest, LoadIndexFromFile) {
     // Create and save an index
-    HNSWIndex original(3, DistanceMetric::Cosine);
+    HNSWIndex original(3, Space::Cosine);
     original.insert(1, {1.0f, 0.0f, 0.0f});
     original.insert(2, {0.0f, 1.0f, 0.0f});
     original.insert(3, {0.0f, 0.0f, 1.0f});
@@ -141,7 +141,7 @@ TEST_F(HNSWIndexTest, LoadIndexFromFile) {
     original.saveIndex(path);
     
     // Create a new index and load from file
-    HNSWIndex loaded(3, DistanceMetric::Cosine);
+    HNSWIndex loaded(3, Space::Cosine);
     EXPECT_NO_THROW(loaded.loadIndex(path));
     
     // Verify size matches
@@ -154,7 +154,7 @@ TEST_F(HNSWIndexTest, RoundTripPreservesData) {
     const size_t n = 100;
     
     // Create index with data
-    HNSWIndex original(dim, DistanceMetric::Cosine);
+    HNSWIndex original(dim, Space::Cosine);
     std::mt19937 gen(42);
     std::vector<std::vector<float>> vectors;
     
@@ -168,7 +168,7 @@ TEST_F(HNSWIndexTest, RoundTripPreservesData) {
     original.saveIndex(path);
     
     // Load into new index
-    HNSWIndex loaded(dim, DistanceMetric::Cosine);
+    HNSWIndex loaded(dim, Space::Cosine);
     loaded.loadIndex(path);
     
     // Verify size
@@ -190,7 +190,7 @@ TEST_F(HNSWIndexTest, RoundTripPreservesData) {
 }
 
 TEST_F(HNSWIndexTest, RoundTripPreservesSearchResults) {
-    HNSWIndex original(3, DistanceMetric::Cosine);
+    HNSWIndex original(3, Space::Cosine);
     
     // Insert vectors at different angles
     original.insert(1, {1.0f, 0.0f, 0.0f});      // Exact match
@@ -201,7 +201,7 @@ TEST_F(HNSWIndexTest, RoundTripPreservesSearchResults) {
     original.saveIndex(path);
     
     // Load and verify search results
-    HNSWIndex loaded(3, DistanceMetric::Cosine);
+    HNSWIndex loaded(3, Space::Cosine);
     loaded.loadIndex(path);
     
     std::vector<float> query = {1.0f, 0.0f, 0.0f};
@@ -220,7 +220,7 @@ TEST_F(HNSWIndexTest, RoundTripPreservesSearchResults) {
 
 TEST_F(HNSWIndexTest, LoadIndexReplacesExisting) {
     // Create and save first index
-    HNSWIndex index1(3, DistanceMetric::Cosine);
+    HNSWIndex index1(3, Space::Cosine);
     index1.insert(1, {1.0f, 0.0f, 0.0f});
     index1.insert(2, {0.0f, 1.0f, 0.0f});
     
@@ -228,7 +228,7 @@ TEST_F(HNSWIndexTest, LoadIndexReplacesExisting) {
     index1.saveIndex(path1);
     
     // Create and save second index
-    HNSWIndex index2(3, DistanceMetric::Cosine);
+    HNSWIndex index2(3, Space::Cosine);
     index2.insert(10, {0.0f, 0.0f, 1.0f});
     index2.insert(20, {0.577f, 0.577f, 0.577f});
     
@@ -236,7 +236,7 @@ TEST_F(HNSWIndexTest, LoadIndexReplacesExisting) {
     index2.saveIndex(path2);
     
     // Load first index
-    HNSWIndex loaded(3, DistanceMetric::Cosine);
+    HNSWIndex loaded(3, Space::Cosine);
     loaded.loadIndex(path1);
     EXPECT_EQ(loaded.size(), 2);
     
@@ -250,7 +250,7 @@ TEST_F(HNSWIndexTest, LoadIndexReplacesExisting) {
 }
 
 TEST_F(HNSWIndexTest, LoadIndexThrowsOnInvalidPath) {
-    HNSWIndex index(3, DistanceMetric::Cosine);
+    HNSWIndex index(3, Space::Cosine);
     
     // Try to load from non-existent file
     EXPECT_THROW(
@@ -266,7 +266,7 @@ TEST_F(HNSWIndexTest, LoadIndexThrowsOnCorruptedFile) {
     file << "This is not a valid index file";
     file.close();
     
-    HNSWIndex index(3, DistanceMetric::Cosine);
+    HNSWIndex index(3, Space::Cosine);
     
     // Should throw when trying to load corrupted file
     EXPECT_THROW(index.loadIndex(path), std::runtime_error);
@@ -274,7 +274,7 @@ TEST_F(HNSWIndexTest, LoadIndexThrowsOnCorruptedFile) {
 
 TEST_F(HNSWIndexTest, LoadIndexRequiresMatchingDimension) {
     // Create and save index with dimension 3
-    HNSWIndex original(3, DistanceMetric::Cosine);
+    HNSWIndex original(3, Space::Cosine);
     original.insert(1, {1.0f, 0.0f, 0.0f});
     
     std::string path = GetTestPath("dim3_index.bin");
@@ -283,7 +283,7 @@ TEST_F(HNSWIndexTest, LoadIndexRequiresMatchingDimension) {
     // Try to load with wrong dimension - this should fail
     // Note: hnswlib may or may not validate dimension at load time
     // The actual behavior depends on hnswlib implementation
-    HNSWIndex wrongDim(5, DistanceMetric::Cosine);
+    HNSWIndex wrongDim(5, Space::Cosine);
     
     // This might throw or might succeed but produce incorrect results
     // We'll test that it at least doesn't crash
@@ -297,31 +297,31 @@ TEST_F(HNSWIndexTest, LoadIndexRequiresMatchingDimension) {
     }
 }
 
-TEST_F(HNSWIndexTest, LoadIndexRequiresMatchingMetric) {
+TEST_F(HNSWIndexTest, LoadIndexRequiresMatchingSpace) {
     // Create and save L2 index
-    HNSWIndex l2Index(3, DistanceMetric::L2);
+    HNSWIndex l2Index(3, Space::L2);
     l2Index.insert(1, {1.0f, 0.0f, 0.0f});
     
     std::string path = GetTestPath("l2_index.bin");
     l2Index.saveIndex(path);
     
-    // Try to load with Cosine metric
-    // Note: hnswlib may not validate metric at load time
-    HNSWIndex cosineIndex(3, DistanceMetric::Cosine);
+    // Try to load with Cosine space
+    // Note: hnswlib may not validate space at load time
+    HNSWIndex cosineIndex(3, Space::Cosine);
     
     // This might work but produce incorrect results
     // We test that it doesn't crash
     try {
         cosineIndex.loadIndex(path);
-        // If successful, results might be incorrect due to metric mismatch
+        // If successful, results might be incorrect due to space mismatch
     } catch (const std::exception& e) {
-        // Expected if metric validation occurs
+        // Expected if space validation occurs
         SUCCEED();
     }
 }
 
 TEST_F(HNSWIndexTest, SaveEmptyIndex) {
-    HNSWIndex index(3, DistanceMetric::Cosine);
+    HNSWIndex index(3, Space::Cosine);
     // Don't insert any vectors
     
     std::string path = GetTestPath("empty_index.bin");
@@ -330,7 +330,7 @@ TEST_F(HNSWIndexTest, SaveEmptyIndex) {
     EXPECT_TRUE(std::filesystem::exists(path));
     
     // Load empty index
-    HNSWIndex loaded(3, DistanceMetric::Cosine);
+    HNSWIndex loaded(3, Space::Cosine);
     EXPECT_NO_THROW(loaded.loadIndex(path));
     EXPECT_EQ(loaded.size(), 0);
 }
@@ -339,7 +339,7 @@ TEST_F(HNSWIndexTest, SaveLargeIndex) {
     const size_t dim = 128;
     const size_t n = 1000;
     
-    HNSWIndex index(dim, DistanceMetric::Cosine);
+    HNSWIndex index(dim, Space::Cosine);
     std::mt19937 gen(42);
     
     for (size_t i = 0; i < n; ++i) {
@@ -355,7 +355,7 @@ TEST_F(HNSWIndexTest, SaveLargeIndex) {
     EXPECT_GT(std::filesystem::file_size(path), 1000); // At least 1KB
     
     // Load and verify
-    HNSWIndex loaded(dim, DistanceMetric::Cosine);
+    HNSWIndex loaded(dim, Space::Cosine);
     EXPECT_NO_THROW(loaded.loadIndex(path));
     EXPECT_EQ(loaded.size(), n);
 }

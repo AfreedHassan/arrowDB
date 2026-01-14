@@ -209,10 +209,14 @@ TEST(SIFTTest, DISABLED_SIFT1M_Recall) {
     
     // Create collection with optimized config for 1M vectors
     // NOTE: SIFT ground truth uses L2 distance, so we must use L2 here too
-    CollectionConfig collectionCfg{.name = "sift1m", .dimensions = 128, .metric = DistanceMetric::L2};
-    IndexOptions indexOpts{.max_elements = vectors.size(), .M = 64, .ef_construction = 200};
+    CollectionConfig collectionCfg{
+        .name = "sift1m",
+        .dimensions = 128,
+        .space = Space::L2,
+        .index = {.max_elements = vectors.size(), .M = 64, .ef_construction = 200}
+    };
 
-    Collection collection(collectionCfg, indexOpts);
+    Collection collection(collectionCfg);
     
     // Insert vectors
     std::cout << "Building HNSW index..." << std::endl;
@@ -270,10 +274,14 @@ TEST(SIFTTest, DISABLED_SIFT_Performance) {
         auto vectors = LoadSIFTVectors(SIFT1M_VECTORS, size);
         
         // SIFT uses L2 distance (ground truth is computed with L2)
-        CollectionConfig cfg{.name = "sift_bench", .dimensions = 128, .metric = DistanceMetric::L2};
-        IndexOptions indexOpts{.max_elements = vectors.size(), .M = 64, .ef_construction = 200};
+        CollectionConfig cfg{
+            .name = "sift_bench",
+            .dimensions = 128,
+            .space = Space::L2,
+            .index = {.max_elements = vectors.size(), .M = 64, .ef_construction = 200}
+        };
 
-        Collection collection(cfg, indexOpts);
+        Collection collection(cfg);
         
         auto start = std::chrono::high_resolution_clock::now();
         for (size_t i = 0; i < vectors.size(); ++i) {

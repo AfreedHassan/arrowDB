@@ -14,20 +14,20 @@
 
 namespace arrow {
 
-HNSWIndex::HNSWIndex(size_t dim, DistanceMetric metric,
+HNSWIndex::HNSWIndex(size_t dim, Space space,
                       const HNSWConfig& config)
-    : dim_(dim), metric_(metric) {
-  // Create space based on metric
-    switch (metric) {
-    case DistanceMetric::Cosine:
-    case DistanceMetric::InnerProduct:
+    : dim_(dim), spaceKind_(space) {
+  // Create space based on space kind
+    switch (space) {
+    case Space::Cosine:
+    case Space::InnerProduct:
       space_ = std::make_unique<hnswlib::InnerProductSpace>(dim);
       break;
-    case DistanceMetric::L2:
+    case Space::L2:
       space_ = std::make_unique<hnswlib::L2Space>(dim);
       break;
     default:
-      throw std::invalid_argument("Unsupported distance metric");
+      throw std::invalid_argument("Unsupported space type");
   }
 
   hnsw_ = std::make_unique<hnswlib::HierarchicalNSW<float>>(
@@ -72,7 +72,7 @@ std::vector<IndexSearchResult> HNSWIndex::search(
   // For InnerProduct/Cosine, hnswlib returns negative similarity (1 - cosine)
   // For L2, hnswlib returns positive distance
   // We negate for InnerProduct/Cosine to get proper similarity scores (higher = better)
-  int8_t distToScoreConverter = (metric_ == DistanceMetric::L2) ? 1 : -1;
+  int8_t distToScoreConverter = (spaceKind_ == Space::L2) ? 1 : -1;
 
   // Results come out in worst-to-best order (max heap), reverse them
   while (!resultsQueue.empty()) {

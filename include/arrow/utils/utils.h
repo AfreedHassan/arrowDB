@@ -95,34 +95,34 @@ inline Metadata jsonToMetadata(const json& j) {
 }
 
 /**
- * @brief Convert DistanceMetric enum to JSON string.
+ * @brief Convert Space enum to JSON string.
  */
-inline json distanceMetricToJson(DistanceMetric metric) {
-    switch (metric) {
-        case DistanceMetric::Cosine:
+inline json spaceToJson(Space space) {
+    switch (space) {
+        case Space::Cosine:
             return "Cosine";
-        case DistanceMetric::L2:
+        case Space::L2:
             return "L2";
-        case DistanceMetric::InnerProduct:
+        case Space::InnerProduct:
             return "InnerProduct";
         default:
-            throw std::runtime_error("Unknown DistanceMetric");
+            throw std::runtime_error("Unknown Index Space");
     }
 }
 
 /**
- * @brief Convert JSON string to DistanceMetric enum.
+ * @brief Convert JSON string to Space.
  */
-inline DistanceMetric jsonToDistanceMetric(const json& j) {
-    std::string metricStr = j.get<std::string>();
-    if (metricStr == "Cosine") {
-        return DistanceMetric::Cosine;
-    } else if (metricStr == "L2") {
-        return DistanceMetric::L2;
-    } else if (metricStr == "InnerProduct") {
-        return DistanceMetric::InnerProduct;
+inline Space jsonToSpace(const json& j) {
+    std::string spaceStr = j.get<std::string>();
+    if (spaceStr == "Cosine") {
+        return Space::Cosine;
+    } else if (spaceStr == "L2") {
+        return Space::L2;
+    } else if (spaceStr == "InnerProduct") {
+        return Space::InnerProduct;
     } else {
-        throw std::runtime_error("Unknown DistanceMetric: " + metricStr);
+        throw std::runtime_error("Unknown Index Space: " + spaceStr);
     }
 }
 
