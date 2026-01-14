@@ -27,21 +27,21 @@ protected:
 };
 
 TEST_F(ArrowDBTest, CreateDatabase) {
-  ClientOptions options{.data_dir = testDir};
-  ArrowDB db(options);
+  ClientOptions options{.dataDir = testDir};
+  Client db(options);
 
   EXPECT_EQ(db.dataDir(), testDir);
   EXPECT_TRUE(db.listCollections().empty());
 }
 
 TEST_F(ArrowDBTest, CreateCollection) {
-  ClientOptions options{.data_dir = testDir};
-  ArrowDB db(options);
+  ClientOptions options{.dataDir = testDir};
+  Client db(options);
 
   CollectionConfig config{
       .name = "test_collection",
       .dimensions = 128,
-      .metric = DistanceMetric::Cosine
+      .space = Space::Cosine
   };
 
   auto result = db.createCollection("test_collection", config);
@@ -50,7 +50,7 @@ TEST_F(ArrowDBTest, CreateCollection) {
   Collection* collection = result.value();
   EXPECT_EQ(collection->name(), "test_collection");
   EXPECT_EQ(collection->dimension(), 128);
-  EXPECT_EQ(collection->metric(), DistanceMetric::Cosine);
+  EXPECT_EQ(collection->space(), Space::Cosine);
 
   // Verify it's in the list
   auto collections = db.listCollections();
@@ -59,13 +59,13 @@ TEST_F(ArrowDBTest, CreateCollection) {
 }
 
 TEST_F(ArrowDBTest, CreateDuplicateCollectionFails) {
-  ClientOptions options{.data_dir = testDir};
-  ArrowDB db(options);
+  ClientOptions options{.dataDir = testDir};
+  Client db(options);
 
   CollectionConfig config{
       .name = "test_collection",
       .dimensions = 128,
-      .metric = DistanceMetric::Cosine
+      .space = Space::Cosine
   };
 
   auto result1 = db.createCollection("test_collection", config);
@@ -78,13 +78,13 @@ TEST_F(ArrowDBTest, CreateDuplicateCollectionFails) {
 }
 
 TEST_F(ArrowDBTest, GetCollection) {
-  ClientOptions options{.data_dir = testDir};
-  ArrowDB db(options);
+  ClientOptions options{.dataDir = testDir};
+  Client db(options);
 
   CollectionConfig config{
       .name = "test_collection",
       .dimensions = 128,
-      .metric = DistanceMetric::Cosine
+      .space = Space::Cosine
   };
 
   db.createCollection("test_collection", config);
@@ -95,8 +95,8 @@ TEST_F(ArrowDBTest, GetCollection) {
 }
 
 TEST_F(ArrowDBTest, GetNonExistentCollectionFails) {
-  ClientOptions options{.data_dir = testDir};
-  ArrowDB db(options);
+  ClientOptions options{.dataDir = testDir};
+  Client db(options);
 
   auto result = db.getCollection("nonexistent");
   EXPECT_FALSE(result.ok());
@@ -104,13 +104,13 @@ TEST_F(ArrowDBTest, GetNonExistentCollectionFails) {
 }
 
 TEST_F(ArrowDBTest, DropCollection) {
-  ClientOptions options{.data_dir = testDir};
-  ArrowDB db(options);
+  ClientOptions options{.dataDir = testDir};
+  Client db(options);
 
   CollectionConfig config{
       .name = "test_collection",
       .dimensions = 128,
-      .metric = DistanceMetric::Cosine
+      .space = Space::Cosine
   };
 
   db.createCollection("test_collection", config);
@@ -122,15 +122,15 @@ TEST_F(ArrowDBTest, DropCollection) {
 }
 
 TEST_F(ArrowDBTest, HasCollection) {
-  ClientOptions options{.data_dir = testDir};
-  ArrowDB db(options);
+  ClientOptions options{.dataDir = testDir};
+  Client db(options);
 
   EXPECT_FALSE(db.hasCollection("test_collection"));
 
   CollectionConfig config{
       .name = "test_collection",
       .dimensions = 128,
-      .metric = DistanceMetric::Cosine
+      .space = Space::Cosine
   };
 
   db.createCollection("test_collection", config);
@@ -138,13 +138,13 @@ TEST_F(ArrowDBTest, HasCollection) {
 }
 
 TEST_F(ArrowDBTest, InsertAndSearchWithQuery) {
-  ClientOptions options{.data_dir = testDir};
-  ArrowDB db(options);
+  ClientOptions options{.dataDir = testDir};
+  Client db(options);
 
   CollectionConfig config{
       .name = "test_collection",
       .dimensions = 128,
-      .metric = DistanceMetric::Cosine
+      .space = Space::Cosine
   };
 
   auto result = db.createCollection("test_collection", config);
@@ -179,14 +179,14 @@ TEST_F(ArrowDBTest, InsertAndSearchWithQuery) {
 }
 
 TEST_F(ArrowDBTest, MultipleCollections) {
-  ClientOptions options{.data_dir = testDir};
-  ArrowDB db(options);
+  ClientOptions options{.dataDir = testDir};
+  Client db(options);
 
   for (int i = 0; i < 3; ++i) {
     CollectionConfig config{
         .name = "collection_" + std::to_string(i),
         .dimensions = static_cast<uint32_t>(64 + i * 32),
-        .metric = DistanceMetric::Cosine
+        .space = Space::Cosine
     };
     db.createCollection("collection_" + std::to_string(i), config);
   }
