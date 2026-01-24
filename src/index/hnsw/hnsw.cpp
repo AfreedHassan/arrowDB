@@ -1187,6 +1187,7 @@ namespace hnsw {
 
                         for (int i = 0; i < size; i++) {
                             tableidx_t cand = datal[i];
+                            if (isMarkedDeleted(cand)) continue;
                             dist_t d = distFunc_(vecData, reinterpret_cast<const dist_t*>(getDataByInternalId(cand)), dim_);
                             if (d < curDist) {
                                 curDist = d;
@@ -1248,6 +1249,7 @@ namespace hnsw {
                 tableidx_t* datal = reinterpret_cast<tableidx_t*>(data + 1);
                 for (int i = 0; i < size; i++) {
                     tableidx_t cand = datal[i];
+                    if (isMarkedDeleted(cand)) continue;
                     if (cand > maxElements_)
                         throw std::runtime_error("cand error");
 
