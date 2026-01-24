@@ -24,6 +24,8 @@ inline const DistanceBackend<float>& selectBackend<float>() {
             b.ip_aligned16 = ip_neon_aligned16;
             b.l2_aligned4 = l2_neon_aligned4;
             b.ip_aligned4 = ip_neon_aligned4;
+            b.l2_batch = l2_batch_neon;
+            b.ip_batch = ip_batch_neon;
             b.name = "neon";
             b.simd_level = SimdLevel::NEON;
             return b;
@@ -38,6 +40,8 @@ inline const DistanceBackend<float>& selectBackend<float>() {
             b.ip_aligned16 = ip_avx512_aligned16;
             b.l2_aligned4 = l2_avx2_aligned4;
             b.ip_aligned4 = ip_avx2_aligned4;
+            b.l2_batch = l2_batch_avx512;
+            b.ip_batch = ip_batch_avx512;
             b.name = "avx512";
             b.simd_level = SimdLevel::AVX512;
             return b;
@@ -52,6 +56,8 @@ inline const DistanceBackend<float>& selectBackend<float>() {
             b.ip_aligned16 = ip_avx2_aligned16;
             b.l2_aligned4 = l2_avx2_aligned4;
             b.ip_aligned4 = ip_avx2_aligned4;
+            b.l2_batch = l2_batch_avx2;
+            b.ip_batch = ip_batch_avx2;
             b.name = "avx2";
             b.simd_level = SimdLevel::AVX2;
             return b;
@@ -66,6 +72,8 @@ inline const DistanceBackend<float>& selectBackend<float>() {
             b.ip_aligned16 = ip_avx_aligned16;
             b.l2_aligned4 = l2_avx_aligned4;
             b.ip_aligned4 = ip_avx_aligned4;
+            b.l2_batch = l2_batch_avx;
+            b.ip_batch = ip_batch_avx;
             b.name = "avx";
             b.simd_level = SimdLevel::AVX;
             return b;
@@ -80,6 +88,8 @@ inline const DistanceBackend<float>& selectBackend<float>() {
             b.ip_aligned16 = ip_sse_aligned16;
             b.l2_aligned4 = l2_sse_aligned4;
             b.ip_aligned4 = ip_sse_aligned4;
+            b.l2_batch = l2_batch_sse;
+            b.ip_batch = ip_batch_sse;
             b.name = "sse";
             b.simd_level = SimdLevel::SSE;
             return b;
@@ -93,6 +103,8 @@ inline const DistanceBackend<float>& selectBackend<float>() {
         b.ip_aligned16 = ip_scalar;
         b.l2_aligned4 = l2_scalar;
         b.ip_aligned4 = ip_scalar;
+        b.l2_batch = l2_batch_scalar;
+        b.ip_batch = ip_batch_scalar;
         b.name = "scalar";
         b.simd_level = SimdLevel::NONE;
         return b;
