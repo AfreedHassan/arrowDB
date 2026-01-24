@@ -1176,7 +1176,8 @@ namespace hnsw {
             if (curLevel < maxLevelCopy) {
                 dist_t curDist = distFunc_(vecData, reinterpret_cast<const dist_t*>(getDataByInternalId(currObj)), dim_);
                 for (int level = maxLevelCopy; level > curLevel; level--) {
-                    bool changed = true;
+                    if (level > elementLevels_[currObj]) continue;
+                    bool changed  = true; 
                     while (changed) {
                         changed = false;
                         std::unique_lock<std::mutex> lock(adjacencyMutexes_[currObj]);
