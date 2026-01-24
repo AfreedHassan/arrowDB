@@ -962,14 +962,14 @@ namespace hnsw {
         bool isUpdate) {
 
         size_t Mcurmax = level ? maxM_ : maxM0_;
-        getNeighborsByHeuristic(topCandidates, M_);
+        getNeighborsByHeuristic(topCandidates, Mcurmax); // was M_
 
-        if (topCandidates.size() > M_)
+        if (topCandidates.size() > Mcurmax)
             throw std::runtime_error("Should not be more than M_ candidates returned by heuristic");
 
         // Extract selected neighbors
         std::vector<tableidx_t> selectedNeighbors;
-        selectedNeighbors.reserve(M_);
+        selectedNeighbors.reserve(Mcurmax);
         while (!topCandidates.empty()) {
             selectedNeighbors.push_back(topCandidates.top().second);
             topCandidates.pop();
