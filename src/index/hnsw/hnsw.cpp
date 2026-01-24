@@ -470,6 +470,7 @@ namespace hnsw {
         CandidateQueue candidateSet;   // max-heap via negated dist: work queue (smallest first)
 
         dist_t lowerBound;
+        dist_t minValidDist = std::numeric_limits<dist_t>::max(); // test
 
         // Initialize with entry point
         if (!isMarkedDeleted(entryId)) {
@@ -478,8 +479,10 @@ namespace hnsw {
             topCandidates.emplace(dist, entryId);
             lowerBound = dist;
             candidateSet.emplace(-dist, entryId);
+            minValidDist = dist; // test
         } else {
             lowerBound = std::numeric_limits<dist_t>::max();
+            minValidDist = lowerBound; // test
             candidateSet.emplace(-lowerBound, entryId);
         }
         visited[entryId] = tag;
@@ -546,6 +549,7 @@ namespace hnsw {
 
                     if (!isMarkedDeleted(neighborId)) {
                         topCandidates.emplace(dist, neighborId);
+                        minValidDist = std::min(minValidDist, dist); // test
                     }
 
                     // Prune to maintain ef size
