@@ -41,6 +41,11 @@ public:
         return pdistfunc_;
     }
 
+    /// Get batch distance function pointer for 1-to-N computations.
+    pbatchdistfunc_t<float> getBatchDistFunc() override {
+        return backend_.l2_batch;
+    }
+
     /// Get distance function parameters (dimension).
     void* getDistFuncParam() override {
         return &dim_;

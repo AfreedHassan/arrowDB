@@ -14,6 +14,24 @@ public:
   virtual ~BaseFilterFunctor() {};
 };
 
+template<typename dist_t>
+class BaseSearchStopCondition {
+ public:
+    virtual void add_point_to_result(label_t label, const void *datapoint, dist_t dist) = 0;
+
+    virtual void remove_point_from_result(label_t label, const void *datapoint, dist_t dist) = 0;
+
+    virtual bool should_stop_search(dist_t candidate_dist, dist_t lowerBound) = 0;
+
+    virtual bool should_consider_candidate(dist_t candidate_dist, dist_t lowerBound) = 0;
+
+    virtual bool should_remove_extra() = 0;
+
+    virtual void filter_results(std::vector<std::pair<dist_t, label_t>> &candidates) = 0;
+
+    virtual ~BaseSearchStopCondition() {}
+};
+
 template <typename dist_t> 
 class AlgorithmInterface {
 public:
@@ -39,7 +57,7 @@ AlgorithmInterface<dist_t>::searchKnnCloserFirst(
     const void *queryData, size_t k, BaseFilterFunctor *isIdAllowed) const {
   std::vector<std::pair<dist_t, label_t>> result;
 
-  std::vector<std::pair<dist_t, label_t>> ret = searchKnn(queryData, k, isIdAllowed);
+  auto ret = searchKnn(queryData, k, isIdAllowed);
   {
     size_t sz = ret.size();
     result.resize(sz);
@@ -76,12 +94,22 @@ public:
 template<typename metric_t>
 using pdistfunc_t = float (*)(const metric_t* a, const metric_t* b, std::size_t dim);
 
+template<typename metric_t>
+using pbatchdistfunc_t = void (*)(
+    const metric_t* query,
+    const metric_t* const* targets,
+    std::size_t numTargets,
+    std::size_t dim,
+    metric_t* outDistances);
+
 template <typename metric_t> class SpaceInterface {
 public:
   // virtual void search(void *);
   virtual size_t getDataSize() = 0;
 
   virtual pdistfunc_t<metric_t> getDistFunc() = 0;
+
+  virtual pbatchdistfunc_t<metric_t> getBatchDistFunc() = 0;
 
   virtual void *getDistFuncParam() = 0;
 
@@ -97,5 +125,6 @@ template <typename T> static void write(std::ostream &out, const T &val) {
   static_assert(std::is_trivially_copyable_v<T>);
   out.write(reinterpret_cast<const char *>(&val), sizeof(T));
 }
+
 
 } // namespace hnsw
