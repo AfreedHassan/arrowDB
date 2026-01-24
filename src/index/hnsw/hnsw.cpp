@@ -128,6 +128,9 @@ namespace hnsw {
         kElemVecSize_ = s->getDataSize();
         distFunc_ = s->getDistFunc();
         batchDistFunc_ = s->getBatchDistFunc();
+        if (batchDistFunc_ == nullptr) {
+            throw std::runtime_error("SpaceInterface must provide a batch distance function");
+        }
         distFuncParam_ = s->getDistFuncParam();
         dim_ = *static_cast<std::size_t*>(distFuncParam_);
         if (M <= 10000) {
@@ -162,7 +165,7 @@ namespace hnsw {
         // initializations for special treatment of the first node
 
         entryPoint_ = INVALID_ID;
-        maxLevel_ = INVALID_ID;
+        maxLevel_ = -1;
 
         pAdjListsBlock_ = (char **) malloc(sizeof(void *) * maxElements_);
         if (pAdjListsBlock_ == nullptr)
@@ -232,7 +235,7 @@ namespace hnsw {
         read(input, maxElements_);
         read(input, elementCount_);
 
-        maxElements_ = std::max(maxElemsParam, elementCount_);
+        maxElements_ = std::max(maxElemsParam, elementCount_.load());
         read(input, kElementSize_);
         read(input, kLabelOffset_);
         read(input, kVectorOffset_);
@@ -253,6 +256,9 @@ namespace hnsw {
 
         // Get batch distance function from space (correctly selects L2 vs IP)
         batchDistFunc_ = pSpace->getBatchDistFunc();
+        if (batchDistFunc_ == nullptr) {
+            throw std::runtime_error("SpaceInterface must provide a batch distance function");
+        }
 
         auto pos = input.tellg();
         validateIndexFileBody(input, totalFileSize);
@@ -263,8 +269,8 @@ namespace hnsw {
         if (pElementsBlock_ == nullptr)
           throw std::runtime_error("Not enough memory: loadIndex failed to allocate vector data");
 
-        // Read into the memeory block
-        input.read(pElementsBlock_, elementCount_ * kElemVecSize_);
+        // Read into the memory block
+        input.read(pElementsBlock_, elementCount_ * kElementSize_);
 
         kAdjListSize_ = maxM_ * sizeof(tableidx_t) + sizeof(linklistsize_t);
 
@@ -445,10 +451,10 @@ namespace hnsw {
         epoch_t* visited = vl->visitedEpoch;
         const epoch_t tag = vl->curEpoch;
 
-        const float* query = static_cast<const float*>(queryPoint);
+        const dist_t* query = static_cast<const dist_t*>(queryPoint);
 
         // Thread-local scratch buffers - sized dynamically based on max neighbors
-        thread_local std::vector<const float*> neighborPtrs;
+        thread_local std::vector<const dist_t*> neighborPtrs;
         thread_local std::vector<tableidx_t> unvisitedIds;
         thread_local std::vector<dist_t> distances;
 
@@ -460,15 +466,15 @@ namespace hnsw {
             distances.reserve(maxNeighbors);
         }
 
-        CandidateQueue topCandidates;  // min-heap: best results (largest dist at top for pruning)
-        CandidateQueue candidateSet;   // max-heap via negated dist: work queue
+        CandidateQueue topCandidates;  // max-heap: largest dist at top for efficient pruning
+        CandidateQueue candidateSet;   // max-heap via negated dist: work queue (smallest first)
 
         dist_t lowerBound;
 
         // Initialize with entry point
         if (!isMarkedDeleted(entryId)) {
             dist_t dist = distFunc_(query,
-                reinterpret_cast<const float*>(getDataByInternalId(entryId)), dim_);
+                reinterpret_cast<const dist_t*>(getDataByInternalId(entryId)), dim_);
             topCandidates.emplace(dist, entryId);
             lowerBound = dist;
             candidateSet.emplace(-dist, entryId);
@@ -517,7 +523,7 @@ namespace hnsw {
                     if (visited[nid] != tag) {
                         visited[nid] = tag;
                         unvisitedIds[unvisitedCount] = nid;
-                        neighborPtrs[unvisitedCount] = reinterpret_cast<const float*>(
+                        neighborPtrs[unvisitedCount] = reinterpret_cast<const dist_t*>(
                             getDataByInternalId(nid));
                         ++unvisitedCount;
                     }
@@ -575,9 +581,9 @@ namespace hnsw {
         epoch_t* visited = vl->visitedEpoch;
         const epoch_t tag = vl->curEpoch;
 
-        const float* query = static_cast<const float*>(queryPoint);
+        const dist_t* query = static_cast<const dist_t*>(queryPoint);
 
-        thread_local std::vector<const float*> neighborPtrs;
+        thread_local std::vector<const dist_t*> neighborPtrs;
         thread_local std::vector<tableidx_t> unvisitedIds;
         thread_local std::vector<dist_t> distances;
 
@@ -588,13 +594,13 @@ namespace hnsw {
           distances.reserve(maxNeighbors);
         }
 
-        CandidateQueue topCandidates;   // min-heap: best results
-        CandidateQueue candidateSet;    // max-heap via negated dist
+        CandidateQueue topCandidates;   // max-heap: largest dist at top for pruning
+        CandidateQueue candidateSet;    // max-heap via negated dist: work queue
         dist_t lowerBound;
 
         if (!isMarkedDeleted(entryId)) {
           dist_t dist = distFunc_(query,
-              reinterpret_cast<const float*>(getDataByInternalId(entryId)), dim_);
+              reinterpret_cast<const dist_t*>(getDataByInternalId(entryId)), dim_);
           topCandidates.emplace(dist, entryId);
           lowerBound = dist;
           candidateSet.emplace(-dist, entryId);
@@ -642,7 +648,7 @@ namespace hnsw {
               if (visited[nid] != tag) {
                 visited[nid] = tag;
                 unvisitedIds[unvisitedCount] = nid;
-                neighborPtrs[unvisitedCount] = reinterpret_cast<const float*>(
+                neighborPtrs[unvisitedCount] = reinterpret_cast<const dist_t*>(
                     getDataByInternalId(nid));
                 ++unvisitedCount;
               }
@@ -685,7 +691,24 @@ namespace hnsw {
         }
 
         if constexpr (UseController) {
-          controller->filterResults(topCandidates);
+          // Convert CandidateQueue to vector for filterResults interface
+          std::vector<std::pair<dist_t, label_t>> resultsVec;
+          resultsVec.reserve(topCandidates.size());
+          while (!topCandidates.empty()) {
+            auto [dist, internalId] = topCandidates.top();
+            resultsVec.emplace_back(dist, getExternalLabel(internalId));
+            topCandidates.pop();
+          }
+          controller->filterResults(resultsVec);
+          // Rebuild queue from filtered results (convert back to internal IDs)
+          // Note: filterResults may have modified the vector
+          for (const auto& [dist, label] : resultsVec) {
+            std::unique_lock<std::mutex> lock(labelLookupMutex_);
+            auto it = labelLookup_.find(label);
+            if (it != labelLookup_.end()) {
+              topCandidates.emplace(dist, it->second);
+            }
+          }
         }
 
         visitedListPool_->releaseVisitedList(vl);
@@ -886,6 +909,7 @@ namespace hnsw {
       }
 
       linklistsize_t *getAdjList(tableidx_t internalId, int level) const {
+        assert(level >= 1 && "getAdjList requires level >= 1; use getAdjListL0 for level 0");
         return reinterpret_cast<linklistsize_t*>(
             pAdjListsBlock_[internalId] + (level - 1) * kAdjListSize_);
       }
