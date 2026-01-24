@@ -23,6 +23,18 @@
 
 namespace hnsw::impl {
 
+// Portable prefetch helper for cache optimization.
+// Prefetches data into L1 cache to reduce memory latency.
+inline void prefetchL1(const void* addr) {
+#if defined(__x86_64__) || defined(_M_X64)
+    _mm_prefetch(static_cast<const char*>(addr), _MM_HINT_T0);
+#elif defined(__aarch64__) || defined(_M_ARM64)
+    __builtin_prefetch(addr, 0, 3);  // Read, high temporal locality
+#else
+    (void)addr;  // No-op for unsupported platforms
+#endif
+}
+
 // Horizontal sum helpers
 #if defined(__SSE3__)
 inline float hsum_sse(__m128 v) {
@@ -831,6 +843,547 @@ inline float ip_neon_aligned4(const float* a, const float* b, std::size_t dim) {
         sum = vfmaq_f32(sum, va, vb);
     }
     return vaddvq_f32(sum);
+}
+#endif
+
+// ============================================================================
+// Batch distance kernels: compute distances from one query to N vectors
+// Query stays in cache/registers while iterating through targets
+// ============================================================================
+
+// Scalar batch fallback for L2 distance
+inline void l2_batch_scalar(
+    const float* query,
+    const float* const* targets,
+    std::size_t numTargets,
+    std::size_t dim,
+    float* outDistances) {
+    for (std::size_t t = 0; t < numTargets; ++t) {
+        outDistances[t] = l2_scalar(query, targets[t], dim);
+    }
+}
+
+// Scalar batch fallback for inner product
+inline void ip_batch_scalar(
+    const float* query,
+    const float* const* targets,
+    std::size_t numTargets,
+    std::size_t dim,
+    float* outDistances) {
+    for (std::size_t t = 0; t < numTargets; ++t) {
+        outDistances[t] = ip_scalar(query, targets[t], dim);
+    }
+}
+
+#if defined(__SSE__)
+// SSE batch: processes 4 distances with better cache utilization
+inline void l2_batch_sse(
+    const float* query,
+    const float* const* targets,
+    std::size_t numTargets,
+    std::size_t dim,
+    float* outDistances) {
+
+    std::size_t t = 0;
+    for (; t + 4 <= numTargets; t += 4) {
+        __m128 sum0 = _mm_setzero_ps();
+        __m128 sum1 = _mm_setzero_ps();
+        __m128 sum2 = _mm_setzero_ps();
+        __m128 sum3 = _mm_setzero_ps();
+
+        const float* t0 = targets[t];
+        const float* t1 = targets[t + 1];
+        const float* t2 = targets[t + 2];
+        const float* t3 = targets[t + 3];
+
+        for (std::size_t i = 0; i + 4 <= dim; i += 4) {
+            __m128 q = _mm_loadu_ps(query + i);
+
+            __m128 d0 = _mm_sub_ps(q, _mm_loadu_ps(t0 + i));
+            __m128 d1 = _mm_sub_ps(q, _mm_loadu_ps(t1 + i));
+            __m128 d2 = _mm_sub_ps(q, _mm_loadu_ps(t2 + i));
+            __m128 d3 = _mm_sub_ps(q, _mm_loadu_ps(t3 + i));
+
+            sum0 = _mm_add_ps(sum0, _mm_mul_ps(d0, d0));
+            sum1 = _mm_add_ps(sum1, _mm_mul_ps(d1, d1));
+            sum2 = _mm_add_ps(sum2, _mm_mul_ps(d2, d2));
+            sum3 = _mm_add_ps(sum3, _mm_mul_ps(d3, d3));
+        }
+
+        outDistances[t]     = hsum_sse(sum0);
+        outDistances[t + 1] = hsum_sse(sum1);
+        outDistances[t + 2] = hsum_sse(sum2);
+        outDistances[t + 3] = hsum_sse(sum3);
+
+        // Handle residual dimensions
+        for (std::size_t i = (dim / 4) * 4; i < dim; ++i) {
+            float qv = query[i];
+            outDistances[t]     += (qv - t0[i]) * (qv - t0[i]);
+            outDistances[t + 1] += (qv - t1[i]) * (qv - t1[i]);
+            outDistances[t + 2] += (qv - t2[i]) * (qv - t2[i]);
+            outDistances[t + 3] += (qv - t3[i]) * (qv - t3[i]);
+        }
+    }
+
+    // Handle remaining targets
+    for (; t < numTargets; ++t) {
+        outDistances[t] = l2_sse(query, targets[t], dim);
+    }
+}
+
+inline void ip_batch_sse(
+    const float* query,
+    const float* const* targets,
+    std::size_t numTargets,
+    std::size_t dim,
+    float* outDistances) {
+
+    std::size_t t = 0;
+    for (; t + 4 <= numTargets; t += 4) {
+        __m128 sum0 = _mm_setzero_ps();
+        __m128 sum1 = _mm_setzero_ps();
+        __m128 sum2 = _mm_setzero_ps();
+        __m128 sum3 = _mm_setzero_ps();
+
+        const float* t0 = targets[t];
+        const float* t1 = targets[t + 1];
+        const float* t2 = targets[t + 2];
+        const float* t3 = targets[t + 3];
+
+        for (std::size_t i = 0; i + 4 <= dim; i += 4) {
+            __m128 q = _mm_loadu_ps(query + i);
+
+            sum0 = _mm_add_ps(sum0, _mm_mul_ps(q, _mm_loadu_ps(t0 + i)));
+            sum1 = _mm_add_ps(sum1, _mm_mul_ps(q, _mm_loadu_ps(t1 + i)));
+            sum2 = _mm_add_ps(sum2, _mm_mul_ps(q, _mm_loadu_ps(t2 + i)));
+            sum3 = _mm_add_ps(sum3, _mm_mul_ps(q, _mm_loadu_ps(t3 + i)));
+        }
+
+        outDistances[t]     = hsum_sse(sum0);
+        outDistances[t + 1] = hsum_sse(sum1);
+        outDistances[t + 2] = hsum_sse(sum2);
+        outDistances[t + 3] = hsum_sse(sum3);
+
+        for (std::size_t i = (dim / 4) * 4; i < dim; ++i) {
+            float qv = query[i];
+            outDistances[t]     += qv * t0[i];
+            outDistances[t + 1] += qv * t1[i];
+            outDistances[t + 2] += qv * t2[i];
+            outDistances[t + 3] += qv * t3[i];
+        }
+    }
+
+    for (; t < numTargets; ++t) {
+        outDistances[t] = ip_sse(query, targets[t], dim);
+    }
+}
+#endif
+
+#if defined(__AVX__)
+// AVX batch: processes 4 distances with 256-bit registers
+inline void l2_batch_avx(
+    const float* query,
+    const float* const* targets,
+    std::size_t numTargets,
+    std::size_t dim,
+    float* outDistances) {
+
+    std::size_t t = 0;
+    for (; t + 4 <= numTargets; t += 4) {
+        __m256 sum0 = _mm256_setzero_ps();
+        __m256 sum1 = _mm256_setzero_ps();
+        __m256 sum2 = _mm256_setzero_ps();
+        __m256 sum3 = _mm256_setzero_ps();
+
+        const float* t0 = targets[t];
+        const float* t1 = targets[t + 1];
+        const float* t2 = targets[t + 2];
+        const float* t3 = targets[t + 3];
+
+        for (std::size_t i = 0; i + 8 <= dim; i += 8) {
+            __m256 q = _mm256_loadu_ps(query + i);
+
+            __m256 d0 = _mm256_sub_ps(q, _mm256_loadu_ps(t0 + i));
+            __m256 d1 = _mm256_sub_ps(q, _mm256_loadu_ps(t1 + i));
+            __m256 d2 = _mm256_sub_ps(q, _mm256_loadu_ps(t2 + i));
+            __m256 d3 = _mm256_sub_ps(q, _mm256_loadu_ps(t3 + i));
+
+            sum0 = _mm256_add_ps(sum0, _mm256_mul_ps(d0, d0));
+            sum1 = _mm256_add_ps(sum1, _mm256_mul_ps(d1, d1));
+            sum2 = _mm256_add_ps(sum2, _mm256_mul_ps(d2, d2));
+            sum3 = _mm256_add_ps(sum3, _mm256_mul_ps(d3, d3));
+        }
+
+        outDistances[t]     = hsum_avx(sum0);
+        outDistances[t + 1] = hsum_avx(sum1);
+        outDistances[t + 2] = hsum_avx(sum2);
+        outDistances[t + 3] = hsum_avx(sum3);
+
+        for (std::size_t i = (dim / 8) * 8; i < dim; ++i) {
+            float qv = query[i];
+            outDistances[t]     += (qv - t0[i]) * (qv - t0[i]);
+            outDistances[t + 1] += (qv - t1[i]) * (qv - t1[i]);
+            outDistances[t + 2] += (qv - t2[i]) * (qv - t2[i]);
+            outDistances[t + 3] += (qv - t3[i]) * (qv - t3[i]);
+        }
+    }
+
+    for (; t < numTargets; ++t) {
+        outDistances[t] = l2_avx(query, targets[t], dim);
+    }
+}
+
+inline void ip_batch_avx(
+    const float* query,
+    const float* const* targets,
+    std::size_t numTargets,
+    std::size_t dim,
+    float* outDistances) {
+
+    std::size_t t = 0;
+    for (; t + 4 <= numTargets; t += 4) {
+        __m256 sum0 = _mm256_setzero_ps();
+        __m256 sum1 = _mm256_setzero_ps();
+        __m256 sum2 = _mm256_setzero_ps();
+        __m256 sum3 = _mm256_setzero_ps();
+
+        const float* t0 = targets[t];
+        const float* t1 = targets[t + 1];
+        const float* t2 = targets[t + 2];
+        const float* t3 = targets[t + 3];
+
+        for (std::size_t i = 0; i + 8 <= dim; i += 8) {
+            __m256 q = _mm256_loadu_ps(query + i);
+
+            sum0 = _mm256_add_ps(sum0, _mm256_mul_ps(q, _mm256_loadu_ps(t0 + i)));
+            sum1 = _mm256_add_ps(sum1, _mm256_mul_ps(q, _mm256_loadu_ps(t1 + i)));
+            sum2 = _mm256_add_ps(sum2, _mm256_mul_ps(q, _mm256_loadu_ps(t2 + i)));
+            sum3 = _mm256_add_ps(sum3, _mm256_mul_ps(q, _mm256_loadu_ps(t3 + i)));
+        }
+
+        outDistances[t]     = hsum_avx(sum0);
+        outDistances[t + 1] = hsum_avx(sum1);
+        outDistances[t + 2] = hsum_avx(sum2);
+        outDistances[t + 3] = hsum_avx(sum3);
+
+        for (std::size_t i = (dim / 8) * 8; i < dim; ++i) {
+            float qv = query[i];
+            outDistances[t]     += qv * t0[i];
+            outDistances[t + 1] += qv * t1[i];
+            outDistances[t + 2] += qv * t2[i];
+            outDistances[t + 3] += qv * t3[i];
+        }
+    }
+
+    for (; t < numTargets; ++t) {
+        outDistances[t] = ip_avx(query, targets[t], dim);
+    }
+}
+#endif
+
+#if defined(__AVX2__) && defined(__FMA__)
+// AVX2 batch with FMA: most efficient x86 batch implementation
+inline void l2_batch_avx2(
+    const float* query,
+    const float* const* targets,
+    std::size_t numTargets,
+    std::size_t dim,
+    float* outDistances) {
+
+    std::size_t t = 0;
+    for (; t + 4 <= numTargets; t += 4) {
+        __m256 sum0 = _mm256_setzero_ps();
+        __m256 sum1 = _mm256_setzero_ps();
+        __m256 sum2 = _mm256_setzero_ps();
+        __m256 sum3 = _mm256_setzero_ps();
+
+        const float* t0 = targets[t];
+        const float* t1 = targets[t + 1];
+        const float* t2 = targets[t + 2];
+        const float* t3 = targets[t + 3];
+
+        for (std::size_t i = 0; i + 8 <= dim; i += 8) {
+            __m256 q = _mm256_loadu_ps(query + i);
+
+            __m256 d0 = _mm256_sub_ps(q, _mm256_loadu_ps(t0 + i));
+            __m256 d1 = _mm256_sub_ps(q, _mm256_loadu_ps(t1 + i));
+            __m256 d2 = _mm256_sub_ps(q, _mm256_loadu_ps(t2 + i));
+            __m256 d3 = _mm256_sub_ps(q, _mm256_loadu_ps(t3 + i));
+
+            sum0 = _mm256_fmadd_ps(d0, d0, sum0);
+            sum1 = _mm256_fmadd_ps(d1, d1, sum1);
+            sum2 = _mm256_fmadd_ps(d2, d2, sum2);
+            sum3 = _mm256_fmadd_ps(d3, d3, sum3);
+        }
+
+        outDistances[t]     = hsum_avx(sum0);
+        outDistances[t + 1] = hsum_avx(sum1);
+        outDistances[t + 2] = hsum_avx(sum2);
+        outDistances[t + 3] = hsum_avx(sum3);
+
+        for (std::size_t i = (dim / 8) * 8; i < dim; ++i) {
+            float qv = query[i];
+            outDistances[t]     += (qv - t0[i]) * (qv - t0[i]);
+            outDistances[t + 1] += (qv - t1[i]) * (qv - t1[i]);
+            outDistances[t + 2] += (qv - t2[i]) * (qv - t2[i]);
+            outDistances[t + 3] += (qv - t3[i]) * (qv - t3[i]);
+        }
+    }
+
+    for (; t < numTargets; ++t) {
+        outDistances[t] = l2_avx2(query, targets[t], dim);
+    }
+}
+
+inline void ip_batch_avx2(
+    const float* query,
+    const float* const* targets,
+    std::size_t numTargets,
+    std::size_t dim,
+    float* outDistances) {
+
+    std::size_t t = 0;
+    for (; t + 4 <= numTargets; t += 4) {
+        __m256 sum0 = _mm256_setzero_ps();
+        __m256 sum1 = _mm256_setzero_ps();
+        __m256 sum2 = _mm256_setzero_ps();
+        __m256 sum3 = _mm256_setzero_ps();
+
+        const float* t0 = targets[t];
+        const float* t1 = targets[t + 1];
+        const float* t2 = targets[t + 2];
+        const float* t3 = targets[t + 3];
+
+        for (std::size_t i = 0; i + 8 <= dim; i += 8) {
+            __m256 q = _mm256_loadu_ps(query + i);
+
+            sum0 = _mm256_fmadd_ps(q, _mm256_loadu_ps(t0 + i), sum0);
+            sum1 = _mm256_fmadd_ps(q, _mm256_loadu_ps(t1 + i), sum1);
+            sum2 = _mm256_fmadd_ps(q, _mm256_loadu_ps(t2 + i), sum2);
+            sum3 = _mm256_fmadd_ps(q, _mm256_loadu_ps(t3 + i), sum3);
+        }
+
+        outDistances[t]     = hsum_avx(sum0);
+        outDistances[t + 1] = hsum_avx(sum1);
+        outDistances[t + 2] = hsum_avx(sum2);
+        outDistances[t + 3] = hsum_avx(sum3);
+
+        for (std::size_t i = (dim / 8) * 8; i < dim; ++i) {
+            float qv = query[i];
+            outDistances[t]     += qv * t0[i];
+            outDistances[t + 1] += qv * t1[i];
+            outDistances[t + 2] += qv * t2[i];
+            outDistances[t + 3] += qv * t3[i];
+        }
+    }
+
+    for (; t < numTargets; ++t) {
+        outDistances[t] = ip_avx2(query, targets[t], dim);
+    }
+}
+#endif
+
+#if defined(__AVX512F__)
+// AVX512 batch: processes 4 distances with 512-bit registers
+inline void l2_batch_avx512(
+    const float* query,
+    const float* const* targets,
+    std::size_t numTargets,
+    std::size_t dim,
+    float* outDistances) {
+
+    std::size_t t = 0;
+    for (; t + 4 <= numTargets; t += 4) {
+        __m512 sum0 = _mm512_setzero_ps();
+        __m512 sum1 = _mm512_setzero_ps();
+        __m512 sum2 = _mm512_setzero_ps();
+        __m512 sum3 = _mm512_setzero_ps();
+
+        const float* t0 = targets[t];
+        const float* t1 = targets[t + 1];
+        const float* t2 = targets[t + 2];
+        const float* t3 = targets[t + 3];
+
+        for (std::size_t i = 0; i + 16 <= dim; i += 16) {
+            __m512 q = _mm512_loadu_ps(query + i);
+
+            __m512 d0 = _mm512_sub_ps(q, _mm512_loadu_ps(t0 + i));
+            __m512 d1 = _mm512_sub_ps(q, _mm512_loadu_ps(t1 + i));
+            __m512 d2 = _mm512_sub_ps(q, _mm512_loadu_ps(t2 + i));
+            __m512 d3 = _mm512_sub_ps(q, _mm512_loadu_ps(t3 + i));
+
+            sum0 = _mm512_fmadd_ps(d0, d0, sum0);
+            sum1 = _mm512_fmadd_ps(d1, d1, sum1);
+            sum2 = _mm512_fmadd_ps(d2, d2, sum2);
+            sum3 = _mm512_fmadd_ps(d3, d3, sum3);
+        }
+
+        outDistances[t]     = hsum_avx512(sum0);
+        outDistances[t + 1] = hsum_avx512(sum1);
+        outDistances[t + 2] = hsum_avx512(sum2);
+        outDistances[t + 3] = hsum_avx512(sum3);
+
+        for (std::size_t i = (dim / 16) * 16; i < dim; ++i) {
+            float qv = query[i];
+            outDistances[t]     += (qv - t0[i]) * (qv - t0[i]);
+            outDistances[t + 1] += (qv - t1[i]) * (qv - t1[i]);
+            outDistances[t + 2] += (qv - t2[i]) * (qv - t2[i]);
+            outDistances[t + 3] += (qv - t3[i]) * (qv - t3[i]);
+        }
+    }
+
+    for (; t < numTargets; ++t) {
+        outDistances[t] = l2_avx512(query, targets[t], dim);
+    }
+}
+
+inline void ip_batch_avx512(
+    const float* query,
+    const float* const* targets,
+    std::size_t numTargets,
+    std::size_t dim,
+    float* outDistances) {
+
+    std::size_t t = 0;
+    for (; t + 4 <= numTargets; t += 4) {
+        __m512 sum0 = _mm512_setzero_ps();
+        __m512 sum1 = _mm512_setzero_ps();
+        __m512 sum2 = _mm512_setzero_ps();
+        __m512 sum3 = _mm512_setzero_ps();
+
+        const float* t0 = targets[t];
+        const float* t1 = targets[t + 1];
+        const float* t2 = targets[t + 2];
+        const float* t3 = targets[t + 3];
+
+        for (std::size_t i = 0; i + 16 <= dim; i += 16) {
+            __m512 q = _mm512_loadu_ps(query + i);
+
+            sum0 = _mm512_fmadd_ps(q, _mm512_loadu_ps(t0 + i), sum0);
+            sum1 = _mm512_fmadd_ps(q, _mm512_loadu_ps(t1 + i), sum1);
+            sum2 = _mm512_fmadd_ps(q, _mm512_loadu_ps(t2 + i), sum2);
+            sum3 = _mm512_fmadd_ps(q, _mm512_loadu_ps(t3 + i), sum3);
+        }
+
+        outDistances[t]     = hsum_avx512(sum0);
+        outDistances[t + 1] = hsum_avx512(sum1);
+        outDistances[t + 2] = hsum_avx512(sum2);
+        outDistances[t + 3] = hsum_avx512(sum3);
+
+        for (std::size_t i = (dim / 16) * 16; i < dim; ++i) {
+            float qv = query[i];
+            outDistances[t]     += qv * t0[i];
+            outDistances[t + 1] += qv * t1[i];
+            outDistances[t + 2] += qv * t2[i];
+            outDistances[t + 3] += qv * t3[i];
+        }
+    }
+
+    for (; t < numTargets; ++t) {
+        outDistances[t] = ip_avx512(query, targets[t], dim);
+    }
+}
+#endif
+
+#if defined(__aarch64__) || defined(_M_ARM64)
+// NEON batch: processes 4 distances with 128-bit NEON registers
+inline void l2_batch_neon(
+    const float* query,
+    const float* const* targets,
+    std::size_t numTargets,
+    std::size_t dim,
+    float* outDistances) {
+
+    std::size_t t = 0;
+    for (; t + 4 <= numTargets; t += 4) {
+        float32x4_t sum0 = vdupq_n_f32(0.0f);
+        float32x4_t sum1 = vdupq_n_f32(0.0f);
+        float32x4_t sum2 = vdupq_n_f32(0.0f);
+        float32x4_t sum3 = vdupq_n_f32(0.0f);
+
+        const float* t0 = targets[t];
+        const float* t1 = targets[t + 1];
+        const float* t2 = targets[t + 2];
+        const float* t3 = targets[t + 3];
+
+        for (std::size_t i = 0; i + 4 <= dim; i += 4) {
+            float32x4_t q = vld1q_f32(query + i);
+
+            float32x4_t d0 = vsubq_f32(q, vld1q_f32(t0 + i));
+            float32x4_t d1 = vsubq_f32(q, vld1q_f32(t1 + i));
+            float32x4_t d2 = vsubq_f32(q, vld1q_f32(t2 + i));
+            float32x4_t d3 = vsubq_f32(q, vld1q_f32(t3 + i));
+
+            sum0 = vfmaq_f32(sum0, d0, d0);
+            sum1 = vfmaq_f32(sum1, d1, d1);
+            sum2 = vfmaq_f32(sum2, d2, d2);
+            sum3 = vfmaq_f32(sum3, d3, d3);
+        }
+
+        outDistances[t]     = vaddvq_f32(sum0);
+        outDistances[t + 1] = vaddvq_f32(sum1);
+        outDistances[t + 2] = vaddvq_f32(sum2);
+        outDistances[t + 3] = vaddvq_f32(sum3);
+
+        for (std::size_t i = (dim / 4) * 4; i < dim; ++i) {
+            float qv = query[i];
+            outDistances[t]     += (qv - t0[i]) * (qv - t0[i]);
+            outDistances[t + 1] += (qv - t1[i]) * (qv - t1[i]);
+            outDistances[t + 2] += (qv - t2[i]) * (qv - t2[i]);
+            outDistances[t + 3] += (qv - t3[i]) * (qv - t3[i]);
+        }
+    }
+
+    for (; t < numTargets; ++t) {
+        outDistances[t] = l2_neon(query, targets[t], dim);
+    }
+}
+
+inline void ip_batch_neon(
+    const float* query,
+    const float* const* targets,
+    std::size_t numTargets,
+    std::size_t dim,
+    float* outDistances) {
+
+    std::size_t t = 0;
+    for (; t + 4 <= numTargets; t += 4) {
+        float32x4_t sum0 = vdupq_n_f32(0.0f);
+        float32x4_t sum1 = vdupq_n_f32(0.0f);
+        float32x4_t sum2 = vdupq_n_f32(0.0f);
+        float32x4_t sum3 = vdupq_n_f32(0.0f);
+
+        const float* t0 = targets[t];
+        const float* t1 = targets[t + 1];
+        const float* t2 = targets[t + 2];
+        const float* t3 = targets[t + 3];
+
+        for (std::size_t i = 0; i + 4 <= dim; i += 4) {
+            float32x4_t q = vld1q_f32(query + i);
+
+            sum0 = vfmaq_f32(sum0, q, vld1q_f32(t0 + i));
+            sum1 = vfmaq_f32(sum1, q, vld1q_f32(t1 + i));
+            sum2 = vfmaq_f32(sum2, q, vld1q_f32(t2 + i));
+            sum3 = vfmaq_f32(sum3, q, vld1q_f32(t3 + i));
+        }
+
+        outDistances[t]     = vaddvq_f32(sum0);
+        outDistances[t + 1] = vaddvq_f32(sum1);
+        outDistances[t + 2] = vaddvq_f32(sum2);
+        outDistances[t + 3] = vaddvq_f32(sum3);
+
+        for (std::size_t i = (dim / 4) * 4; i < dim; ++i) {
+            float qv = query[i];
+            outDistances[t]     += qv * t0[i];
+            outDistances[t + 1] += qv * t1[i];
+            outDistances[t + 2] += qv * t2[i];
+            outDistances[t + 3] += qv * t3[i];
+        }
+    }
+
+    for (; t < numTargets; ++t) {
+        outDistances[t] = ip_neon(query, targets[t], dim);
+    }
 }
 #endif
 
