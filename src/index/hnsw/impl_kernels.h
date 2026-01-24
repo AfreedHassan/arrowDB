@@ -83,7 +83,7 @@ inline float ip_scalar(const float* a, const float* b, std::size_t dim) {
     float sum = 0.0f;
     for (std::size_t i = 0; i < dim; ++i)
         sum += a[i] * b[i];
-    return sum;
+    return 1.0f - sum;  // Convert similarity to distance
 }
 
 // SSE (128-bit)
@@ -159,7 +159,7 @@ inline float ip_sse(const float* a, const float* b, std::size_t dim) {
     // Handle remaining elements
     for (; i < dim; ++i)
         result += a[i] * b[i];
-    return result;
+    return 1.0f - result;  // Convert similarity to distance
 }
 #endif
 
@@ -236,7 +236,7 @@ inline float ip_avx(const float* a, const float* b, std::size_t dim) {
     // Handle remaining elements
     for (; i < dim; ++i)
         result += a[i] * b[i];
-    return result;
+    return 1.0f - result;  // Convert similarity to distance
 }
 #endif
 
@@ -317,7 +317,7 @@ inline float ip_avx2(const float* a, const float* b, std::size_t dim) {
     // Handle remaining elements
     for (; i < dim; ++i)
         result += a[i] * b[i];
-    return result;
+    return 1.0f - result;  // Convert similarity to distance
 }
 #endif
 
@@ -396,7 +396,7 @@ inline float ip_avx512(const float* a, const float* b, std::size_t dim) {
     // Handle remaining elements
     for (; i < dim; ++i)
         result += a[i] * b[i];
-    return result;
+    return 1.0f - result;  // Convert similarity to distance
 }
 #endif
 
@@ -476,7 +476,7 @@ inline float ip_neon(const float* a, const float* b, std::size_t dim) {
     // Handle remaining elements
     for (; i < dim; ++i)
         result += a[i] * b[i];
-    return result;
+    return 1.0f - result;  // Convert similarity to distance
 }
 #endif
 
@@ -536,7 +536,7 @@ inline float ip_sse_aligned16(const float* a, const float* b, std::size_t dim) {
         sum2 = _mm_add_ps(sum2, _mm_mul_ps(va, vb));
     }
     __m128 sum = _mm_add_ps(sum1, sum2);
-    return hsum_sse(sum);
+    return 1.0f - hsum_sse(sum);  // Convert similarity to distance
 }
 
 inline float l2_sse_aligned4(const float* a, const float* b, std::size_t dim) {
@@ -559,7 +559,7 @@ inline float ip_sse_aligned4(const float* a, const float* b, std::size_t dim) {
         __m128 prod = _mm_mul_ps(va, vb);
         result += hsum_sse(prod);
     }
-    return result;
+    return 1.0f - result;  // Convert similarity to distance
 }
 #endif
 
@@ -614,7 +614,7 @@ inline float ip_avx_aligned16(const float* a, const float* b, std::size_t dim) {
         sum2 = _mm256_add_ps(sum2, _mm256_mul_ps(va, vb));
     }
     __m256 sum = _mm256_add_ps(sum1, sum2);
-    return hsum_avx(sum);
+    return 1.0f - hsum_avx(sum);  // Convert similarity to distance
 }
 
 inline float l2_avx_aligned4(const float* a, const float* b, std::size_t dim) {
@@ -635,7 +635,7 @@ inline float ip_avx_aligned4(const float* a, const float* b, std::size_t dim) {
         __m256 vb = _mm256_loadu_ps(b + i);
         sum = _mm256_add_ps(sum, _mm256_mul_ps(va, vb));
     }
-    return hsum_avx(sum);
+    return 1.0f - hsum_avx(sum);  // Convert similarity to distance
 }
 #endif
 
@@ -690,7 +690,7 @@ inline float ip_avx2_aligned16(const float* a, const float* b, std::size_t dim) 
         sum2 = _mm256_fmadd_ps(va, vb, sum2);
     }
     __m256 sum = _mm256_add_ps(sum1, sum2);
-    return hsum_avx(sum);
+    return 1.0f - hsum_avx(sum);  // Convert similarity to distance
 }
 
 inline float l2_avx2_aligned4(const float* a, const float* b, std::size_t dim) {
@@ -711,7 +711,7 @@ inline float ip_avx2_aligned4(const float* a, const float* b, std::size_t dim) {
         __m256 vb = _mm256_loadu_ps(b + i);
         sum = _mm256_fmadd_ps(va, vb, sum);
     }
-    return hsum_avx(sum);
+    return 1.0f - hsum_avx(sum);  // Convert similarity to distance
 }
 #endif
 
@@ -766,7 +766,7 @@ inline float ip_avx512_aligned16(const float* a, const float* b, std::size_t dim
         sum2 = _mm512_fmadd_ps(va, vb, sum2);
     }
     __m512 sum = _mm512_add_ps(sum1, sum2);
-    return hsum_avx512(sum);
+    return 1.0f - hsum_avx512(sum);  // Convert similarity to distance
 }
 #endif
 
@@ -821,7 +821,7 @@ inline float ip_neon_aligned16(const float* a, const float* b, std::size_t dim) 
         sum2 = vfmaq_f32(sum2, va, vb);
     }
     float32x4_t sum = vaddq_f32(sum1, sum2);
-    return vaddvq_f32(sum);
+    return 1.0f - vaddvq_f32(sum);  // Convert similarity to distance
 }
 
 inline float l2_neon_aligned4(const float* a, const float* b, std::size_t dim) {
@@ -842,7 +842,7 @@ inline float ip_neon_aligned4(const float* a, const float* b, std::size_t dim) {
         float32x4_t vb = vld1q_f32(b + i);
         sum = vfmaq_f32(sum, va, vb);
     }
-    return vaddvq_f32(sum);
+    return 1.0f - vaddvq_f32(sum);  // Convert similarity to distance
 }
 #endif
 
@@ -971,6 +971,12 @@ inline void ip_batch_sse(
             outDistances[t + 2] += qv * t2[i];
             outDistances[t + 3] += qv * t3[i];
         }
+
+        // Convert similarity to distance
+        outDistances[t]     = 1.0f - outDistances[t];
+        outDistances[t + 1] = 1.0f - outDistances[t + 1];
+        outDistances[t + 2] = 1.0f - outDistances[t + 2];
+        outDistances[t + 3] = 1.0f - outDistances[t + 3];
     }
 
     for (; t < numTargets; ++t) {
@@ -1073,6 +1079,12 @@ inline void ip_batch_avx(
             outDistances[t + 2] += qv * t2[i];
             outDistances[t + 3] += qv * t3[i];
         }
+
+        // Convert similarity to distance
+        outDistances[t]     = 1.0f - outDistances[t];
+        outDistances[t + 1] = 1.0f - outDistances[t + 1];
+        outDistances[t + 2] = 1.0f - outDistances[t + 2];
+        outDistances[t + 3] = 1.0f - outDistances[t + 3];
     }
 
     for (; t < numTargets; ++t) {
@@ -1175,6 +1187,12 @@ inline void ip_batch_avx2(
             outDistances[t + 2] += qv * t2[i];
             outDistances[t + 3] += qv * t3[i];
         }
+
+        // Convert similarity to distance
+        outDistances[t]     = 1.0f - outDistances[t];
+        outDistances[t + 1] = 1.0f - outDistances[t + 1];
+        outDistances[t + 2] = 1.0f - outDistances[t + 2];
+        outDistances[t + 3] = 1.0f - outDistances[t + 3];
     }
 
     for (; t < numTargets; ++t) {
@@ -1277,6 +1295,12 @@ inline void ip_batch_avx512(
             outDistances[t + 2] += qv * t2[i];
             outDistances[t + 3] += qv * t3[i];
         }
+
+        // Convert similarity to distance
+        outDistances[t]     = 1.0f - outDistances[t];
+        outDistances[t + 1] = 1.0f - outDistances[t + 1];
+        outDistances[t + 2] = 1.0f - outDistances[t + 2];
+        outDistances[t + 3] = 1.0f - outDistances[t + 3];
     }
 
     for (; t < numTargets; ++t) {
@@ -1379,6 +1403,12 @@ inline void ip_batch_neon(
             outDistances[t + 2] += qv * t2[i];
             outDistances[t + 3] += qv * t3[i];
         }
+
+        // Convert similarity to distance
+        outDistances[t]     = 1.0f - outDistances[t];
+        outDistances[t + 1] = 1.0f - outDistances[t + 1];
+        outDistances[t + 2] = 1.0f - outDistances[t + 2];
+        outDistances[t + 3] = 1.0f - outDistances[t + 3];
     }
 
     for (; t < numTargets; ++t) {
