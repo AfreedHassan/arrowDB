@@ -11,16 +11,11 @@
 #include <ostream>
 #include <new>
 
-/// Embedding dimension for all-MiniLM-L6-v2
 constexpr static const uintptr_t EMBEDDING_DIM = 384;
 
-/// Result returned to C/C++ containing the embedding vector
 struct EmbeddingResult {
-  /// Pointer to embedding data (caller must free with free_embedding)
   float *data;
-  /// Length of the embedding vector (384 for MiniLM)
   uintptr_t len;
-  /// Error code: 0 = success, non-zero = error
   int32_t error_code;
 };
 

@@ -107,8 +107,11 @@ impl DatasetEmbedder {
             .map_err(|e| format!("Failed to create token_type_ids array: {}", e))?;
 
         // Run inference
-        let last_hidden_state =
-            self.run_inference(input_ids_arr, attention_mask_arr.clone(), token_type_ids_arr)?;
+        let last_hidden_state = self.run_inference(
+            input_ids_arr,
+            attention_mask_arr.clone(),
+            token_type_ids_arr,
+        )?;
 
         // Mean pooling
         let attention_mask_i64 = Array2::from_shape_vec((1, seq_len), attention_mask)
@@ -130,9 +133,11 @@ impl DatasetEmbedder {
     ) -> Result<ArrayD<f32>, String> {
         let input_ids_shape = input_ids.shape().to_vec();
         let (input_ids_data, _) = input_ids.into_raw_vec_and_offset();
-        let input_ids_tensor =
-            Tensor::from_array((input_ids_shape.as_slice(), input_ids_data.into_boxed_slice()))
-                .map_err(|e| format!("Failed to create input_ids tensor: {}", e))?;
+        let input_ids_tensor = Tensor::from_array((
+            input_ids_shape.as_slice(),
+            input_ids_data.into_boxed_slice(),
+        ))
+        .map_err(|e| format!("Failed to create input_ids tensor: {}", e))?;
 
         let attention_mask_shape = attention_mask.shape().to_vec();
         let (attention_mask_data, _) = attention_mask.into_raw_vec_and_offset();
@@ -341,7 +346,6 @@ fn download_openwebtext(num_samples: usize) -> Result<Vec<String>, String> {
     let dataset: burn_dataset::SqliteDataset<OpenWebTextItem> =
         HuggingfaceDatasetLoader::new("openwebtext")
             .dataset("train")
-            .take(200_000)
             .map_err(|e| format!("Failed to load OpenWebText dataset: {}", e))?;
 
     eprintln!("Dataset loaded. Processing {} items...", dataset.len());
@@ -375,10 +379,18 @@ fn download_openwebtext(num_samples: usize) -> Result<Vec<String>, String> {
 
         // Progress update every 1000 items
         if i % 1000 == 0 && i > 0 {
-            eprint!("\rProcessed {}/{} documents, collected {} chunks", i, dataset.len(), chunks.len());
+            eprint!(
+                "\rProcessed {}/{} documents, collected {} chunks",
+                i,
+                dataset.len(),
+                chunks.len()
+            );
         }
     }
-    eprintln!("\rProcessed documents, collected {} chunks          ", chunks.len());
+    eprintln!(
+        "\rProcessed documents, collected {} chunks          ",
+        chunks.len()
+    );
 
     if chunks.is_empty() {
         return Err("No chunks extracted from dataset".to_string());
@@ -523,14 +535,18 @@ pub extern "C" fn arrow_dataset_download_and_embed(
     eprintln!("Generating embeddings for {} texts...", texts.len());
 
     // Generate embeddings with progress
-    let embeddings = match embed_texts_batch(&mut embedder, &texts, Some(&|current, total| {
-        eprint!(
-            "\rEmbedding progress: {}/{} ({:.1}%)",
-            current,
-            total,
-            (current as f64 / total as f64) * 100.0
-        );
-    })) {
+    let embeddings = match embed_texts_batch(
+        &mut embedder,
+        &texts,
+        Some(&|current, total| {
+            eprint!(
+                "\rEmbedding progress: {}/{} ({:.1}%)",
+                current,
+                total,
+                (current as f64 / total as f64) * 100.0
+            );
+        }),
+    ) {
         Ok(e) => e,
         Err(e) => {
             eprintln!("\nFailed to generate embeddings: {}", e);
@@ -665,18 +681,19 @@ pub extern "C" fn arrow_dataset_load_openwebtext(
     }
 
     // Load embeddings from binary file
-    let embeddings = match load_embeddings_from_file(embeddings_path_str, loaded_count, EMBEDDING_DIM) {
-        Ok(e) => e,
-        Err(_) => {
-            return DatasetLoadResult {
-                embeddings_ptr: ptr::null_mut(),
-                chunks_ptr: ptr::null_mut(),
-                num_chunks: 0,
-                embedding_dim: EMBEDDING_DIM,
-                error_code: -6,
+    let embeddings =
+        match load_embeddings_from_file(embeddings_path_str, loaded_count, EMBEDDING_DIM) {
+            Ok(e) => e,
+            Err(_) => {
+                return DatasetLoadResult {
+                    embeddings_ptr: ptr::null_mut(),
+                    chunks_ptr: ptr::null_mut(),
+                    num_chunks: 0,
+                    embedding_dim: EMBEDDING_DIM,
+                    error_code: -6,
+                }
             }
-        }
-    };
+        };
 
     // Convert embeddings to C array (flat float32 array)
     let mut flat_embeddings = Vec::new();
@@ -724,8 +741,7 @@ pub extern "C" fn arrow_dataset_free(result: DatasetLoadResult) {
 
     if !result.chunks_ptr.is_null() {
         unsafe {
-            let chunks_slice =
-                std::slice::from_raw_parts_mut(result.chunks_ptr, result.num_chunks);
+            let chunks_slice = std::slice::from_raw_parts_mut(result.chunks_ptr, result.num_chunks);
             // Free each C string
             for ptr in chunks_slice.iter() {
                 if !ptr.is_null() {

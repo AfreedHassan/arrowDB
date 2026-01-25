@@ -10,7 +10,13 @@
 class Embedder {
 public:
     explicit Embedder(
-    const std::string_view &modelPath = "models/all-MiniLM-L6-v2.onnx",
+    const std::string_view &modelPath =
+#ifdef ARROW_EMBEDDING_MODEL_DIR
+        ARROW_EMBEDDING_MODEL_DIR "/all-MiniLM-L6-v2.onnx"
+#else
+        "models/all-MiniLM-L6-v2.onnx"
+#endif
+    ,
     const std::string_view &tokenizerName = "sentence-transformers/all-MiniLM-L6-v2"
     );
 
