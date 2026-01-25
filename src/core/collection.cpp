@@ -292,7 +292,7 @@ Space Collection::space() const { return pImpl_->config_.space; }
 size_t Collection::size() const { return pImpl_->pIndex_->size(); }
 bool Collection::recoveredFromWal() const { return pImpl_->recoveredFromWal_; }
 
-utils::Status Collection::insert(VectorID id, const std::vector<float> &vec) {
+utils::Status Collection::insert(VectorID id, const std::vector<float> &vec, Metadata metadata) {
   if (vec.size() != pImpl_->config_.dimensions) {
     return utils::Status(utils::StatusCode::kDimensionMismatch,
                          "Vector dimension mismatch: expected " +
@@ -324,6 +324,7 @@ utils::Status Collection::insert(VectorID id, const std::vector<float> &vec) {
   if (!pImpl_->pIndex_->insert(id, vec)) {
     return utils::Status(utils::StatusCode::kInternal, "Insert failed");
   }
+  setMetadata(id, metadata);
   return utils::OkStatus();
 }
 
@@ -335,7 +336,7 @@ utils::Status Collection::insert(const std::vector<std::string> &text) {
   }
   for (size_t i = 0; i < text.size(); ++i) {
     std::vector<float> vec = embedder.embed(text[i].c_str());
-    if (!vec.empty()) {
+    if (vec.empty()) {
       return utils::Status(utils::StatusCode::kInternal, "Embedding failed");
     }
     auto status = insert(i + 1, vec);
@@ -581,6 +582,8 @@ utils::Result<Collection> Collection::load(const std::string &directoryPath) {
                              directoryPath);
   }
   impl->pIndex_->loadIndex(indexPath);
+  std::cout << "Index loaded with size " << impl->pIndex_->size() << "\n";
+
 
   std::string metadataPath =
       (fs::path(directoryPath) / "metadata.json").string();

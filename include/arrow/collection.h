@@ -64,7 +64,7 @@ public:
     /// @param id Unique identifier for the vector
     /// @param vec Vector data (must match collection dimension)
     /// @return Status indicating success or failure
-    utils::Status insert(VectorID id, const std::vector<float>& vec);
+    utils::Status insert(VectorID id, const std::vector<float>& vec, Metadata metadata = {});
 
     utils::Status insert(const std::vector<std::string>& data);
 
