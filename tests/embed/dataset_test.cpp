@@ -65,7 +65,7 @@ protected:
 
 /// Test that dataset loading function exists and is callable
 TEST_F(DatasetTest, LoadOpenWebTextBasic) {
-    Embedder embedder("models/all-MiniLM-L6-v2.onnx");
+    Embedder embedder(ARROW_EMBEDDING_MODEL_DIR "/all-MiniLM-L6-v2.onnx");
     if (!embedder.ok()) {
         GTEST_SKIP() << "Embedder failed to initialize";
     }
@@ -103,7 +103,7 @@ TEST_F(DatasetTest, LoadOpenWebTextBasic) {
 
 /// Test that dataset loads only chunks within length bounds
 TEST_F(DatasetTest, LengthFiltering) {
-    Embedder embedder("models/all-MiniLM-L6-v2.onnx");
+    Embedder embedder(ARROW_EMBEDDING_MODEL_DIR "/all-MiniLM-L6-v2.onnx");
     if (!embedder.ok()) {
         GTEST_SKIP() << "Embedder failed to initialize";
     }
@@ -136,7 +136,7 @@ TEST_F(DatasetTest, LengthFiltering) {
 
 /// Test error handling for missing files
 TEST_F(DatasetTest, MissingFiles) {
-    Embedder embedder("models/all-MiniLM-L6-v2.onnx");
+    Embedder embedder(ARROW_EMBEDDING_MODEL_DIR "/all-MiniLM-L6-v2.onnx");
     if (!embedder.ok()) {
         GTEST_SKIP() << "Embedder failed to initialize";
     }
@@ -156,7 +156,7 @@ TEST_F(DatasetTest, MissingFiles) {
 
 /// Test embedding dimension validation
 TEST_F(DatasetTest, EmbeddingDimension) {
-    Embedder embedder("models/all-MiniLM-L6-v2.onnx");
+    Embedder embedder(ARROW_EMBEDDING_MODEL_DIR "/all-MiniLM-L6-v2.onnx");
     if (!embedder.ok()) {
         GTEST_SKIP() << "Embedder failed to initialize";
     }
@@ -187,7 +187,7 @@ TEST_F(DatasetTest, EmbeddingDimension) {
 
 /// Test loading larger dataset
 TEST_F(DatasetTest, DISABLED_LargeDatasetLoad) {
-    Embedder embedder("models/all-MiniLM-L6-v2.onnx");
+    Embedder embedder(ARROW_EMBEDDING_MODEL_DIR "/all-MiniLM-L6-v2.onnx");
     if (!embedder.ok()) {
         GTEST_SKIP() << "Embedder failed to initialize";
     }

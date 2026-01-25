@@ -133,7 +133,9 @@ target_compile_options(arrowDB PRIVATE -O3 -march=native)
 # Tests
 # ─────────────────────────────────────────────────────────────
 enable_testing()
-file(GLOB TEST_SOURCES "tests/*.cpp")
+
+# Recursively find all test source files in tests/ and subdirectories
+file(GLOB_RECURSE TEST_SOURCES "tests/*.cpp")
 
 add_executable(tests ${TEST_SOURCES})
 
@@ -152,20 +154,40 @@ target_link_libraries(tests PRIVATE
     GTest::gtest_main
 )
 
+target_compile_definitions(tests PRIVATE
+    ARROW_EMBEDDING_MODEL_DIR="${CMAKE_SOURCE_DIR}/embed/models"
+)
+
 target_compile_options(tests PRIVATE -O3 -march=native)
 
-# Test entries
+# Test entries - organized by category
+# HNSW Tests
 add_test(NAME HNSWIndexTests COMMAND tests --gtest_filter=HNSWIndexTest.*)
+add_test(NAME HNSWDistanceKernelTests COMMAND tests --gtest_filter=IPDistanceTest.*:L2DistanceTest.*:BatchDistanceTest.*)
+add_test(NAME HNSWStorageTests COMMAND tests --gtest_filter=VectorStorageTest.*)
+add_test(NAME SIFTTests COMMAND tests --gtest_filter=SIFTTest.*)
+
+# Embedder Tests
+add_test(NAME EmbedderDebugTests COMMAND tests --gtest_filter=EmbeddingDebug.*)
+add_test(NAME EmbedderDatasetTests COMMAND tests --gtest_filter=DatasetTest.*)
+add_test(NAME EmbedderThreadSafetyTests COMMAND tests --gtest_filter=ThreadSafety.*)
+
+# Core Tests
 add_test(NAME CollectionTests COMMAND tests --gtest_filter=CollectionTest.*)
-add_test(NAME MetadataTests COMMAND tests --gtest_filter=MetadataTest.*)
+add_test(NAME CollectionWalIntegrationTests COMMAND tests --gtest_filter=CollectionWalTest.*)
+add_test(NAME WALUnitTests COMMAND tests --gtest_filter=WALTest.*)
+add_test(NAME MetadataTests COMMAND tests --gtest_filter=MetadataUnit.*)
 add_test(NAME MetadataIntegrationTests COMMAND tests --gtest_filter=MetadataIntegrationTest.*)
 add_test(NAME BinaryTests COMMAND tests --gtest_filter=BinaryTest.*)
-add_test(NAME WALUnitTests COMMAND tests --gtest_filter=WALTest.*)
-add_test(NAME CollectionWalIntegrationTests COMMAND tests --gtest_filter=CollectionWalTest.*)
 add_test(NAME ArrowDBTests COMMAND tests --gtest_filter=ArrowDBTest.*)
 
-add_test(NAME UnitTests COMMAND tests --gtest_filter="HNSWIndexTest.*:MetadataUnitTest.*")
-add_test(NAME IntegrationTests COMMAND tests --gtest_filter="CollectionTest.*:MetadataIntegrationTest.*")
+# Grouped test suites
+add_test(NAME AllHNSWTests COMMAND tests --gtest_filter=HNSWIndexTest.*:IPDistanceTest.*:L2DistanceTest.*:BatchDistanceTest.*:VectorStorageTest.*)
+add_test(NAME AllEmbedderTests COMMAND tests --gtest_filter=EmbeddingDebug.*:DatasetTest.*:ThreadSafety.*)
+add_test(NAME AllCoreTests COMMAND tests --gtest_filter=BinaryTest.*:CollectionTest.*:CollectionWalTest.*:WALTest.*:MetadataUnit.*:MetadataIntegrationTest.*:ArrowDBTest.*)
+
+add_test(NAME UnitTests COMMAND tests --gtest_filter="HNSWIndexTest.*:MetadataUnit.*:WALTest.*")
+add_test(NAME IntegrationTests COMMAND tests --gtest_filter="CollectionTest.*:CollectionWalTest.*:MetadataIntegrationTest.*")
 
 
 # ─────────────────────────────────────────────────────────────

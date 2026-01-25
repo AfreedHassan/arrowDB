@@ -199,3 +199,48 @@ TEST_F(ArrowDBTest, MultipleCollections) {
     EXPECT_EQ(result.value()->dimension(), static_cast<uint32_t>(64 + i * 32));
   }
 }
+
+TEST_F(ArrowDBTest, CreateOrGetCollection) {
+  ClientOptions options{.dataDir = testDir};
+  Client db(options);
+
+  CollectionConfig config{
+      .name = "test_collection",
+      .dimensions = 128,
+      .space = Space::Cosine
+  };
+
+  auto result1 = db.getOrCreateCollection("test_collection", config);
+  ASSERT_TRUE(result1.ok()) << result1.status().message();
+  EXPECT_EQ(result1.value()->name(), "test_collection");
+
+  auto result2 = db.getOrCreateCollection("test_collection", config);
+  ASSERT_TRUE(result2.ok());
+  EXPECT_EQ(result1.value(), result2.value());
+}
+
+TEST_F(ArrowDBTest, CreateOrGetCollectionLoadsFromDisk) {
+  CollectionConfig config{
+      .name = "test_collection",
+      .dimensions = 128,
+      .space = Space::Cosine
+  };
+
+  {
+    ClientOptions options{.dataDir = testDir};
+    Client db(options);
+    auto result = db.createCollection("test_collection", config);
+    ASSERT_TRUE(result.ok());
+    db.close();
+  }
+
+  {
+    ClientOptions options{.dataDir = testDir};
+    Client db(options);
+
+    auto result = db.getOrCreateCollection("test_collection", config);
+    ASSERT_TRUE(result.ok());
+    EXPECT_EQ(result.value()->name(), "test_collection");
+    EXPECT_EQ(result.value()->dimension(), 128);
+  }
+}
