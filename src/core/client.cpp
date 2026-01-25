@@ -3,6 +3,7 @@
 #include "arrow/collection.h"
 
 #include <filesystem>
+#include <iostream>
 #include <unordered_map>
 
 namespace arrow {
@@ -59,6 +60,36 @@ public:
         collections_[name] = std::move(collection);
 
         return ptr;
+    }
+
+    utils::Result<Collection*> getOrCreateCollection(const std::string& name,
+                                                     const CollectionConfig& config) {
+
+        auto it = collections_.find(name);
+        if (it != collections_.end()) {
+            return it->second.get();
+        }
+
+        if (!options_.dataDir.empty()) {
+            std::filesystem::path collectionPath = options_.dataDir / name;
+            std::filesystem::path metaPath = collectionPath / "meta.json";
+            std::cout << "Checking if collection exists at " << collectionPath << "\n";
+            std::cout << "Checking if meta.json exists at " << metaPath << "\n";
+
+            if (std::filesystem::exists(metaPath)) {
+                std::cout << "Collection found on disk. Loading...\n";
+                auto loadResult = Collection::load(collectionPath.string());
+                if (loadResult.ok()) {
+                    auto collection = std::make_unique<Collection>(std::move(loadResult.value()));
+                    Collection* ptr = collection.get();
+                    collections_[name] = std::move(collection);
+                    return ptr;
+                }
+            }
+        }
+        std::cout << "Collection not found on disk. Creating...\n";
+
+        return createCollection(name, config);
     }
 
     utils::Result<Collection*> getCollection(const std::string& name) {
@@ -161,6 +192,11 @@ utils::Result<Collection*> Client::createCollection(const std::string& name,
 
 utils::Result<Collection*> Client::getCollection(const std::string& name) {
     return pImpl_->getCollection(name);
+}
+
+utils::Result<Collection*> Client::getOrCreateCollection(const std::string& name,
+                                                         const CollectionConfig& config) {
+    return pImpl_->getOrCreateCollection(name, config);
 }
 
 utils::Status Client::dropCollection(const std::string& name) {

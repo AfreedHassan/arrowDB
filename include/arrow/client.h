@@ -71,6 +71,18 @@ public:
     /// @return Pointer to the collection, or error if not found
     utils::Result<Collection*> getCollection(const std::string& name);
 
+    /// Create a collection if it doesn't exist, or get the existing one.
+    ///
+    /// This is a convenience method that:
+    /// - Returns the existing collection if it already exists (in memory or on disk)
+    /// - Creates a new collection with the given config if it doesn't exist
+    ///
+    /// @param name Collection name
+    /// @param config Collection configuration (used only if creating new)
+    /// @return Pointer to the collection (existing or newly created)
+    utils::Result<Collection*> getOrCreateCollection(const std::string& name,
+                                                      const CollectionConfig& config);
+
     /// Drop a collection.
     ///
     /// @param name Collection name
