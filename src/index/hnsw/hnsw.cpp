@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <atomic>
 #include <mutex>
+#include <shared_mutex>
 #include <random>
 #include <fstream>
 #include <iostream>
@@ -75,7 +76,7 @@ namespace hnsw {
       std::unique_ptr<VisitedListPool> visitedListPool_{nullptr};
 
       std::mutex globalMutex_;
-      std::vector<std::mutex> adjacencyMutexes_;
+      mutable std::vector<std::shared_mutex> adjacencyMutexes_;
       mutable std::vector<std::mutex> labelMutexes_;
 
       mutable std::mutex labelLookupMutex_;
@@ -117,7 +118,7 @@ namespace hnsw {
         size_t maxElems,
         size_t M = 16,
         size_t ef_construction = 200,
-        size_t randSeed = 100,
+        size_t randSeed = 42,
         bool allowReuseDeleted = false)
         : labelMutexes_(MAX_LABEL_OPERATION_LOCKS),
             adjacencyMutexes_(maxElems),
@@ -143,7 +144,7 @@ namespace hnsw {
         maxM_ = M_;
         maxM0_ = M_ * 2;
         efConstruction_ = std::max(ef_construction, M_);
-        efSearch_ = 10;
+        efSearch_ = 200;
 
         levelGen_.seed(randSeed);
         updateProbGen_.seed(randSeed + 1);
@@ -307,7 +308,7 @@ namespace hnsw {
 
         kLvl0AdjListSize_ = maxM0_ * sizeof(tableidx_t) + sizeof(linklistsize_t);
 
-        std::vector<std::mutex>(maxElements_).swap(adjacencyMutexes_);
+        std::vector<std::shared_mutex>(maxElements_).swap(adjacencyMutexes_);
         std::vector<std::mutex>(MAX_LABEL_OPERATION_LOCKS).swap(labelMutexes_);
 
         visitedListPool_.reset(new VisitedListPool(1, maxElements_));
@@ -363,7 +364,7 @@ namespace hnsw {
 
         elementLevels_.resize(newMaxElems);
 
-        std::vector<std::mutex>(newMaxElems).swap(adjacencyMutexes_);
+        std::vector<std::shared_mutex>(newMaxElems).swap(adjacencyMutexes_);
 
         // Reallocate base layer
         char * newPElementsBlock = (char *) realloc(pElementsBlock_, newMaxElems * kElementSize_);
@@ -404,13 +405,17 @@ namespace hnsw {
       }
 
       void getNeighborsByHeuristic(CandidateQueue &topCandidates, const size_t M) {
-        // Fast path
-        if (topCandidates.empty() || M == 0) return;
+        // Match hnswlib: skip heuristic if we have fewer than M candidates
+        if (topCandidates.size() < M) return;
 
         thread_local std::vector<DistIdxPair> candidates;
         thread_local std::vector<DistIdxPair> kept;
+        thread_local std::vector<const dist_t*> keptPtrs;
+        thread_local std::vector<dist_t> interDistances;
         candidates.clear();
         kept.clear();
+        keptPtrs.clear();
+        interDistances.clear();
 
         // Move heap -> vector (we'll rebuild a smaller heap at the end)
         while (!topCandidates.empty()) {
@@ -425,6 +430,7 @@ namespace hnsw {
           return a.first < b.first;
         };
 
+        
         // If we have more than M, reduce the set first.
         if (n > M) {
           // Heuristic: if M is very small compared to n, nth_element + sort M is best.
@@ -443,27 +449,29 @@ namespace hnsw {
         }
 
         // Apply HNSW diversification heuristic: keep candidate if it's not closer to any selected neighbor
+        keptPtrs.reserve(std::min(M, candidates.size()));
         kept.reserve(std::min(M, candidates.size()));
         for (const DistIdxPair &cand : candidates) {
-          bool good = true;
+            const dist_t* pCandData = reinterpret_cast<const dist_t*>(getDataByInternalId(cand.second));
 
-          // pointer to candidate data
-          const dist_t* pCandData = reinterpret_cast<const dist_t*>(getDataByInternalId(cand.second));
+            bool good = true;
+            if (!keptPtrs.empty()) {
+                interDistances.resize(keptPtrs.size());
+                batchDistFunc_(pCandData, keptPtrs.data(), keptPtrs.size(), dim_, interDistances.data());
 
-          for (const DistIdxPair &sel : kept) {
-            const dist_t* pSelData = reinterpret_cast<const dist_t*>(getDataByInternalId(sel.second));
-            // distance between selected neighbor and candidate
-            dist_t inter = distFunc_(pSelData, pCandData, dim_);
-            if (inter < cand.first) { // if selected neighbor is closer to cand than cand->query
-              good = false;
-              break;
+                for (size_t i = 0; i < keptPtrs.size(); ++i) {
+                    if (interDistances[i] < cand.first) {
+                        good = false;
+                        break;
+                    }
+                }
             }
-          }
 
-          if (good) {
-            kept.push_back(cand);
-            if (kept.size() == M) break;
-          }
+            if (good) {
+                kept.push_back(cand);
+                keptPtrs.push_back(pCandData);
+                if (kept.size() == M) break;
+            }
         }
 
         // Push selected neighbors back into the provided heap
@@ -532,7 +540,7 @@ namespace hnsw {
 
             // Scope for adjacency lock - release before batch distance computation
             {
-                std::unique_lock<std::mutex> lock(adjacencyMutexes_[curNodeId]);
+                std::unique_lock<std::shared_mutex> lock(adjacencyMutexes_[curNodeId]);
 
                 linklistsize_t* adjList = getAdjListAtLevel(curNodeId, layer);
                 size_t numNeighbors = getListCount(adjList);
@@ -662,7 +670,7 @@ namespace hnsw {
           size_t unvisitedCount = 0;
 
           {
-            std::unique_lock<std::mutex> lock(adjacencyMutexes_[curNodeId]);
+            std::unique_lock<std::shared_mutex> lock(adjacencyMutexes_[curNodeId]);
 
             linklistsize_t* adjList = getAdjListAtLevel(curNodeId, layer);
             size_t numNeighbors = getListCount(adjList);
@@ -869,6 +877,10 @@ namespace hnsw {
       void setEF(size_t ef) { efSearch_ = ef; }
       size_t getEF() const noexcept { return efSearch_; }
 
+      size_t getConstructionEf(int layer) const noexcept {
+        return efConstruction_;
+      }
+
       unsigned short getListCount(linklistsize_t * ptr) const {
           return *reinterpret_cast<const unsigned short*>(ptr);
       }
@@ -980,7 +992,7 @@ namespace hnsw {
     // ============================================================
 
     std::vector<tableidx_t> getConnectionsWithLock(tableidx_t internalId, int level) {
-        std::unique_lock<std::mutex> lock(adjacencyMutexes_[internalId]);
+        std::unique_lock<std::shared_mutex> lock(adjacencyMutexes_[internalId]);
         linklistsize_t* data = getAdjListAtLevel(internalId, level);
         int size = getListCount(data);
         std::vector<tableidx_t> result(size);
@@ -997,9 +1009,9 @@ namespace hnsw {
         bool isUpdate) {
 
         size_t Mcurmax = level ? maxM_ : maxM0_;
-        getNeighborsByHeuristic(topCandidates, Mcurmax); // was M_
+        getNeighborsByHeuristic(topCandidates, M_);
 
-        if (topCandidates.size() > Mcurmax)
+        if (topCandidates.size() > M_)
             throw std::runtime_error("Should not be more than M_ candidates returned by heuristic");
 
         // Extract selected neighbors
@@ -1014,7 +1026,7 @@ namespace hnsw {
 
         // Write connections to new element
         {
-            std::unique_lock<std::mutex> lock(adjacencyMutexes_[curC], std::defer_lock);
+            std::unique_lock<std::shared_mutex> lock(adjacencyMutexes_[curC], std::defer_lock);
             if (isUpdate) {
                 lock.lock();
             }
@@ -1039,7 +1051,7 @@ namespace hnsw {
 
         // Add bidirectional connections to neighbors
         for (size_t idx = 0; idx < selectedNeighbors.size(); idx++) {
-            std::unique_lock<std::mutex> lock(adjacencyMutexes_[selectedNeighbors[idx]]);
+            std::unique_lock<std::shared_mutex> lock(adjacencyMutexes_[selectedNeighbors[idx]]);
 
             linklistsize_t* llOther = getAdjListAtLevel(selectedNeighbors[idx], level);
             size_t szLinkListOther = getListCount(llOther);
@@ -1070,22 +1082,24 @@ namespace hnsw {
                     data[szLinkListOther] = curC;
                     setListCount(llOther, szLinkListOther + 1);
                 } else {
-                    // Full - need to prune using heuristic
-                    dist_t dMax = distFunc_(
-                        reinterpret_cast<const dist_t*>(getDataByInternalId(curC)),
-                        reinterpret_cast<const dist_t*>(getDataByInternalId(selectedNeighbors[idx])),
-                        dim_);
+                    const dist_t* centerData = reinterpret_cast<const dist_t*>(
+                        getDataByInternalId(selectedNeighbors[idx]));
+                    const dist_t* curCData = reinterpret_cast<const dist_t*>(
+                        getDataByInternalId(curC));
+
+                    dist_t dMax = distFunc_(curCData, centerData, dim_);
 
                     CandidateQueue candidates;
                     candidates.emplace(dMax, curC);
 
                     for (size_t j = 0; j < szLinkListOther; j++) {
-                        candidates.emplace(
-                            distFunc_(
-                                reinterpret_cast<const dist_t*>(getDataByInternalId(data[j])),
-                                reinterpret_cast<const dist_t*>(getDataByInternalId(selectedNeighbors[idx])),
-                                dim_),
-                            data[j]);
+                        if (j + 2 < szLinkListOther) {
+                            impl::prefetchL1(getDataByInternalId(data[j + 2]));
+                        }
+
+                        const dist_t* neighborData = reinterpret_cast<const dist_t*>(
+                            getDataByInternalId(data[j]));
+                        candidates.emplace(distFunc_(neighborData, centerData, dim_), data[j]);
                     }
 
                     getNeighborsByHeuristic(candidates, Mcurmax);
@@ -1173,8 +1187,8 @@ namespace hnsw {
         }
 
         // Lock element and generate level
-        std::unique_lock<std::mutex> lockEl(adjacencyMutexes_[curC]);
-        int curLevel = getRandomLevel(invLevelMult_);
+        std::unique_lock<std::shared_mutex> lockEl(adjacencyMutexes_[curC]);
+        int curLevel = getRandomLevel(levelMult_);
         elementLevels_[curC] = curLevel;
 
         // Global lock for entry point update
@@ -1212,10 +1226,10 @@ namespace hnsw {
                 dist_t curDist = distFunc_(vecData, reinterpret_cast<const dist_t*>(getDataByInternalId(currObj)), dim_);
                 for (int level = maxLevelCopy; level > curLevel; level--) {
                     if (level > elementLevels_[currObj]) continue;
-                    bool changed  = true; 
+                    bool changed  = true;
                     while (changed) {
                         changed = false;
-                        std::unique_lock<std::mutex> lock(adjacencyMutexes_[currObj]);
+                        std::shared_lock<std::shared_mutex> lock(adjacencyMutexes_[currObj]);
                         linklistsize_t* data = getAdjList(currObj, level);
                         int size = getListCount(data);
                         tableidx_t* datal = reinterpret_cast<tableidx_t*>(data + 1);
@@ -1237,7 +1251,8 @@ namespace hnsw {
             // Connect at each level
             bool epDeleted = isMarkedDeleted(entryPointCopy);
             for (int level = std::min(curLevel, maxLevelCopy); level >= 0; level--) {
-                CandidateQueue topCandidates = searchBaseLayer(currObj, vectorData, level);
+                size_t ef = efConstruction_;
+                CandidateQueue topCandidates = searchBaseLayer(currObj, vectorData, level, ef);
 
                 if (epDeleted) {
                     topCandidates.emplace(
@@ -1276,6 +1291,7 @@ namespace hnsw {
             bool changed = true;
             while (changed) {
                 changed = false;
+                std::shared_lock<std::shared_mutex> lock(adjacencyMutexes_[currObj]);
                 linklistsize_t* data = getAdjList(currObj, level);
                 int size = getListCount(data);
                 metricGraphHops++;
@@ -1444,7 +1460,7 @@ namespace hnsw {
                 getNeighborsByHeuristic(candidates, layer == 0 ? maxM0_ : maxM_);
 
                 {
-                    std::unique_lock<std::mutex> lock(adjacencyMutexes_[neigh]);
+                    std::unique_lock<std::shared_mutex> lock(adjacencyMutexes_[neigh]);
                     linklistsize_t* llCur = getAdjListAtLevel(neigh, layer);
                     size_t candSize = candidates.size();
                     setListCount(llCur, candSize);
@@ -1477,7 +1493,7 @@ namespace hnsw {
                 bool changed = true;
                 while (changed) {
                     changed = false;
-                    std::unique_lock<std::mutex> lock(adjacencyMutexes_[currObj]);
+                    std::unique_lock<std::shared_mutex> lock(adjacencyMutexes_[currObj]);
                     linklistsize_t* data = getAdjListAtLevel(currObj, level);
                     int size = getListCount(data);
                     tableidx_t* datal = reinterpret_cast<tableidx_t*>(data + 1);
