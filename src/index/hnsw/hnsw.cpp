@@ -224,30 +224,65 @@ namespace hnsw {
         if (!input.is_open())
           throw std::runtime_error("HNSW index file could not be opened");
 
-        clear();
-
         input.seekg(0, input.end);
         std::streampos totalFileSize = input.tellg();
         input.seekg(0, input.beg);
 
-        // HEADER REGION
-        read(input, kLvl0AdjListOffset_);
-        read(input, maxElements_);
-        read(input, elementCount_);
+        // HEADER REGION - Read into LOCAL variables first
+        size_t hdr_lvl0AdjListOffset, hdr_maxElements, hdr_elementCount;
+        size_t hdr_elementSize, hdr_labelOffset, hdr_vectorOffset;
+        int hdr_maxLevel;
+        tableidx_t hdr_entryPoint;
+        size_t hdr_maxM, hdr_maxM0, hdr_M;
+        double hdr_levelMult;
+        size_t hdr_efConstruction;
 
-        maxElements_ = std::max(maxElemsParam, elementCount_.load());
-        read(input, kElementSize_);
-        read(input, kLabelOffset_);
-        read(input, kVectorOffset_);
-        read(input, maxLevel_);
-        read(input, entryPoint_);
-
-        read(input, maxM_);
-        read(input, maxM0_);
-        read(input, M_);
-        read(input, levelMult_);
-        read(input, efConstruction_);
+        read(input, hdr_lvl0AdjListOffset);
+        read(input, hdr_maxElements);
+        read(input, hdr_elementCount);
+        read(input, hdr_elementSize);
+        read(input, hdr_labelOffset);
+        read(input, hdr_vectorOffset);
+        read(input, hdr_maxLevel);
+        read(input, hdr_entryPoint);
+        read(input, hdr_maxM);
+        read(input, hdr_maxM0);
+        read(input, hdr_M);
+        read(input, hdr_levelMult);
+        read(input, hdr_efConstruction);
         // END HEADER REGION
+
+        // Basic sanity checks BEFORE modifying state
+        if (hdr_elementCount > hdr_maxElements) {
+          throw std::runtime_error("Index seems to be corrupted or unsupported");
+        }
+        if (hdr_maxM == 0 || hdr_maxM0 == 0 || hdr_M == 0) {
+          throw std::runtime_error("Index seems to be corrupted or unsupported");
+        }
+        if (hdr_elementSize == 0 || hdr_levelMult <= 0) {
+          throw std::runtime_error("Index seems to be corrupted or unsupported");
+        }
+
+        auto pos = input.tellg();
+        validateIndexFileBody(input, totalFileSize, hdr_elementCount, hdr_elementSize);
+        input.seekg(pos, input.beg);
+
+        // NOW safe to commit: clear old state and assign new values
+        clear();
+
+        kLvl0AdjListOffset_ = hdr_lvl0AdjListOffset;
+        maxElements_ = std::max(maxElemsParam, hdr_maxElements);
+        elementCount_ = hdr_elementCount;
+        kElementSize_ = hdr_elementSize;
+        kLabelOffset_ = hdr_labelOffset;
+        kVectorOffset_ = hdr_vectorOffset;
+        maxLevel_ = hdr_maxLevel;
+        entryPoint_ = hdr_entryPoint;
+        maxM_ = hdr_maxM;
+        maxM0_ = hdr_maxM0;
+        M_ = hdr_M;
+        levelMult_ = hdr_levelMult;
+        efConstruction_ = hdr_efConstruction;
 
         kElemVecSize_ = pSpace->getDataSize();
         distFunc_ = pSpace->getDistFunc();
@@ -259,10 +294,6 @@ namespace hnsw {
         if (batchDistFunc_ == nullptr) {
             throw std::runtime_error("SpaceInterface must provide a batch distance function");
         }
-
-        auto pos = input.tellg();
-        validateIndexFileBody(input, totalFileSize);
-        input.seekg(pos, input.beg);
 
         // Allocate memory block for the elements
         pElementsBlock_ = static_cast<char*>(malloc(maxElements_ * kElementSize_));
@@ -922,10 +953,10 @@ namespace hnsw {
         return level == 0 ? getAdjListL0(internalId) : getAdjList(internalId, level);
       }
 
-      inline void validateIndexFileBody(std::ifstream& input, std::streampos totalFileSize) {
-        input.seekg(elementCount_ * kElementSize_, input.cur);
+      inline void validateIndexFileBody(std::ifstream& input, std::streampos totalFileSize, size_t elementCount, size_t kElementSize) {
+        input.seekg(elementCount * kElementSize, input.cur);
 
-        for (size_t i = 0; i < elementCount_; i++) {
+        for (size_t i = 0; i < elementCount; i++) {
           if (input.tellg() < 0 || input.tellg() >= totalFileSize) {
             throw std::runtime_error("Index seems to be corrupted or unsupported");
           }
