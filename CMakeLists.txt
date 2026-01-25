@@ -68,6 +68,7 @@ set(ARROW_EMBEDDING_MODEL_DIR ${CMAKE_SOURCE_DIR}/embed/models)
 
 # ─────────────────────────────────────────────────────────────
 # Arrow Library (static)
+# Note: src/index/hnsw/ is excluded (custom HNSW implementation WIP)
 # ─────────────────────────────────────────────────────────────
 add_library(arrow STATIC
     src/core/collection.cpp
@@ -93,10 +94,10 @@ target_compile_options(arrow PRIVATE -O3 -march=native)
 
 
 # ─────────────────────────────────────────────────────────────
-# CLI executable
+# LI executable
 # ─────────────────────────────────────────────────────────────
 add_executable(arrowDB
-    src/cli/main.cpp
+    src/main.cpp
     src/embedder/embedder.cpp
 )
 

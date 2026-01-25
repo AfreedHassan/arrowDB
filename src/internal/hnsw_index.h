@@ -6,8 +6,8 @@
 #include "arrow/types.h"
 #include "arrow/utils/status.h"
 
-// Forward declare hnswlib types to avoid header pollution
-namespace hnswlib {
+// Forward declare custom HNSW types
+namespace hnsw {
     template<typename T> class HierarchicalNSW;
     template<typename T> class SpaceInterface;
 }
@@ -28,14 +28,14 @@ struct HNSWConfig {
     size_t efConstruction = 200;    // Construction beam width
 };
 
-/// HNSW index wrapper around hnswlib.
+/// HNSW index wrapper using custom HNSW implementation.
 /// Owns vector data internally - no separate VectorStore needed.
 class HNSWIndex {
 private:
     size_t dim_;
     Space spaceKind_;
-    std::unique_ptr<hnswlib::SpaceInterface<float>> space_;
-    std::unique_ptr<hnswlib::HierarchicalNSW<float>> hnsw_;
+    std::unique_ptr<hnsw::SpaceInterface<float>> space_;
+    std::unique_ptr<hnsw::HierarchicalNSW<float>> hnsw_;
 public:
     HNSWIndex(size_t dim, Space space, const HNSWConfig& config = {});
     ~HNSWIndex();

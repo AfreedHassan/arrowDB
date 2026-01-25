@@ -2,7 +2,9 @@
 #include "internal/hnsw_index.h"
 #include "arrow/utils/status.h"
 
-#include <hnswlib/hnswlib.h>
+#include "index/hnsw/hnsw.cpp"
+#include "index/hnsw/space_ip.h"
+#include "index/hnsw/space_l2.h"
 #include <algorithm>
 #include <iostream>
 #include <memory>
@@ -21,16 +23,16 @@ HNSWIndex::HNSWIndex(size_t dim, Space space,
     switch (space) {
     case Space::Cosine:
     case Space::InnerProduct:
-      space_ = std::make_unique<hnswlib::InnerProductSpace>(dim);
+      space_ = std::make_unique<hnsw::InnerProductSpace>(dim);
       break;
     case Space::L2:
-      space_ = std::make_unique<hnswlib::L2Space>(dim);
+      space_ = std::make_unique<hnsw::L2Space>(dim);
       break;
     default:
       throw std::invalid_argument("Unsupported space type");
   }
 
-  hnsw_ = std::make_unique<hnswlib::HierarchicalNSW<float>>(
+  hnsw_ = std::make_unique<hnsw::HierarchicalNSW<float>>(
       space_.get(),
       config.maxElements,
       config.M,
@@ -48,7 +50,7 @@ bool HNSWIndex::insert(VectorID id, const std::vector<float>& vec) {
               << ", got " << vec.size() << "\n";
     return false;
   }
-  hnsw_->addPoint(vec.data(), static_cast<hnswlib::labeltype>(id));
+  hnsw_->addPoint(vec.data(), static_cast<hnsw::label_t>(id));
   return true;
 }
 
@@ -60,9 +62,9 @@ std::vector<IndexSearchResult> HNSWIndex::search(
     throw std::invalid_argument("Query dimension mismatch");
   }
 
-  hnsw_->setEf(ef);
+  hnsw_->setEF(ef);
 
-  using QueueItem = std::pair<float, hnswlib::labeltype>;  // (distance, label)
+  using QueueItem = std::pair<float, hnsw::label_t>;  // (distance, label)
   std::priority_queue<QueueItem> resultsQueue =
       hnsw_->searchKnn(query.data(), k);
 
@@ -90,13 +92,11 @@ void HNSWIndex::saveIndex(const std::string& path) const {
 }
 
 void HNSWIndex::loadIndex(const std::string& path) {
-  hnsw_ = std::make_unique<hnswlib::HierarchicalNSW<float>>(
-      space_.get(),
-      path);
+  hnsw_->loadIndex(path, space_.get());
 }
 
 size_t HNSWIndex::size() const {
-    return hnsw_->cur_element_count;
+    return hnsw_->size();
 }
 
 void HNSWIndex::reserve(size_t max_elements) {
@@ -106,7 +106,7 @@ void HNSWIndex::reserve(size_t max_elements) {
 utils::Status HNSWIndex::markDelete(VectorID id) {
     const std::string_view labelNotFoundError = "Label not found";
     try {
-      hnsw_->markDelete(static_cast<hnswlib::labeltype>(id));
+      hnsw_->markDelete(static_cast<hnsw::label_t>(id));
     } catch (const std::exception& e) {
       if (e.what() == labelNotFoundError) {
         return utils::Status(utils::StatusCode::kNotFound, e.what());
