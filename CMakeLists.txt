@@ -74,6 +74,7 @@ add_library(arrow STATIC
     src/core/collection.cpp
     src/core/client.cpp
     src/core/wal.cpp
+    src/core/id_space.cpp
     src/index/hnsw_index.cpp
     src/embedder/embedder.cpp
 )
@@ -180,11 +181,12 @@ add_test(NAME MetadataTests COMMAND tests --gtest_filter=MetadataUnit.*)
 add_test(NAME MetadataIntegrationTests COMMAND tests --gtest_filter=MetadataIntegrationTest.*)
 add_test(NAME BinaryTests COMMAND tests --gtest_filter=BinaryTest.*)
 add_test(NAME ArrowDBTests COMMAND tests --gtest_filter=ArrowDBTest.*)
+add_test(NAME IDSpaceTests COMMAND tests --gtest_filter=IDSpaceTest.*)
 
 # Grouped test suites
 add_test(NAME AllHNSWTests COMMAND tests --gtest_filter=HNSWIndexTest.*:IPDistanceTest.*:L2DistanceTest.*:BatchDistanceTest.*:VectorStorageTest.*)
 add_test(NAME AllEmbedderTests COMMAND tests --gtest_filter=EmbeddingDebug.*:DatasetTest.*:ThreadSafety.*)
-add_test(NAME AllCoreTests COMMAND tests --gtest_filter=BinaryTest.*:CollectionTest.*:CollectionWalTest.*:WALTest.*:MetadataUnit.*:MetadataIntegrationTest.*:ArrowDBTest.*)
+add_test(NAME AllCoreTests COMMAND tests --gtest_filter=BinaryTest.*:CollectionTest.*:CollectionWalTest.*:WALTest.*:MetadataUnit.*:MetadataIntegrationTest.*:ArrowDBTest.*:IDSpaceTest.*)
 
 add_test(NAME UnitTests COMMAND tests --gtest_filter="HNSWIndexTest.*:MetadataUnit.*:WALTest.*")
 add_test(NAME IntegrationTests COMMAND tests --gtest_filter="CollectionTest.*:CollectionWalTest.*:MetadataIntegrationTest.*")
