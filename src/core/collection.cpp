@@ -126,7 +126,7 @@ public:
   HNSWConfig hnswConfig_;
   std::unique_ptr<HNSWIndex> pIndex_;
   std::unique_ptr<wal::WAL> pWal_;
-  std::unordered_map<VectorID, Metadata> metadata_;
+  std::unordered_map<InternalID, Metadata> metadata_;
   uint64_t lsnCounter = 1;
   uint64_t txidCounter = 1;
   std::optional<std::filesystem::path> persistencePath_;
@@ -199,16 +199,16 @@ public:
 
       switch (entry.type) {
       case wal::OperationType::INSERT:
-        if (!pIndex_->insert(entry.vectorID, entry.embedding)) {
+        if (!pIndex_->insert(entry.id, entry.embedding)) {
           return utils::Status(utils::StatusCode::kInternal,
                                "Failed to replay INSERT for vector " +
-                                   std::to_string(entry.vectorID));
+                                   std::to_string(entry.id));
         }
         ++replayedCount;
         break;
       case wal::OperationType::DELETE:
-        pIndex_->markDelete(entry.vectorID);
-        metadata_.erase(entry.vectorID);
+        pIndex_->markDelete(entry.id);
+        metadata_.erase(entry.id);
         ++replayedCount;
         break;
       default:
@@ -292,7 +292,7 @@ Space Collection::space() const { return pImpl_->config_.space; }
 size_t Collection::size() const { return pImpl_->pIndex_->size(); }
 bool Collection::recoveredFromWal() const { return pImpl_->recoveredFromWal_; }
 
-utils::Status Collection::insert(VectorID id, const std::vector<float> &vec, Metadata metadata) {
+utils::Status Collection::insert(InternalID id, const std::vector<float> &vec, Metadata metadata) {
   if (vec.size() != pImpl_->config_.dimensions) {
     return utils::Status(utils::StatusCode::kDimensionMismatch,
                          "Vector dimension mismatch: expected " +
@@ -306,7 +306,7 @@ utils::Status Collection::insert(VectorID id, const std::vector<float> &vec, Met
                    .txid = pImpl_->txidCounter++,
                    .headerCRC = 0,
                    .payloadLength = 0,
-                   .vectorID = id,
+                   .id = id,
                    .dimension = pImpl_->config_.dimensions,
                    .padding = 0,
                    .embedding = vec,
@@ -348,7 +348,7 @@ utils::Status Collection::insert(const std::vector<std::string> &text) {
 }
 
 utils::Result<BatchInsertResult> Collection::insertBatch(
-    const std::vector<std::pair<VectorID, std::vector<float>>> &batch) {
+    const std::vector<std::pair<InternalID, std::vector<float>>> &batch) {
 
   BatchInsertResult result;
   result.results.resize(batch.size());
@@ -380,7 +380,7 @@ utils::Result<BatchInsertResult> Collection::insertBatch(
                      .txid = pImpl_->txidCounter++,
                      .headerCRC = 0,
                      .payloadLength = 0,
-                     .vectorID = id,
+                     .id = id,
                      .dimension = pImpl_->config_.dimensions,
                      .padding = 0,
                      .embedding = vec,
@@ -418,11 +418,11 @@ utils::Result<BatchInsertResult> Collection::insertBatch(
   return result;
 }
 
-void Collection::setMetadata(VectorID id, const Metadata &metadata) {
+void Collection::setMetadata(InternalID id, const Metadata &metadata) {
   pImpl_->metadata_[id] = metadata;
 }
 
-Metadata Collection::getMetadata(VectorID id) { return pImpl_->metadata_[id]; }
+Metadata Collection::getMetadata(InternalID id) { return pImpl_->metadata_[id]; }
 
 std::vector<IndexSearchResult>
 Collection::search(const std::vector<float> &query, uint32_t k,
@@ -485,14 +485,14 @@ Collection::searchBatch(const std::vector<std::vector<float>> &queries,
   return Impl::parallelSearch(pImpl_->pIndex_.get(), queries, k, ef);
 }
 
-utils::Status Collection::remove(VectorID id) {
+utils::Status Collection::remove(InternalID id) {
   wal::Entry entry{.type = wal::OperationType::DELETE,
                    .version = 1,
                    .lsn = pImpl_->lsnCounter++,
                    .txid = pImpl_->txidCounter++,
                    .headerCRC = 0,
                    .payloadLength = 0,
-                   .vectorID = id,
+                   .id = id,
                    .dimension = 0,
                    .padding = 0,
                    .embedding = {},

@@ -62,7 +62,7 @@ struct Entry {
   uint64_t txid;
   uint32_t headerCRC;
   uint32_t payloadLength = 0;
-  VectorID vectorID = 0;
+  InternalID id = 0;
   uint32_t dimension = 0;
   uint8_t padding;
   std::vector<float> embedding;

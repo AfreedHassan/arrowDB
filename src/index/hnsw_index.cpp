@@ -44,7 +44,7 @@ HNSWIndex::~HNSWIndex() = default;
 HNSWIndex::HNSWIndex(HNSWIndex&&) noexcept = default;
 HNSWIndex& HNSWIndex::operator=(HNSWIndex&&) noexcept = default;
 
-bool HNSWIndex::insert(VectorID id, const std::vector<float>& vec) {
+bool HNSWIndex::insert(InternalID id, const std::vector<float>& vec) {
   if (vec.size() != dim_) {
     std::cerr << "Vector dimension mismatch: expected " << dim_
               << ", got " << vec.size() << "\n";
@@ -81,7 +81,7 @@ std::vector<IndexSearchResult> HNSWIndex::search(
     auto [dist, label] = resultsQueue.top();
     resultsQueue.pop();
     float score = distToScoreConverter * dist;
-    results.push_back({static_cast<VectorID>(label), score});
+    results.push_back({static_cast<InternalID>(label), score});
   }
   std::reverse(results.begin(), results.end());
   return results;
@@ -103,7 +103,7 @@ void HNSWIndex::reserve(size_t max_elements) {
     hnsw_->resizeIndex(max_elements);
 }
 
-utils::Status HNSWIndex::markDelete(VectorID id) {
+utils::Status HNSWIndex::markDelete(InternalID id) {
     const std::string_view labelNotFoundError = "Label not found";
     try {
       hnsw_->markDelete(static_cast<hnsw::label_t>(id));

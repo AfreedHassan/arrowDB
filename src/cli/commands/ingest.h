@@ -48,8 +48,8 @@ inline void ingest(const std::string& embeddingsPath = "embeddings.bin",
     return;
   }
 
-  VectorID vectorId = 0;
-  std::vector<std::pair<VectorID, std::vector<float>>> batch;
+  InternalID vectorId = 0;
+  std::vector<std::pair<InternalID, std::vector<float>>> batch;
   batch.reserve(batchSize);
 
   std::string textLine;

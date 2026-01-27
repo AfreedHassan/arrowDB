@@ -86,7 +86,7 @@ utils::json Entry::toJson() const {
   j["type"] = typeStr;
   j["lsn"] = lsn;
   j["txid"] = txid;
-  j["vectorId"] = vectorID;
+  j["vectorId"] = id;
   j["dimension"] = dimension;
   j["embedding"] = embedding;
   return j;
@@ -173,7 +173,7 @@ Result<Entry> ParseEntry(BinaryReader &r) {
     return Status(StatusCode::kBadRecord, "Invalid operation type");
   }
 
-  if (!r.read(e.headerCRC) || !r.read(e.payloadLength) || !r.read(e.vectorID) ||
+  if (!r.read(e.headerCRC) || !r.read(e.payloadLength) || !r.read(e.id) ||
       !r.read(e.dimension) || !r.read(e.padding)) {
     e.print();
     return Status(StatusCode::kIoError, "Failed to read entry metadata fields");
@@ -233,7 +233,7 @@ Status WriteEntry(const Entry &e, BinaryWriter &w) {
   w.write(e.txid);
   w.write(e.computeHeaderCrc());
   w.write(e.computePayloadLength());
-  w.write(e.vectorID);
+  w.write(e.id);
   w.write(e.dimension);
   w.write(e.padding);
   w.write(e.embedding);

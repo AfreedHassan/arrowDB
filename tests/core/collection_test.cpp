@@ -52,7 +52,7 @@ TEST_F(CollectionTest, InsertVectors) {
 
   for (size_t i = 0; i < num_vectors; ++i) {
     std::vector<float> vec = RandomVector(dim, gen);
-    collection.insert(static_cast<VectorID>(i), vec);
+    collection.insert(static_cast<InternalID>(i), vec);
   }
 
   EXPECT_EQ(collection.size(), num_vectors);
@@ -70,7 +70,7 @@ TEST_F(CollectionTest, SearchFunctionality) {
   // Insert vectors
   for (size_t i = 0; i < num_vectors; ++i) {
     std::vector<float> vec = RandomVector(dim, gen);
-    collection.insert(static_cast<VectorID>(i), vec);
+    collection.insert(static_cast<InternalID>(i), vec);
   }
 
   // Perform search
@@ -99,7 +99,7 @@ TEST_F(CollectionTest, SearchWithDifferentEf) {
   // Insert vectors
   for (size_t i = 0; i < num_vectors; ++i) {
     std::vector<float> vec = RandomVector(dim, gen);
-    collection.insert(static_cast<VectorID>(i), vec);
+    collection.insert(static_cast<InternalID>(i), vec);
   }
 
   std::vector<float> query = RandomVector(dim, gen);
@@ -124,7 +124,7 @@ TEST_F(CollectionTest, SearchPerformance) {
   // Insert vectors
   for (size_t i = 0; i < num_vectors; ++i) {
     std::vector<float> vec = RandomVector(dim, gen);
-    collection.insert(static_cast<VectorID>(i), vec);
+    collection.insert(static_cast<InternalID>(i), vec);
   }
 
   std::vector<float> query = RandomVector(dim, gen);
@@ -406,7 +406,7 @@ TEST_F(CollectionWalTest, WalLoggingEnabledWithPersistencePath) {
     ASSERT_TRUE(entriesResult.ok()) << entriesResult.status().message();
     EXPECT_EQ(entriesResult.value().size(), 1);
     EXPECT_EQ(entriesResult.value()[0].type, wal::OperationType::INSERT);
-    EXPECT_EQ(entriesResult.value()[0].vectorID, 1);
+    EXPECT_EQ(entriesResult.value()[0].id, 1);
   }
 }
 
@@ -430,7 +430,7 @@ TEST_F(CollectionWalTest, WalLogOnInsert) {
   const size_t numInserts = 10;
   for (size_t i = 0; i < numInserts; ++i) {
     std::vector<float> vec = RandomVector(128, gen);
-    auto status = collection.insert(static_cast<VectorID>(i), vec);
+    auto status = collection.insert(static_cast<InternalID>(i), vec);
     ASSERT_TRUE(status.ok()) << status.message();
   }
 
@@ -444,7 +444,7 @@ TEST_F(CollectionWalTest, WalLogOnInsert) {
 
   for (size_t i = 0; i < numInserts; ++i) {
     EXPECT_EQ(entries[i].type, wal::OperationType::INSERT);
-    EXPECT_EQ(entries[i].vectorID, static_cast<VectorID>(i));
+    EXPECT_EQ(entries[i].id, static_cast<InternalID>(i));
     EXPECT_EQ(entries[i].dimension, 128);
     EXPECT_FALSE(entries[i].embedding.empty());
   }
@@ -480,7 +480,7 @@ TEST_F(CollectionWalTest, WalLogOnDelete) {
       insertCount++;
     } else if (entry.type == wal::OperationType::DELETE) {
       deleteCount++;
-      EXPECT_EQ(entry.vectorID, 2);
+      EXPECT_EQ(entry.id, 2);
     }
   }
   EXPECT_EQ(insertCount, numInserts);
@@ -825,7 +825,7 @@ TEST_F(CollectionBatchTest, InsertBatchSuccess) {
   Collection collection(cfg);
 
   // Prepare batch
-  std::vector<std::pair<VectorID, std::vector<float>>> batch;
+  std::vector<std::pair<InternalID, std::vector<float>>> batch;
   std::mt19937 gen(42);
   for (size_t i = 0; i < 100; ++i) {
     batch.push_back({i, RandomVector(128, gen)});
@@ -846,7 +846,7 @@ TEST_F(CollectionBatchTest, InsertBatchPartialFailure) {
   Collection collection(cfg);
 
   // Mixed valid and invalid dimensions
-  std::vector<std::pair<VectorID, std::vector<float>>> batch;
+  std::vector<std::pair<InternalID, std::vector<float>>> batch;
   std::mt19937 gen(42);
 
   batch.push_back({0, RandomVector(128, gen)});  // Valid
@@ -876,7 +876,7 @@ TEST_F(CollectionBatchTest, SearchBatchParallel) {
 
   // Insert vectors using batch insert
   std::mt19937 gen(42);
-  std::vector<std::pair<VectorID, std::vector<float>>> batch;
+  std::vector<std::pair<InternalID, std::vector<float>>> batch;
   for (size_t i = 0; i < 1000; ++i) {
     batch.push_back({i, RandomVector(128, gen)});
   }
@@ -930,7 +930,7 @@ TEST_F(CollectionBatchTest, InsertBatchWithPersistence) {
   {
     Collection collection(config, persistencePath);
 
-    std::vector<std::pair<VectorID, std::vector<float>>> batch;
+    std::vector<std::pair<InternalID, std::vector<float>>> batch;
     std::mt19937 gen(42);
     for (size_t i = 0; i < 50; ++i) {
       batch.push_back({i, RandomVector(128, gen)});

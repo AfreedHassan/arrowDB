@@ -88,7 +88,7 @@ std::vector<std::vector<float>> LoadSIFTVectors(
  * @param k Number of nearest neighbors per query
  * @return Vector of query results, each containing k vector IDs
  */
-std::vector<std::vector<VectorID>> LoadSIFTGroundTruth(
+std::vector<std::vector<InternalID>> LoadSIFTGroundTruth(
     const std::string& filepath,
     size_t num_queries,
     size_t k
@@ -98,7 +98,7 @@ std::vector<std::vector<VectorID>> LoadSIFTGroundTruth(
         throw std::runtime_error("Failed to open ground truth file: " + filepath);
     }
 
-    std::vector<std::vector<VectorID>> ground_truth;
+    std::vector<std::vector<InternalID>> ground_truth;
     ground_truth.reserve(num_queries);
     
     for (size_t q = 0; q < num_queries; ++q) {
@@ -115,10 +115,10 @@ std::vector<std::vector<VectorID>> LoadSIFTGroundTruth(
             throw std::runtime_error("Failed to read ground truth IDs");
         }
         
-        std::vector<VectorID> query_gt;
+        std::vector<InternalID> query_gt;
         query_gt.reserve(k_actual);
         for (size_t i = 0; i < k_actual; ++i) {
-            query_gt.push_back(static_cast<VectorID>(ids[i]));
+            query_gt.push_back(static_cast<InternalID>(ids[i]));
         }
         ground_truth.push_back(std::move(query_gt));
     }
@@ -135,7 +135,7 @@ std::vector<std::vector<VectorID>> LoadSIFTGroundTruth(
  * @return Average recall@k across all queries
  */
 double CalculateSIFTRecall(
-    const std::vector<std::vector<VectorID>>& groundTruthFull,
+    const std::vector<std::vector<InternalID>>& groundTruthFull,
     const std::vector<std::vector<arrow::IndexSearchResult>>& results,
     size_t k
 ) {
@@ -152,7 +152,7 @@ double CalculateSIFTRecall(
         const auto& gt = groundTruthFull[q];
         const auto& res = results[q];
         
-        std::unordered_set<VectorID> gtSet;
+        std::unordered_set<InternalID> gtSet;
         size_t kActual = std::min(k, gt.size());
         for (size_t i = 0; i < kActual; ++i) {
             gtSet.insert(gt[i]);

@@ -64,7 +64,7 @@ public:
     /// @param id Unique identifier for the vector
     /// @param vec Vector data (must match collection dimension)
     /// @return Status indicating success or failure
-    utils::Status insert(VectorID id, const std::vector<float>& vec, Metadata metadata = {});
+    utils::Status insert(InternalID id, const std::vector<float>& vec, Metadata metadata = {});
 
     utils::Status insert(const std::vector<std::string>& data);
 
@@ -73,14 +73,14 @@ public:
     /// @param batch Vector of (id, vector) pairs to insert
     /// @return Result containing BatchInsertResult with per-vector status
     utils::Result<BatchInsertResult> insertBatch(
-        const std::vector<std::pair<VectorID, std::vector<float>>>& batch);
+        const std::vector<std::pair<InternalID, std::vector<float>>>& batch);
 
     /// Set metadata for a vector.
     ///
     /// @param id Vector identifier
     /// @param metadata Metadata to associate with the vector
-    void setMetadata(VectorID id, const Metadata& metadata);
-    Metadata getMetadata(VectorID id);
+    void setMetadata(InternalID id, const Metadata& metadata);
+    Metadata getMetadata(InternalID id);
 
     /// Search for k nearest neighbors.
     ///
@@ -121,7 +121,7 @@ public:
     ///
     /// @param id Vector identifier to remove
     /// @return Status indicating success or failure
-    utils::Status remove(VectorID id);
+    utils::Status remove(InternalID id);
 
     /// Save the collection to disk.
     ///

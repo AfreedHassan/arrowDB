@@ -47,7 +47,7 @@ public:
     HNSWIndex& operator=(HNSWIndex&&) noexcept;
     
     /// Insert a vector with the given ID.
-    bool insert(VectorID id, const std::vector<float>& vec);
+    bool insert(InternalID id, const std::vector<float>& vec);
     
     /// Search for k nearest neighbors.
     /// @param ef Search beam width (higher = better recall, slower)
@@ -83,7 +83,7 @@ public:
     /// The space is reclaimed when the index is rebuilt or compacted.
     ///
     /// @param id Vector identifier to mark as deleted
-    utils::Status markDelete(VectorID id);
+    utils::Status markDelete(InternalID id);
 };
 
 }  // namespace arrow

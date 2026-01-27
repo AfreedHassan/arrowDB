@@ -10,7 +10,8 @@
 #include "utils/status.h"
 
 namespace arrow {
-	using VectorID = uint64_t;
+  using VectorID = std::string;
+	using InternalID = uint64_t;
 	using Timestamp = uint64_t;
 
 	/**
@@ -50,14 +51,14 @@ namespace arrow {
 	}
 
 	struct ArrowRecord {
-		VectorID id;										///< Unique identifier for the record
+		InternalID id;										///< Unique identifier for the record
 		std::vector<float> embedding;		///< The vector embedding
 	//Metadata metadata;							///< Metadata (not yet implemented)
 	};
 
 	/// Result of a single insert operation in a batch operation
 	struct InsertResult {
-		VectorID id;           ///< Vector ID that was attempted
+		InternalID id;           ///< Vector ID that was attempted
 		utils::Status status;  ///< Success or error status
 	};
 
@@ -70,7 +71,7 @@ namespace arrow {
 
 	/// A document with its similarity score and metadata from a search result
 	struct ScoredDocument {
-		VectorID id;                        ///< Document/vector identifier
+		InternalID id;                        ///< Document/vector identifier
 		float score;                        ///< Similarity score (higher = more similar)
 		nlohmann::json metadata;            ///< Associated metadata
 	};
@@ -84,7 +85,7 @@ namespace arrow {
 
 	/// Result from index search (id + score only, no metadata)
 	struct IndexSearchResult {
-		VectorID id;    ///< Vector identifier
+		InternalID id;    ///< Vector identifier
 		float score;    ///< Similarity score
 	};
 }

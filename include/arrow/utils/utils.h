@@ -175,7 +175,7 @@ inline DataType jsonToDataType(const json& j) {
  * @throws std::runtime_error if file cannot be written
  */
 inline void exportMetadataToJson(
-    const std::unordered_map<VectorID, Metadata>& metadataMap,
+    const std::unordered_map<InternalID, Metadata>& metadataMap,
     const std::string& filepath
 ) {
     json j = json::object();
@@ -199,7 +199,7 @@ inline void exportMetadataToJson(
  * @return Map of VectorID -> Metadata
  * @throws std::runtime_error if file cannot be read or parsed
  */
-inline std::unordered_map<VectorID, Metadata> importMetadataFromJson(
+inline std::unordered_map<InternalID, Metadata> importMetadataFromJson(
     const std::string& filepath
 ) {
     std::ifstream file(filepath);
@@ -215,9 +215,9 @@ inline std::unordered_map<VectorID, Metadata> importMetadataFromJson(
         throw std::runtime_error("Expected JSON object in metadata file");
     }
     
-    std::unordered_map<VectorID, Metadata> metadataMap;
+    std::unordered_map<InternalID, Metadata> metadataMap;
     for (const auto& [key, value] : j.items()) {
-        VectorID id = std::stoull(key);  // Convert string key to VectorID
+        InternalID id = std::stoull(key);  // Convert string key to VectorID
         metadataMap[id] = jsonToMetadata(value);
     }
     

@@ -36,7 +36,7 @@ protected:
         metadataMap_[3] = vec3Meta;
     }
     
-    std::unordered_map<VectorID, Metadata> metadataMap_;
+    std::unordered_map<InternalID, Metadata> metadataMap_;
 };
 
 // Test MetadataValue to JSON conversion for all variant types
@@ -292,7 +292,7 @@ protected:
         }
     }
     
-    std::unordered_map<VectorID, Metadata> metadataMap_;
+    std::unordered_map<InternalID, Metadata> metadataMap_;
     std::string testFilePath_;
 };
 
@@ -336,7 +336,7 @@ TEST_F(MetadataIntegrationTest, ImportMetadataFromJson) {
     utils::exportMetadataToJson(metadataMap_, testFilePath_);
     
     // Then import it back
-    std::unordered_map<VectorID, Metadata> imported;
+    std::unordered_map<InternalID, Metadata> imported;
     EXPECT_NO_THROW({
         imported = utils::importMetadataFromJson(testFilePath_);
     });
@@ -408,7 +408,7 @@ TEST_F(MetadataIntegrationTest, RoundTripMetadata) {
 }
 
 TEST_F(MetadataIntegrationTest, ExportEmptyMetadata) {
-    std::unordered_map<VectorID, Metadata> emptyMap;
+    std::unordered_map<InternalID, Metadata> emptyMap;
     EXPECT_NO_THROW({
         utils::exportMetadataToJson(emptyMap, testFilePath_);
     });
