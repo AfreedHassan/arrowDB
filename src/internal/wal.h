@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -23,6 +24,12 @@ static constexpr uint32_t kWalMagic = 0x41574C01;
 
 /// Maximum allowed embedding dimension to prevent memory exhaustion attacks
 static constexpr uint32_t kMaxDimension = 65536;
+
+/// Wire/struct size of vector ID field (128 bytes fixed)
+static constexpr uint32_t kVectorIDSize = 128;
+
+/// Maximum usable string length for vector ID (127 bytes, reserving 1 for null terminator)
+static constexpr uint32_t kMaxVectorIDSize = 127;
 
 /// Minimum valid OperationType enum value
 static constexpr uint16_t kMinOperationType = 1;
@@ -62,19 +69,41 @@ struct Entry {
   uint64_t txid;
   uint32_t headerCRC;
   uint32_t payloadLength = 0;
-  InternalID id = 0;
+  char vectorID[kVectorIDSize] = {};  // null-padded fixed-size array
   uint32_t dimension = 0;
   uint8_t padding;
   std::vector<float> embedding;
   uint32_t payloadCRC = 0;
 
   uint32_t computePayloadLength() const noexcept {
-    return static_cast<uint32_t>(embedding.size() * sizeof(float));
+    uint32_t embeddingLen = static_cast<uint32_t>(embedding.size() * sizeof(float));
+    // kVectorIDSize bytes for vectorID + 4 bytes for dimension + 1 byte for padding + embedding
+    return kVectorIDSize + 4 + 1 + embeddingLen;
   }
   uint32_t computePayloadCrc() const noexcept;
   uint32_t computeHeaderCrc() const noexcept;
   utils::json toJson() const;
   void print() const noexcept;
+
+  std::string getVectorID() const {
+    // Find null terminator or use full buffer
+    size_t len = 0;
+    while (len < kVectorIDSize && vectorID[len] != '\0') {
+      ++len;
+    }
+    return std::string(vectorID, len);
+  }
+
+  utils::Status setVectorID(const std::string& id) {
+    if (id.size() > kMaxVectorIDSize) {
+      return utils::Status(utils::StatusCode::kInvalidArgument,
+                           "Vector ID exceeds maximum length of " +
+                               std::to_string(kMaxVectorIDSize) + " bytes");
+    }
+    std::memset(vectorID, 0, kVectorIDSize);
+    std::memcpy(vectorID, id.data(), id.size());
+    return utils::OkStatus();
+  }
 };
 
 //////////////////////////////////////////////////////////////////////////

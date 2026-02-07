@@ -42,6 +42,11 @@ void Header::print() const noexcept {
 
 uint32_t Entry::computePayloadCrc() const noexcept {
   uint32_t crc = 0;
+  // Include dimension
+  crc = utils::crc32(&dimension, sizeof(dimension), crc);
+  // Include vectorID (all 128 bytes)
+  crc = utils::crc32(vectorID, wal::kVectorIDSize, crc);
+  // Include embedding
   if (!embedding.empty()) {
     crc = utils::crc32(embedding.data(), embedding.size() * sizeof(float), crc);
   }
@@ -86,7 +91,7 @@ utils::json Entry::toJson() const {
   j["type"] = typeStr;
   j["lsn"] = lsn;
   j["txid"] = txid;
-  j["vectorId"] = id;
+  j["vectorId"] = getVectorID();
   j["dimension"] = dimension;
   j["embedding"] = embedding;
   return j;
@@ -139,6 +144,9 @@ Status WriteHeader(const Header &h, BinaryWriter &w) {
   w.write(h.creationTime);
   w.write(h.headerCrc32);
   w.write(h.padding);
+  if (!w.good()) {
+    return Status(StatusCode::kIoError, "Failed to write WAL header");
+  }
   return OkStatus();
 }
 
@@ -173,7 +181,8 @@ Result<Entry> ParseEntry(BinaryReader &r) {
     return Status(StatusCode::kBadRecord, "Invalid operation type");
   }
 
-  if (!r.read(e.headerCRC) || !r.read(e.payloadLength) || !r.read(e.id) ||
+  if (!r.read(e.headerCRC) || !r.read(e.payloadLength) ||
+      !r.read(e.vectorID) ||
       !r.read(e.dimension) || !r.read(e.padding)) {
     e.print();
     return Status(StatusCode::kIoError, "Failed to read entry metadata fields");
@@ -233,11 +242,14 @@ Status WriteEntry(const Entry &e, BinaryWriter &w) {
   w.write(e.txid);
   w.write(e.computeHeaderCrc());
   w.write(e.computePayloadLength());
-  w.write(e.id);
+  w.write(e.vectorID);
   w.write(e.dimension);
   w.write(e.padding);
   w.write(e.embedding);
   w.write(e.computePayloadCrc());
+  if (!w.good()) {
+    return Status(StatusCode::kIoError, "Failed to write WAL entry");
+  }
   return OkStatus();
 }
 
@@ -319,7 +331,7 @@ Result<Header> LoadHeader(const std::filesystem::path &dir,
   Result<BinaryReader> res = OpenBinaryReader(dir, filename);
 
   if (!res.ok()) {
-    return res.status();
+    return res.error();
   }
 
   BinaryReader &r = res.value();
@@ -369,7 +381,7 @@ Status WAL::writeHeader(const Header &header, const std::string& pathParam) cons
   const std::string filename = "db.wal";
   Result<BinaryWriter> res = OpenBinaryWriter(path, filename, false);
   if (!res.ok()) {
-    return res.status();
+    return res.error();
   }
   BinaryWriter &w = res.value();
 
@@ -379,7 +391,9 @@ Status WAL::writeHeader(const Header &header, const std::string& pathParam) cons
   }
 
   w.flush();
-  utils::syncFile((path / filename).string());
+  if (!utils::syncFile((path / filename).string())) {
+    return Status(StatusCode::kIoError, "fsync failed during header write");
+  }
 
   return OkStatus();
 }
@@ -395,7 +409,7 @@ Status WAL::log(const Entry &entry, const std::string& pathParam, bool reset) {
 
   Result<BinaryWriter> res = OpenBinaryWriter(path, filename, !reset);
   if (!res.ok()) {
-    return res.status();
+    return res.error();
   }
   BinaryWriter &w = res.value();
 
@@ -417,7 +431,9 @@ Status WAL::log(const Entry &entry, const std::string& pathParam, bool reset) {
   }
 
   w.flush();
-  utils::syncFile((path / filename).string());
+  if (!utils::syncFile((path / filename).string())) {
+    return Status(StatusCode::kIoError, "fsync failed during log write");
+  }
   return OkStatus();
 }
 
@@ -436,7 +452,7 @@ Status WAL::logBatch(const std::vector<Entry>& entries, const std::string& pathP
 
   Result<BinaryWriter> res = OpenBinaryWriter(path, filename, !needsHeader);
   if (!res.ok()) {
-    return res.status();
+    return res.error();
   }
   BinaryWriter& w = res.value();
 
@@ -463,7 +479,9 @@ Status WAL::logBatch(const std::vector<Entry>& entries, const std::string& pathP
 
   // Single flush and fsync for entire batch
   w.flush();
-  utils::syncFile((path / filename).string());
+  if (!utils::syncFile((path / filename).string())) {
+    return Status(StatusCode::kIoError, "fsync failed during batch log write");
+  }
   return OkStatus();
 }
 
@@ -480,7 +498,7 @@ Result<std::vector<Entry>> WAL::readAll(const std::string& pathParam) const {
 
   Result<BinaryReader> res = OpenBinaryReader(path, filename);
   if (!res.ok()) {
-    return res.status();
+    return res.error();
   }
   BinaryReader &r = res.value();
 
@@ -498,7 +516,7 @@ Result<std::vector<Entry>> WAL::readAll(const std::string& pathParam) const {
 
   Result<Header> resHeader = ParseHeader(r);
   if (!resHeader.ok()) {
-    return resHeader.status();
+    return resHeader.error();
   }
 
   if (!r.good()) {
@@ -515,7 +533,7 @@ Result<std::vector<Entry>> WAL::readAll(const std::string& pathParam) const {
         break;
       }
       // Otherwise, corruption detected - fail fast
-      return resEntry.status();
+      return resEntry.error();
     }
     entries.push_back(std::move(resEntry.value()));
   }
@@ -526,13 +544,13 @@ void WAL::print() const {
   Result<Header> h = loadHeader();
 
   if (!h.ok()) {
-    std::cerr << h.status().message() << "\n";
+    std::cerr << h.error().message() << "\n";
     return;
   }
 
   auto entries = readAll();
   if (!entries.ok()) {
-    std::cerr << entries.status().message() << "\n";
+    std::cerr << entries.error().message() << "\n";
     return;
   }
 
@@ -551,7 +569,7 @@ Status WAL::truncate() {
   // Open in truncate mode (not append)
   Result<BinaryWriter> res = OpenBinaryWriter(walPath_, filename, false);
   if (!res.ok()) {
-    return res.status();
+    return res.error();
   }
   BinaryWriter &w = res.value();
 
@@ -568,7 +586,9 @@ Status WAL::truncate() {
   }
 
   w.flush();
-  utils::syncFile((walPath_ / filename).string());
+  if (!utils::syncFile((walPath_ / filename).string())) {
+    return Status(StatusCode::kIoError, "fsync failed during truncate");
+  }
 
   return OkStatus();
 }

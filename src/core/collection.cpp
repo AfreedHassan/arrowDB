@@ -4,6 +4,7 @@
 #include "embedder/embedder.h"
 #include "internal/hnsw_index.h"
 #include "internal/wal.h"
+#include "internal/id_space.h"
 
 #include <fstream>
 #include <iostream>
@@ -127,6 +128,7 @@ public:
   std::unique_ptr<HNSWIndex> pIndex_;
   std::unique_ptr<wal::WAL> pWal_;
   std::unordered_map<InternalID, Metadata> metadata_;
+  IDSpace idSpace_;
   uint64_t lsnCounter = 1;
   uint64_t txidCounter = 1;
   std::optional<std::filesystem::path> persistencePath_;
@@ -176,11 +178,11 @@ public:
 
     wal::Result<std::vector<wal::Entry>> entriesResult = pWal_->readAll();
     if (!entriesResult.ok()) {
-      if (entriesResult.status().code() == utils::StatusCode::kEof ||
-          entriesResult.status().code() == utils::StatusCode::kNotFound) {
+      if (entriesResult.error().code() == utils::StatusCode::kEof ||
+          entriesResult.error().code() == utils::StatusCode::kNotFound) {
         return utils::OkStatus();
       }
-      return entriesResult.status();
+      return entriesResult.error();
     }
 
     const std::vector<wal::Entry> &entries = entriesResult.value();
@@ -199,16 +201,33 @@ public:
 
       switch (entry.type) {
       case wal::OperationType::INSERT:
-        if (!pIndex_->insert(entry.id, entry.embedding)) {
-          return utils::Status(utils::StatusCode::kInternal,
-                               "Failed to replay INSERT for vector " +
-                                   std::to_string(entry.id));
+        {
+          std::string vectorID = entry.getVectorID();
+          auto internalIDResult = idSpace_.assign(vectorID);
+          if (!internalIDResult.ok()) {
+            return utils::Status(utils::StatusCode::kInternal,
+                               "Failed to replay INSERT for vector " + vectorID);
+          }
+          InternalID internalID = internalIDResult.value();
+          if (!pIndex_->insert(internalID, entry.embedding)) {
+            return utils::Status(utils::StatusCode::kInternal,
+                               "Failed to replay INSERT for vector " + vectorID);
+          }
         }
         ++replayedCount;
         break;
       case wal::OperationType::DELETE:
-        pIndex_->markDelete(entry.id);
-        metadata_.erase(entry.id);
+        {
+          std::string vectorID = entry.getVectorID();
+          auto internalIDResult = idSpace_.lookup(vectorID);
+          if (!internalIDResult.ok()) {
+            return utils::Status(utils::StatusCode::kInternal,
+                               "Failed to replay DELETE for vector " + vectorID);
+          }
+          InternalID internalID = internalIDResult.value();
+          pIndex_->markDelete(internalID);
+          metadata_.erase(internalID);
+        }
         ++replayedCount;
         break;
       default:
@@ -292,7 +311,7 @@ Space Collection::space() const { return pImpl_->config_.space; }
 size_t Collection::size() const { return pImpl_->pIndex_->size(); }
 bool Collection::recoveredFromWal() const { return pImpl_->recoveredFromWal_; }
 
-utils::Status Collection::insert(InternalID id, const std::vector<float> &vec, Metadata metadata) {
+utils::Status Collection::insert(const VectorID& id, const std::vector<float> &vec, Metadata metadata) {
   if (vec.size() != pImpl_->config_.dimensions) {
     return utils::Status(utils::StatusCode::kDimensionMismatch,
                          "Vector dimension mismatch: expected " +
@@ -300,17 +319,29 @@ utils::Status Collection::insert(InternalID id, const std::vector<float> &vec, M
                              ", got " + std::to_string(vec.size()));
   }
 
+  if (id.size() > wal::kMaxVectorIDSize) {
+    return utils::Status(utils::StatusCode::kInvalidArgument,
+                         "Vector ID exceeds maximum length of " +
+                             std::to_string(wal::kMaxVectorIDSize) + " bytes");
+  }
+
+  auto internalIDResult = pImpl_->idSpace_.assign(id);
+  if (!internalIDResult.ok()) {
+    return internalIDResult.error();
+  }
+  InternalID internalID = internalIDResult.value();
+
   wal::Entry entry{.type = wal::OperationType::INSERT,
                    .version = 1,
                    .lsn = pImpl_->lsnCounter++,
                    .txid = pImpl_->txidCounter++,
                    .headerCRC = 0,
                    .payloadLength = 0,
-                   .id = id,
                    .dimension = pImpl_->config_.dimensions,
                    .padding = 0,
                    .embedding = vec,
                    .payloadCRC = 0};
+  entry.setVectorID(id);
   entry.headerCRC = entry.computeHeaderCrc();
   entry.payloadCRC = entry.computePayloadCrc();
   entry.payloadLength = entry.computePayloadLength();
@@ -321,10 +352,10 @@ utils::Status Collection::insert(InternalID id, const std::vector<float> &vec, M
       return status;
   }
 
-  if (!pImpl_->pIndex_->insert(id, vec)) {
+  if (!pImpl_->pIndex_->insert(internalID, vec)) {
     return utils::Status(utils::StatusCode::kInternal, "Insert failed");
   }
-  setMetadata(id, metadata);
+  pImpl_->metadata_[internalID] = metadata;
   return utils::OkStatus();
 }
 
@@ -339,16 +370,20 @@ utils::Status Collection::insert(const std::vector<std::string> &text) {
     if (vec.empty()) {
       return utils::Status(utils::StatusCode::kInternal, "Embedding failed");
     }
-    auto status = insert(i + 1, vec);
+    std::string id = "doc-" + std::to_string(i + 1);
+    auto status = insert(id, vec);
     if (!status.ok())
       return status;
-    setMetadata(i + 1, Metadata{{"text", text[i]}});
+    auto internalIDResult = pImpl_->idSpace_.lookup(id);
+    if (internalIDResult.ok()) {
+      pImpl_->metadata_[internalIDResult.value()] = Metadata{{"text", text[i]}};
+    }
   }
   return utils::OkStatus();
 }
 
 utils::Result<BatchInsertResult> Collection::insertBatch(
-    const std::vector<std::pair<InternalID, std::vector<float>>> &batch) {
+    const std::vector<std::pair<VectorID, std::vector<float>>> &batch) {
 
   BatchInsertResult result;
   result.results.resize(batch.size());
@@ -363,16 +398,30 @@ utils::Result<BatchInsertResult> Collection::insertBatch(
   std::vector<wal::Entry> walEntries;
   walEntries.reserve(batch.size());
 
+  std::vector<InternalID> internalIDs;
+  internalIDs.reserve(batch.size());
+
   for (size_t i = 0; i < batch.size(); ++i) {
-    const auto &[id, vec] = batch[i];
+    const auto &[vectorID, vec] = batch[i];
 
     if (!validDimensions[i]) {
-      result.results[i] = {id,
-                           utils::Status(utils::StatusCode::kDimensionMismatch,
-                                         "Vector dimension mismatch")};
+      InternalID internalID = 0;
+      result.results[i].id = internalID;
+      result.results[i].status = utils::Status(utils::StatusCode::kDimensionMismatch,
+                                         "Vector dimension mismatch");
       result.failureCount++;
       continue;
     }
+
+    auto internalIDResult = pImpl_->idSpace_.assign(vectorID);
+    if (!internalIDResult.ok()) {
+      result.results[i].id = 0;
+      result.results[i].status = internalIDResult.error();
+      result.failureCount++;
+      continue;
+    }
+    InternalID internalID = internalIDResult.value();
+    internalIDs.push_back(internalID);
 
     wal::Entry entry{.type = wal::OperationType::INSERT,
                      .version = 1,
@@ -380,11 +429,11 @@ utils::Result<BatchInsertResult> Collection::insertBatch(
                      .txid = pImpl_->txidCounter++,
                      .headerCRC = 0,
                      .payloadLength = 0,
-                     .id = id,
                      .dimension = pImpl_->config_.dimensions,
                      .padding = 0,
                      .embedding = vec,
                      .payloadCRC = 0};
+    entry.setVectorID(vectorID);
     entry.headerCRC = entry.computeHeaderCrc();
     entry.payloadCRC = entry.computePayloadCrc();
     entry.payloadLength = entry.computePayloadLength();
@@ -400,17 +449,22 @@ utils::Result<BatchInsertResult> Collection::insertBatch(
     }
   }
 
+  size_t internalIDIdx = 0;
   for (size_t i = 0; i < batch.size(); ++i) {
-    const auto &[id, vec] = batch[i];
+    const auto &[vectorID, vec] = batch[i];
     if (!validDimensions[i])
       continue;
 
-    if (pImpl_->pIndex_->insert(id, vec)) {
-      result.results[i] = {id, utils::OkStatus()};
+    InternalID internalID = internalIDs[internalIDIdx++];
+
+    if (pImpl_->pIndex_->insert(internalID, vec)) {
+      result.results[i].id = internalID;
+      result.results[i].status = utils::OkStatus();
       result.successCount++;
     } else {
-      result.results[i] = {id, utils::Status(utils::StatusCode::kInternal,
-                                             "HNSW insert failed")};
+      result.results[i].id = internalID;
+      result.results[i].status = utils::Status(utils::StatusCode::kInternal,
+                                             "HNSW insert failed");
       result.failureCount++;
     }
   }
@@ -418,11 +472,20 @@ utils::Result<BatchInsertResult> Collection::insertBatch(
   return result;
 }
 
-void Collection::setMetadata(InternalID id, const Metadata &metadata) {
-  pImpl_->metadata_[id] = metadata;
+void Collection::setMetadata(const VectorID& id, const Metadata &metadata) {
+  auto internalIDResult = pImpl_->idSpace_.lookup(id);
+  if (internalIDResult.ok()) {
+    pImpl_->metadata_[internalIDResult.value()] = metadata;
+  }
 }
 
-Metadata Collection::getMetadata(InternalID id) { return pImpl_->metadata_[id]; }
+Metadata Collection::getMetadata(const VectorID& id) {
+  auto internalIDResult = pImpl_->idSpace_.lookup(id);
+  if (internalIDResult.ok()) {
+    return pImpl_->metadata_[internalIDResult.value()];
+  }
+  return Metadata{};
+}
 
 std::vector<IndexSearchResult>
 Collection::search(const std::vector<float> &query, uint32_t k,
@@ -485,18 +548,30 @@ Collection::searchBatch(const std::vector<std::vector<float>> &queries,
   return Impl::parallelSearch(pImpl_->pIndex_.get(), queries, k, ef);
 }
 
-utils::Status Collection::remove(InternalID id) {
+utils::Status Collection::remove(const VectorID& id) {
+  if (id.size() > wal::kMaxVectorIDSize) {
+    return utils::Status(utils::StatusCode::kInvalidArgument,
+                         "Vector ID exceeds maximum length of " +
+                             std::to_string(wal::kMaxVectorIDSize) + " bytes");
+  }
+
+  auto internalIDResult = pImpl_->idSpace_.lookup(id);
+  if (!internalIDResult.ok()) {
+    return utils::Status(utils::StatusCode::kNotFound, "Vector ID not found");
+  }
+  InternalID internalID = internalIDResult.value();
+
   wal::Entry entry{.type = wal::OperationType::DELETE,
                    .version = 1,
                    .lsn = pImpl_->lsnCounter++,
                    .txid = pImpl_->txidCounter++,
                    .headerCRC = 0,
                    .payloadLength = 0,
-                   .id = id,
                    .dimension = 0,
                    .padding = 0,
                    .embedding = {},
                    .payloadCRC = 0};
+  entry.setVectorID(id);
   entry.headerCRC = entry.computeHeaderCrc();
   entry.payloadCRC = entry.computePayloadCrc();
   entry.payloadLength = entry.computePayloadLength();
@@ -507,11 +582,11 @@ utils::Status Collection::remove(InternalID id) {
       return status;
   }
 
-  wal::Status delStatus = pImpl_->pIndex_->markDelete(id);
+  wal::Status delStatus = pImpl_->pIndex_->markDelete(internalID);
   if (!delStatus.ok())
     return delStatus;
 
-  pImpl_->metadata_.erase(id);
+  pImpl_->metadata_.erase(internalID);
   return utils::OkStatus();
 }
 
@@ -531,6 +606,12 @@ utils::Status Collection::save(const std::string &directoryPath) {
 
   std::string indexPath = (fs::path(directoryPath) / "index.bin").string();
   pImpl_->pIndex_->saveIndex(indexPath);
+
+  std::string idSpacePath = (fs::path(directoryPath) / "id_space.bin").string();
+  auto idSpaceStatus = pImpl_->idSpace_.save(idSpacePath);
+  if (!idSpaceStatus.ok()) {
+    return idSpaceStatus;
+  }
 
   if (!pImpl_->metadata_.empty()) {
     std::string metadataPath =
@@ -584,6 +665,13 @@ utils::Result<Collection> Collection::load(const std::string &directoryPath) {
   impl->pIndex_->loadIndex(indexPath);
   std::cout << "Index loaded with size " << impl->pIndex_->size() << "\n";
 
+  std::string idSpacePath = (fs::path(directoryPath) / "id_space.bin").string();
+  if (fs::exists(idSpacePath)) {
+    auto idSpaceResult = IDSpace::load(idSpacePath);
+    if (idSpaceResult.ok()) {
+      impl->idSpace_ = std::move(idSpaceResult.value());
+    }
+  }
 
   std::string metadataPath =
       (fs::path(directoryPath) / "metadata.json").string();
