@@ -159,6 +159,7 @@ class WAL {
   /// Truncate WAL to header-only state (checkpoint operation).
   /// Creates a fresh WAL with only a header, discarding all entries.
   [[nodiscard]] Status truncate();
+  [[nodiscard]] Status recover();
 
   Status ValidateOrCreatePath(const std::filesystem::path& basePath, const std::string& pathParam, std::filesystem::path& outPath) const;
 

@@ -135,6 +135,21 @@ public:
   uint64_t lastPersistedLsn_ = 0;
   bool recoveredFromWal_ = false;
 
+  utils::Status writeDirtyShutdownMarker() {
+    if (!persistencePath_) {
+      return utils::OkStatus();
+    }
+    namespace fs = std::filesystem;
+    fs::create_directories(*persistencePath_);
+    RecoveryMetadata recovery{
+        .lastPersistedLsn = (lsnCounter > 0) ? lsnCounter - 1 : 0,
+        .lastPersistedTxid = (txidCounter > 0) ? txidCounter - 1 : 0,
+        .cleanShutdown = false};
+    std::string metaPath = (*persistencePath_ / "meta.json").string();
+    exportConfigToJson(config_, hnswConfig_, metaPath, recovery);
+    return utils::OkStatus();
+  }
+
   explicit Impl(const CollectionConfig &config)
       : config_{config.name, config.dimensions, config.space,
                 DataType::Float32},
@@ -153,6 +168,7 @@ public:
                                             hnswConfig_)),
         persistencePath_(persistencePath) {
     initializeWal();
+    (void)writeDirtyShutdownMarker();
   }
 
   void initializeWal() {
@@ -160,7 +176,10 @@ public:
       namespace fs = std::filesystem;
       fs::path walDir = *persistencePath_ / "wal";
       pWal_ = std::make_unique<wal::WAL>(walDir);
-
+      wal::Status recoverStatus = pWal_->recover();
+      if (!recoverStatus.ok()) {
+        std::cerr << "WAL recovery warning: " << recoverStatus.message() << "\n";
+      }
       fs::path walFile = walDir / "db.wal";
       if (!fs::exists(walFile)) {
         wal::Header header;
@@ -203,15 +222,24 @@ public:
       case wal::OperationType::INSERT:
         {
           std::string vectorID = entry.getVectorID();
-          auto internalIDResult = idSpace_.assign(vectorID);
-          if (!internalIDResult.ok()) {
-            return utils::Status(utils::StatusCode::kInternal,
-                               "Failed to replay INSERT for vector " + vectorID);
-          }
-          InternalID internalID = internalIDResult.value();
-          if (!pIndex_->insert(internalID, entry.embedding)) {
-            return utils::Status(utils::StatusCode::kInternal,
-                               "Failed to replay INSERT for vector " + vectorID);
+          auto existingResult = idSpace_.lookup(vectorID);
+          if (existingResult.ok()) {
+            InternalID existingID = existingResult.value();
+            if (!pIndex_->insert(existingID, entry.embedding)) {
+              return utils::Status(utils::StatusCode::kInternal,
+                                 "Failed to replay INSERT for existing vector " + vectorID);
+            }
+          } else {
+            auto internalIDResult = idSpace_.assign(vectorID);
+            if (!internalIDResult.ok()) {
+              return utils::Status(utils::StatusCode::kInternal,
+                                 "Failed to replay INSERT for vector " + vectorID);
+            }
+            InternalID internalID = internalIDResult.value();
+            if (!pIndex_->insert(internalID, entry.embedding)) {
+              return utils::Status(utils::StatusCode::kInternal,
+                                 "Failed to replay INSERT for vector " + vectorID);
+            }
           }
         }
         ++replayedCount;
@@ -220,13 +248,11 @@ public:
         {
           std::string vectorID = entry.getVectorID();
           auto internalIDResult = idSpace_.lookup(vectorID);
-          if (!internalIDResult.ok()) {
-            return utils::Status(utils::StatusCode::kInternal,
-                               "Failed to replay DELETE for vector " + vectorID);
+          if (internalIDResult.ok()) {
+            InternalID internalID = internalIDResult.value();
+            pIndex_->markDelete(internalID);
+            metadata_.erase(internalID);
           }
-          InternalID internalID = internalIDResult.value();
-          pIndex_->markDelete(internalID);
-          metadata_.erase(internalID);
         }
         ++replayedCount;
         break;
@@ -685,9 +711,33 @@ utils::Result<Collection> Collection::load(const std::string &directoryPath) {
 
   fs::path walPath = fs::path(directoryPath) / "wal" / "db.wal";
   if (fs::exists(walPath)) {
-    utils::Status replayStatus = impl->replayWal(recoveryMeta.lastPersistedLsn);
-    if (!replayStatus.ok())
-      return replayStatus;
+    if (!recoveryMeta.cleanShutdown) {
+      std::cout << "Warning: Collection was not shut down cleanly. Performing full WAL replay...\n";
+      utils::Status replayStatus = impl->replayWal(0);
+      if (!replayStatus.ok())
+        return replayStatus;
+      utils::Status saveStatus = Collection(std::move(impl)).save(directoryPath);
+      if (!saveStatus.ok())
+        return saveStatus;
+      impl = std::make_unique<Impl>(config, fs::path(directoryPath));
+      impl->pIndex_->loadIndex(indexPath);
+      if (fs::exists(idSpacePath)) {
+        auto idSpaceResult = IDSpace::load(idSpacePath);
+        if (idSpaceResult.ok()) {
+          impl->idSpace_ = std::move(idSpaceResult.value());
+        }
+      }
+      if (fs::exists(metadataPath)) {
+        impl->metadata_ = utils::importMetadataFromJson(metadataPath);
+      }
+      impl->lastPersistedLsn_ = recoveryMeta.lastPersistedLsn;
+      impl->lsnCounter = recoveryMeta.lastPersistedLsn + 1;
+      impl->txidCounter = recoveryMeta.lastPersistedTxid + 1;
+    } else {
+      utils::Status replayStatus = impl->replayWal(recoveryMeta.lastPersistedLsn);
+      if (!replayStatus.ok())
+        return replayStatus;
+    }
   }
 
   return Collection(std::move(impl));

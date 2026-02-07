@@ -268,9 +268,6 @@ Status IsEntryValid(const Entry &e) noexcept {
   return OkStatus();
 }
 
-//////////////////////////////////////////////////////////////////////////
-// Filesystem helpers
-//////////////////////////////////////////////////////////////////////////
 
 Result<BinaryReader> OpenBinaryReader(const std::filesystem::path &dir,
                                       const std::string &filename) {
@@ -590,6 +587,68 @@ Status WAL::truncate() {
     return Status(StatusCode::kIoError, "fsync failed during truncate");
   }
 
+  return OkStatus();
+}
+
+Status WAL::recover() {
+  namespace fs = std::filesystem;
+
+  fs::path walFile = walPath_/ "db.wal";
+
+
+  if (!fs::exists(walFile)) {
+    return OkStatus();
+  }
+
+  auto fileSize = fs::file_size(walFile);
+  if (fileSize == 0) {
+    std::ofstream ofs(walFile, std::ios::binary | std::ios::trunc);
+    return OkStatus();
+  }
+
+  Result<BinaryReader> readerResult = OpenBinaryReader(walPath_, "db.wal");
+  if (!readerResult) {
+    return readerResult.error();
+  }
+  BinaryReader& reader = readerResult.value();
+ 
+  // Validate header
+  Result<Header> headerResult = ParseHeader(reader);
+  if (!headerResult) {
+    // Corrupt header - truncate entire file
+    std::ofstream ofs(walFile, std::ios::binary | std::ios::trunc);
+    return OkStatus();
+  }
+  
+  std::streampos lastValidPos = reader.tell();
+  
+  while (reader.good()) {
+    std::streampos entryStart = reader.tell();
+    
+    Result<Entry> entryResult = ParseEntry(reader);
+    if (!entryResult.ok()) {
+      if (!reader.good() && entryStart == lastValidPos) {
+        break;
+      }
+      break;
+    }
+    lastValidPos = reader.tell();
+  }
+
+  if (lastValidPos < static_cast<std::streampos>(fileSize)) {
+    std::fstream fs(walFile, std::ios::in | std::ios::out | std::ios::binary);
+    if (!fs.is_open()) {
+      return Status(StatusCode::kIoError, "Failed to open WAL for truncation");
+    }
+    
+    fs.seekp(lastValidPos);
+    fs.close();
+    
+    if (::truncate(walFile.string().c_str(), lastValidPos) != 0) {
+      return Status(StatusCode::kIoError, "Failed to truncate WAL file");
+    }
+  }
+  
   return OkStatus();
 }
 

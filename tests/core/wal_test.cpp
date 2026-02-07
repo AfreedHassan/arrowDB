@@ -2,7 +2,9 @@
 #include "internal/wal.h"
 #include "internal/binary.h"
 #include "arrow/utils/status.h"
+#include "arrow/collection.h"
 #include "test_util.h"
+#include <nlohmann/json.hpp>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -934,4 +936,120 @@ TEST_F(WALTest, EntryRejectsLongVectorID) {
   status = entry.setVectorID("");
   EXPECT_TRUE(status.ok());
   EXPECT_EQ(entry.getVectorID(), "");
+}
+
+TEST_F(WALTest, CrashRecovery) {
+  std::string path = GetTestPath("crash_recovery");
+  std::filesystem::create_directories(path);
+  
+  wal::WAL wal(path);
+  
+  // Write 3 valid entries (first one with reset=true to write header)
+  wal::Entry entry1 = CreateTestEntry(wal::OperationType::INSERT, "1", 3, 1, 1);
+  wal::Entry entry2 = CreateTestEntry(wal::OperationType::INSERT, "2", 3, 2, 2);
+  wal::Entry entry3 = CreateTestEntry(wal::OperationType::INSERT, "3", 3, 3, 3);
+  
+  EXPECT_TRUE(wal.log(entry1, path, true).ok());
+  EXPECT_TRUE(wal.log(entry2, path, false).ok());
+  EXPECT_TRUE(wal.log(entry3, path, false).ok());
+
+  // Verify all 3 entries exist
+  auto entriesBefore = wal.readAll();
+  if (!entriesBefore.ok()) {
+    std::cout << "readAll error: " << entriesBefore.error().message() << "\n";
+  }
+  ASSERT_TRUE(entriesBefore.ok());
+  EXPECT_EQ(entriesBefore.value().size(), 3);
+  
+  // Simulate crash by corrupting/truncating file mid-entry
+  // Append partial data (half an entry)
+  std::ofstream corruptFile(path + "/db.wal", std::ios::binary | std::ios::app);
+  uint8_t partialData[10] = {0x03, 0x00, 0x01, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00};
+  corruptFile.write(reinterpret_cast<char*>(partialData), 10);
+  corruptFile.close();
+  
+  // Call recover
+  wal::Status recoverStatus = wal.recover();
+  EXPECT_TRUE(recoverStatus.ok());
+  
+  // Verify only 3 valid entries remain
+  auto entriesAfter = wal.readAll();
+  ASSERT_TRUE(entriesAfter.ok());
+  EXPECT_EQ(entriesAfter.value().size(), 3);
+}
+
+TEST_F(WALTest, PartialWriteRecovery) {
+  std::string path = GetTestPath("partial_write");
+  std::filesystem::create_directories(path);
+
+  // Create WAL and write entry
+  {
+    wal::WAL wal(path);
+    wal::Entry entry = CreateTestEntry(wal::OperationType::INSERT, "1", 3, 1, 1);
+    EXPECT_TRUE(wal.log(entry, path, true).ok());
+  }
+  
+  // Append partial entry (header only, no payload)
+  {
+    std::ofstream ofs(path + "/db.wal", std::ios::binary | std::ios::app);
+    uint8_t partialHeader[25] = {};  // Entry header without payload
+    partialHeader[0] = 0x03;  // INSERT type
+    partialHeader[1] = 0x00;
+    ofs.write(reinterpret_cast<char*>(partialHeader), 25);
+  }
+  
+  // Recover should truncate the partial entry
+  wal::WAL wal(path);
+  wal::Status recoverStatus = wal.recover();
+  EXPECT_TRUE(recoverStatus.ok());
+  
+  auto entries = wal.readAll();
+  ASSERT_TRUE(entries.ok());
+  EXPECT_EQ(entries.value().size(), 1);
+  EXPECT_EQ(entries.value()[0].getVectorID(), "1");
+}
+
+TEST_F(WALTest, IdempotentReplay) {
+  std::string path = GetTestPath("idempotent_replay");
+  std::filesystem::create_directories(path);
+
+  // Create WAL and write entries first
+  {
+    wal::WAL wal(path);
+    wal::Entry entry1 = CreateTestEntry(wal::OperationType::INSERT, "1", 3, 1, 1, {1.0f, 2.0f, 3.0f});
+    wal::Entry entry2 = CreateTestEntry(wal::OperationType::INSERT, "2", 3, 2, 2, {4.0f, 5.0f, 6.0f});
+    wal::Entry entry3 = CreateTestEntry(wal::OperationType::DELETE, "1", 3, 3, 3);
+
+    EXPECT_TRUE(wal.log(entry1, path, true).ok());
+    EXPECT_TRUE(wal.log(entry2, path, false).ok());
+    EXPECT_TRUE(wal.log(entry3, path, false).ok());
+  }
+
+  // Create collection and insert the same data
+  CollectionConfig config{.name = "test", .dimensions = 3, .space = Space::Cosine};
+  Collection col(config, path);
+
+  EXPECT_TRUE(col.insert("1", {1.0f, 2.0f, 3.0f}).ok());
+  EXPECT_TRUE(col.insert("2", {4.0f, 5.0f, 6.0f}).ok());
+  
+  // Save creates checkpoint
+  EXPECT_TRUE(col.save(path).ok());
+  
+  // Simulate dirty shutdown by setting cleanShutdown to false
+  std::ifstream metaFile(path + "/meta.json");
+  nlohmann::json meta;
+  metaFile >> meta;
+  metaFile.close();
+  meta["recovery"]["cleanShutdown"] = false;
+  std::ofstream outMetaFile(path + "/meta.json");
+  outMetaFile << meta.dump(2);
+  outMetaFile.close();
+  
+  // Load collection - should recover from WAL
+  auto loadResult = Collection::load(path);
+  ASSERT_TRUE(loadResult.ok());
+  Collection col2 = std::move(loadResult.value());
+  
+  // Verify collection has correct size (should not have duplicates)
+  EXPECT_EQ(col2.size(), 2);
 }
