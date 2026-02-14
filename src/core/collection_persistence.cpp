@@ -104,7 +104,15 @@ readConfigFromJson(const std::filesystem::path& metaPath) {
   }
 
   utils::json j;
-  file >> j;
+  try {
+    file >> j;
+  } catch (const utils::json::parse_error& e) {
+    return utils::Status(utils::StatusCode::kCorruption,
+      "Failed to parse meta.json: " + std::string(e.what()));
+  } catch (const std::exception& e) {
+    return utils::Status(utils::StatusCode::kCorruption,
+      "Error reading meta.json: " + std::string(e.what()));
+  }
   file.close();
 
   int version = j.value("schemaVersion", 1);
@@ -164,10 +172,10 @@ utils::Status CollectionPersistence::save(
 ) {
   std::filesystem::create_directories(dir);
 
-  // Atomic meta.json write
-  std::filesystem::path metaPath = dir / "meta.json";
-  utils::Status status = writeConfigToJson(metaPath, config, hnswConfig, recovery);
-  if (!status.ok()) return status;
+  // Write data files FIRST (index, id_space, metadata).
+  // meta.json with cleanShutdown=true is written LAST as the commit point.
+  // This ensures a crash mid-save leaves cleanShutdown=false, triggering
+  // WAL replay on next load rather than silently using stale data.
 
   // Atomic index.bin write: save to .tmp, fsync, rename
   std::filesystem::path indexPath = dir / "index.bin";
@@ -189,20 +197,32 @@ utils::Status CollectionPersistence::save(
   utils::Status idSpaceStatus = idSpace.save(idSpacePath);
   if (!idSpaceStatus.ok()) return idSpaceStatus;
 
-  // Atomic metadata.json write
-  if (!metadata.empty()) {
-    std::filesystem::path metadataPath = dir / "metadata.json";
-    std::filesystem::path tmpMetadataPath = dir / "metadata.json.tmp";
-    utils::exportMetadataToJson(metadata, tmpMetadataPath.string());
-
-    if (!utils::syncFile(tmpMetadataPath.string())) {
-      return utils::Status(utils::StatusCode::kIoError, "Failed to fsync metadata.json.tmp");
-    }
-    std::filesystem::rename(tmpMetadataPath, metadataPath, ec);
-    if (ec) {
-      return utils::Status(utils::StatusCode::kIoError, "Failed to rename metadata.json.tmp");
-    }
+  // Atomic metadata.json write (always write, even if empty, to clear stale data)
+  std::filesystem::path metadataPath = dir / "metadata.json";
+  std::filesystem::path tmpMetadataPath = dir / "metadata.json.tmp";
+  if (!utils::exportMetadataToJson(metadata, tmpMetadataPath.string())) {
+    return utils::Status(utils::StatusCode::kIoError, "Failed to write metadata.json.tmp");
   }
+
+  if (!utils::syncFile(tmpMetadataPath.string())) {
+    return utils::Status(utils::StatusCode::kIoError, "Failed to fsync metadata.json.tmp");
+  }
+  std::filesystem::rename(tmpMetadataPath, metadataPath, ec);
+  if (ec) {
+    return utils::Status(utils::StatusCode::kIoError, "Failed to rename metadata.json.tmp");
+  }
+
+  // Fsync the directory to ensure all renames are durable before writing the commit point
+  utils::syncDir(dir.string());
+
+  // Atomic meta.json write LAST — this is the commit point.
+  // Only after all data files are durably written do we mark cleanShutdown=true.
+  std::filesystem::path metaPath = dir / "meta.json";
+  utils::Status status = writeConfigToJson(metaPath, config, hnswConfig, recovery);
+  if (!status.ok()) return status;
+
+  // Final directory fsync to ensure meta.json rename is durable
+  utils::syncDir(dir.string());
 
   return utils::OkStatus();
 }
@@ -237,14 +257,17 @@ CollectionPersistence::load(const std::filesystem::path& dir) {
   }
   result.index = std::make_unique<HNSWIndex>(
     internalCfg.dimensions, internalCfg.space, hnswCfg);
-  result.index->loadIndex(indexPath.string());
+  utils::Status loadStatus = result.index->loadIndex(indexPath.string());
+  if (!loadStatus.ok()) return loadStatus;
 
   std::filesystem::path idSpacePath = dir / "id_space.bin";
   if (std::filesystem::exists(idSpacePath)) {
     auto idSpaceResult = IDSpace::load(idSpacePath);
-    if (idSpaceResult.ok()) {
-      result.idSpace = std::move(idSpaceResult.value());
+    if (!idSpaceResult.ok()) {
+      return utils::Status(utils::StatusCode::kCorruption,
+        "Failed to load id_space.bin: " + idSpaceResult.status().message());
     }
+    result.idSpace = std::move(idSpaceResult.value());
   }
 
   std::filesystem::path metadataPath = dir / "metadata.json";
