@@ -154,7 +154,7 @@ TEST_F(IDSpaceTest, EmptyStringID) {
 
 TEST_F(IDSpaceTest, MaxLengthStringID) {
 	IDSpace idSpace;
-	std::string maxStr(1024, 'x');
+	std::string maxStr(127, 'x');
 
 	auto result = idSpace.assign(maxStr);
 	ASSERT_TRUE(result.ok());
@@ -167,7 +167,7 @@ TEST_F(IDSpaceTest, MaxLengthStringID) {
 
 TEST_F(IDSpaceTest, StringIDTooLong) {
 	IDSpace idSpace;
-	std::string tooLongStr(1025, 'x');
+	std::string tooLongStr(128, 'x');
 
 	auto result = idSpace.assign(tooLongStr);
 	EXPECT_FALSE(result.ok());

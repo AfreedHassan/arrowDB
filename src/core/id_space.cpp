@@ -1,10 +1,11 @@
 #include "internal/id_space.h"
 #include "internal/binary.h"
+#include "internal/filesync.h"
 #include <fstream>
 
 namespace arrow {
 
-utils::Result<IDSpace::InternalID> IDSpace::assign(const std::string& vectorID) {
+utils::Result<InternalID> IDSpace::assign(const std::string& vectorID) {
 	if (vectorID.size() > kMaxVectorIDSize) {
 		return utils::Status(utils::StatusCode::kInvalidArgument, "Vector ID exceeds maximum size");
 	}
@@ -21,7 +22,31 @@ utils::Result<IDSpace::InternalID> IDSpace::assign(const std::string& vectorID) 
 	return id;
 }
 
-utils::Result<IDSpace::InternalID> IDSpace::lookup(const std::string& vectorID) const {
+utils::Result<InternalID> IDSpace::reserve(const std::string& vectorID) const {
+	if (vectorID.size() > kMaxVectorIDSize) {
+		return utils::Status(utils::StatusCode::kInvalidArgument, "Vector ID exceeds maximum size");
+	}
+
+	auto it = lookupMap.find(vectorID);
+	if (it != lookupMap.end()) {
+		return it->second;
+	}
+
+	return nextId_;
+}
+
+utils::Status IDSpace::commit(const std::string& vectorID, InternalID id) {
+	if (lookupMap.contains(vectorID)) {
+		return utils::Status(utils::StatusCode::kAlreadyExists, "Vector ID already committed");
+	}
+
+	lookupMap[vectorID] = id;
+	resolveList.push_back(vectorID);
+	nextId_ = id + 1;
+	return utils::OkStatus();
+}
+
+utils::Result<InternalID> IDSpace::lookup(const std::string& vectorID) const {
 	auto it = lookupMap.find(vectorID);
 	if (it == lookupMap.end()) {
 		return utils::Status(utils::StatusCode::kNotFound, "Vector ID not found");
@@ -34,6 +59,11 @@ utils::Result<std::string_view> IDSpace::resolve(InternalID id) const {
 		return utils::Status(utils::StatusCode::kNotFound, "Internal ID out of bounds");
 	}
 	return std::string_view(resolveList[id]);
+}
+
+utils::Status IDSpace::remove(const VectorID& vectorID) {
+  lookupMap.erase(vectorID);
+  return utils::OkStatus();
 }
 
 utils::Status IDSpace::save(const std::filesystem::path& path) const {
@@ -55,6 +85,10 @@ utils::Status IDSpace::save(const std::filesystem::path& path) const {
 	}
 
 	writer.flush();
+
+	if (!utils::syncFile(tempPath.string())) {
+		return utils::Status(utils::StatusCode::kIoError, "Failed to fsync id_space temp file");
+	}
 
 	std::error_code ec;
 	std::filesystem::rename(tempPath, path, ec);

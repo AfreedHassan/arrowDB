@@ -22,8 +22,11 @@ public:
 	IDSpace& operator=(IDSpace&&) noexcept = default;
 
 	utils::Result<InternalID> assign(const VectorID& vectorID);
+	utils::Result<InternalID> reserve(const VectorID& vectorID) const;
+	utils::Status commit(const VectorID& vectorID, InternalID id);
 	utils::Result<InternalID> lookup(const VectorID& vectorID) const;
 	utils::Result<std::string_view> resolve(InternalID id) const;
+	utils::Status remove(const VectorID& vectorID);
 
 	size_t size() const noexcept { return resolveList.size(); }
 
@@ -31,7 +34,7 @@ public:
 	static utils::Result<IDSpace> load(const std::filesystem::path& path);
 
 private:
-	static constexpr size_t kMaxVectorIDSize = 1024;
+	static constexpr size_t kMaxVectorIDSize = 127;
 
 	std::unordered_map<VectorID, InternalID> lookupMap;
 	std::vector<VectorID> resolveList;
