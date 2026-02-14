@@ -12,11 +12,15 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 
-option(ARROW_SANITIZE "Enable AddressSanitizer" OFF)
+option(ARROW_SANITIZE "Enable sanitizers (address, undefined, thread)" OFF)
+set(ARROW_SANITIZER "address" CACHE STRING "Sanitizer to use: address, undefined, thread")
 if(ARROW_SANITIZE)
-  add_compile_options(-fsanitize=address -fno-omit-frame-pointer)
-  add_link_options(-fsanitize=address)
+  add_compile_options(-fsanitize=${ARROW_SANITIZER} -fno-omit-frame-pointer)
+  add_link_options(-fsanitize=${ARROW_SANITIZER})
 endif()
+
+# Warning flags for all targets
+add_compile_options(-Wall -Wextra -Wpedantic -Wno-unused-parameter)
 
 # ─────────────────────────────────────────────────────────────
 # Dependencies
@@ -99,7 +103,7 @@ target_link_libraries(arrow
     PRIVATE hnswlib ${ARROW_EMBED_LIB}
 )
 
-target_compile_options(arrow PRIVATE -O3)
+# Optimization handled by CMAKE_BUILD_TYPE (Release = -O3, Debug = -g -O0)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -135,7 +139,7 @@ if(APPLE)
     )
 endif()
 
-target_compile_options(arrowDB PRIVATE -O3 )
+# Optimization handled by CMAKE_BUILD_TYPE
 
 
 # ─────────────────────────────────────────────────────────────
@@ -167,7 +171,7 @@ target_compile_definitions(tests PRIVATE
     ARROW_EMBEDDING_MODEL_DIR="${CMAKE_SOURCE_DIR}/embed/models"
 )
 
-target_compile_options(tests PRIVATE -O3 )
+# Optimization handled by CMAKE_BUILD_TYPE
 
 # Test entries - organized by category
 # HNSW Tests
@@ -220,4 +224,4 @@ target_link_libraries(benchmarks PRIVATE
     benchmark::benchmark_main
 )
 
-target_compile_options(benchmarks PRIVATE -O3 )
+# Optimization handled by CMAKE_BUILD_TYPE
