@@ -54,11 +54,11 @@ namespace hnsw {
 
       double levelMult_{0.0};
       double invLevelMult_{0.0};
-      int maxLevel_{0};
+      std::atomic<int> maxLevel_{0};
 
 
       static constexpr tableidx_t INVALID_ID = std::numeric_limits<tableidx_t>::max();
-      tableidx_t entryPoint_ = INVALID_ID;
+      std::atomic<tableidx_t> entryPoint_{INVALID_ID};
 
 
       char *pElementsBlock_{nullptr};
@@ -72,6 +72,7 @@ namespace hnsw {
 
       std::default_random_engine levelGen_;
       std::default_random_engine updateProbGen_;
+      std::mutex rngMutex_;  // Protects levelGen_ and updateProbGen_
 
       std::unique_ptr<VisitedListPool> visitedListPool_{nullptr};
 
@@ -120,12 +121,12 @@ namespace hnsw {
         size_t ef_construction = 200,
         size_t randSeed = 42,
         bool allowReuseDeleted = false)
-        : labelMutexes_(MAX_LABEL_OPERATION_LOCKS),
+        : elementLevels_(maxElems),
             adjacencyMutexes_(maxElems),
-            elementLevels_(maxElems),
+            labelMutexes_(MAX_LABEL_OPERATION_LOCKS),
             allowReuseDeleted_(allowReuseDeleted) {
         maxElements_ = maxElems;
-        deletedElementCount_ = 0;
+        deletedElementCount_.store(0, std::memory_order_relaxed);
         kElemVecSize_ = s->getDataSize();
         distFunc_ = s->getDistFunc();
         batchDistFunc_ = s->getBatchDistFunc();
@@ -161,14 +162,14 @@ namespace hnsw {
         if (pElementsBlock_ == nullptr)
             throw std::runtime_error("Not enough memory");
 
-        elementCount_ = 0;
+        elementCount_.store(0, std::memory_order_relaxed);
 
         visitedListPool_ = std::unique_ptr<VisitedListPool>(new VisitedListPool(1, maxElements_));
 
         // initializations for special treatment of the first node
 
-        entryPoint_ = INVALID_ID;
-        maxLevel_ = -1;
+        entryPoint_.store(INVALID_ID, std::memory_order_relaxed);
+        maxLevel_.store(-1, std::memory_order_relaxed);
 
         if (maxElements_ > SIZE_MAX / sizeof(void *))
             throw std::runtime_error("Element count too large: would overflow adjacency allocation size");
@@ -181,8 +182,8 @@ namespace hnsw {
     }
 
       // Method implementations are at the end of the class
-      size_t size() const noexcept { return elementCount_; }
-      size_t getDeletedCount() const noexcept { return deletedElementCount_; }
+      size_t size() const noexcept { return elementCount_.load(std::memory_order_acquire); }
+      size_t getDeletedCount() const noexcept { return deletedElementCount_.load(std::memory_order_acquire); }
 
     ~HierarchicalNSW() {
         clear();
@@ -190,30 +191,37 @@ namespace hnsw {
 
     void saveIndex(const std::string &location) override {
         std::ofstream output(location, std::ios::binary);
+        if (!output.is_open())
+            throw std::runtime_error("Failed to open file for writing: " + location);
 
-        // WRITE HEADER 
+        // Snapshot atomic values for consistent write
+        int maxLevelSnap = maxLevel_.load();
+        tableidx_t entryPointSnap = entryPoint_.load();
+        size_t elemCountSnap = elementCount_.load();
+
+        // WRITE HEADER
         write(output, kLvl0AdjListOffset_);
         write(output, maxElements_);
-        write(output, elementCount_);
+        write(output, elemCountSnap);
         write(output, kElementSize_);
         write(output, kLabelOffset_);
         write(output, kVectorOffset_);
-        write(output, maxLevel_);
-        write(output, entryPoint_);
+        write(output, maxLevelSnap);
+        write(output, entryPointSnap);
         write(output, maxM_);
 
         write(output, maxM0_);
         write(output, M_);
         write(output, levelMult_);
         write(output, efConstruction_);
-        // END WRITE HEADER 
+        // END WRITE HEADER
 
         // WRITE ELEMENTS BLOCK
-        output.write(pElementsBlock_, elementCount_ * kElementSize_);
+        output.write(pElementsBlock_, elemCountSnap * kElementSize_);
         // END WRITE ELEMENTS BLOCK
 
         // WRITE ADJACENCY LISTS
-        for (size_t i = 0; i < elementCount_; i++) {
+        for (size_t i = 0; i < elemCountSnap; i++) {
             unsigned int adjLSize = elementLevels_[i] > 0 ? kAdjListSize_ * elementLevels_[i] : 0;
             write(output, adjLSize);
             if (adjLSize)
@@ -221,6 +229,9 @@ namespace hnsw {
         }
         // END WRITE ADJACENCY LISTS
         output.close();
+
+        if (output.fail())
+            throw std::runtime_error("I/O error writing index to: " + location);
     }
 
       void loadIndex(const std::string &location, SpaceInterface<dist_t> *pSpace, size_t maxElemsParam = 0) {
@@ -267,6 +278,10 @@ namespace hnsw {
         if (hdr_elementSize == 0 || hdr_levelMult <= 0) {
           throw std::runtime_error("Index seems to be corrupted or unsupported");
         }
+        // Validate maxM0 == 2 * maxM (HNSW invariant)
+        if (hdr_maxM0 != 2 * hdr_maxM) {
+          throw std::runtime_error("Index corrupted: maxM0 != 2*maxM");
+        }
 
         auto pos = input.tellg();
         validateIndexFileBody(input, totalFileSize, hdr_elementCount, hdr_elementSize);
@@ -277,12 +292,12 @@ namespace hnsw {
 
         kLvl0AdjListOffset_ = hdr_lvl0AdjListOffset;
         maxElements_ = std::max(maxElemsParam, hdr_maxElements);
-        elementCount_ = hdr_elementCount;
+        elementCount_.store(hdr_elementCount, std::memory_order_relaxed);
         kElementSize_ = hdr_elementSize;
         kLabelOffset_ = hdr_labelOffset;
         kVectorOffset_ = hdr_vectorOffset;
-        maxLevel_ = hdr_maxLevel;
-        entryPoint_ = hdr_entryPoint;
+        maxLevel_.store(hdr_maxLevel, std::memory_order_relaxed);
+        entryPoint_.store(hdr_entryPoint, std::memory_order_relaxed);
         maxM_ = hdr_maxM;
         maxM0_ = hdr_maxM0;
         M_ = hdr_M;
@@ -330,7 +345,12 @@ namespace hnsw {
         efSearch_ = efConstruction_;
 
         // Read the adjacency lists
-        for (size_t i = 0; i < elementCount_; i++) {
+        // Max valid adjacency list size: maxLevel * kAdjListSize_ (with reasonable level cap)
+        static constexpr unsigned int kMaxReasonableLevel = 64;
+        const unsigned int maxAdjListBytes = kMaxReasonableLevel * kAdjListSize_;
+
+        size_t elemCount = elementCount_.load(std::memory_order_relaxed);
+        for (size_t i = 0; i < elemCount; i++) {
           labelLookup_[getExternalLabel(i)] = i;
           unsigned int adjacencyListBytes;
           read(input, adjacencyListBytes);
@@ -338,6 +358,10 @@ namespace hnsw {
             elementLevels_[i] = 0;
             pAdjListsBlock_[i] = nullptr;
           } else {
+            if (adjacencyListBytes > maxAdjListBytes || (adjacencyListBytes % kAdjListSize_) != 0) {
+              throw std::runtime_error("Index corrupted: invalid adjacency list size " +
+                  std::to_string(adjacencyListBytes) + " for element " + std::to_string(i));
+            }
             elementLevels_[i] = adjacencyListBytes / kAdjListSize_;
             pAdjListsBlock_[i] = (char *) malloc(adjacencyListBytes);
             if (pAdjListsBlock_[i] == nullptr)
@@ -345,7 +369,7 @@ namespace hnsw {
             input.read(pAdjListsBlock_[i], adjacencyListBytes);
           }
           if (isMarkedDeleted(i)) {
-            deletedElementCount_ += 1;
+            deletedElementCount_.fetch_add(1, std::memory_order_relaxed);
             if (allowReuseDeleted_)
               deletedElementSet_.insert(i);
           }
@@ -354,7 +378,7 @@ namespace hnsw {
         /* MOVED INTO FOR LOOP ABOVE
         for (size_t i = 0; i < elementCount_; i++) {
           if (isMarkedDeleted(i)) {
-            deletedElementCount_ += 1;
+            deletedElementCount_.fetch_add(1, std::memory_order_relaxed);
             if (allowReuseDeleted_)
               deletedElementSet_.insert(i);
           }
@@ -365,14 +389,24 @@ namespace hnsw {
       }
 
     void resizeIndex(size_t newMaxElems) {
-        if (newMaxElems < elementCount_)
-            throw std::runtime_error("Cannot resize, max element is less than the current number of elements");
+        // Must hold globalMutex_ to prevent concurrent access during reallocation.
+        // The caller (HNSWIndex::insert) acquires globalMutex_ before calling this.
+        // The Collection layer's unique_lock prevents concurrent searches during insert.
+        std::unique_lock<std::mutex> lock(globalMutex_);
 
-        visitedListPool_.reset(new VisitedListPool(1, newMaxElems));
+        if (newMaxElems < elementCount_.load(std::memory_order_acquire))
+            throw std::runtime_error("Cannot resize, max element is less than the current number of elements");
 
         elementLevels_.resize(newMaxElems);
 
-        std::vector<std::shared_mutex>(newMaxElems).swap(adjacencyMutexes_);
+        // Grow adjacency mutexes: shared_mutex is not movable, so we must
+        // create a new vector and swap. This is safe because the Collection
+        // layer holds a unique_lock which prevents concurrent searches, and
+        // we hold globalMutex_ which prevents concurrent inserts.
+        if (newMaxElems > adjacencyMutexes_.size()) {
+            std::vector<std::shared_mutex> newMutexes(newMaxElems);
+            adjacencyMutexes_.swap(newMutexes);
+        }
 
         // Reallocate base layer
         if (newMaxElems > SIZE_MAX / kElementSize_)
@@ -389,12 +423,17 @@ namespace hnsw {
         pAdjListsBlock_ = newPAdjListsBlock;
 
         maxElements_ = newMaxElems;
+
+        // Update pool size — in-flight VisitedLists with old sizes will be
+        // discarded when returned to the pool if they're too small.
+        visitedListPool_->resize(newMaxElems);
     }
 
       void clear() {
         free(pElementsBlock_);
         pElementsBlock_ = nullptr;
-        for (tableidx_t i = 0; i < elementCount_; i++) {
+        size_t count = elementCount_.load(std::memory_order_acquire);
+        for (tableidx_t i = 0; i < count; i++) {
           if (elementLevels_[i] > 0)
             free(pAdjListsBlock_[i]);
         }
@@ -402,7 +441,7 @@ namespace hnsw {
         labelLookup_.clear();
         deletedElementSet_.clear();
         pAdjListsBlock_ = nullptr;
-        elementCount_ = 0;
+        elementCount_.store(0, std::memory_order_relaxed);
         visitedListPool_.reset(nullptr);
       }
 
@@ -550,7 +589,7 @@ namespace hnsw {
 
             // Scope for adjacency lock - release before batch distance computation
             {
-                std::unique_lock<std::shared_mutex> lock(adjacencyMutexes_[curNodeId]);
+                std::shared_lock<std::shared_mutex> lock(adjacencyMutexes_[curNodeId]);
 
                 linklistsize_t* adjList = getAdjListAtLevel(curNodeId, layer);
                 size_t numNeighbors = getListCount(adjList);
@@ -943,6 +982,7 @@ namespace hnsw {
 
     int getRandomLevel(double revSize) {
         std::uniform_real_distribution<double> distribution(0.0, 1.0);
+        std::lock_guard<std::mutex> lock(rngMutex_);
         return static_cast<int>(-log(std::max(distribution(levelGen_), 1e-10)) * revSize
         );
     }
@@ -952,11 +992,11 @@ namespace hnsw {
     }
 
     size_t getElementCount() {
-        return elementCount_;
+        return elementCount_.load(std::memory_order_acquire);
     }
 
     size_t getDeletedCount() {
-        return deletedElementCount_;
+        return deletedElementCount_.load(std::memory_order_acquire);
     }
 
       linklistsize_t *getAdjListL0(tableidx_t internalId) const {
@@ -980,6 +1020,9 @@ namespace hnsw {
       }
 
       inline void validateIndexFileBody(std::ifstream& input, std::streampos totalFileSize, size_t elementCount, size_t kElementSize) {
+        if (kElementSize > 0 && elementCount > SIZE_MAX / kElementSize) {
+          throw std::runtime_error("Index corrupted: element count * size overflows");
+        }
         input.seekg(elementCount * kElementSize, input.cur);
 
         for (size_t i = 0; i < elementCount; i++) {
@@ -1186,13 +1229,15 @@ namespace hnsw {
                 return;
             }
 
-            // Check capacity
-            if (elementCount_ >= maxElements_) {
+            // Check capacity — atomic load + CAS to safely claim a slot
+            size_t expected = elementCount_.load(std::memory_order_acquire);
+            if (expected >= maxElements_) {
                 throw std::runtime_error("Number of elements exceeds specified limit");
             }
-
-            curC = elementCount_;
-            elementCount_++;
+            // Under labelLookupMutex_, only one thread can be here at a time,
+            // so store is safe (no competing CAS needed).
+            curC = static_cast<tableidx_t>(expected);
+            elementCount_.store(expected + 1, std::memory_order_release);
             labelLookup_[label] = curC;
             
             // Zero L0 adjacency list for the new element
@@ -1207,12 +1252,12 @@ namespace hnsw {
 
         // Global lock for entry point update
         std::unique_lock<std::mutex> tempLock(globalMutex_);
-        int maxLevelCopy = maxLevel_;
+        int maxLevelCopy = maxLevel_.load(std::memory_order_acquire);
         if (curLevel <= maxLevelCopy)
             tempLock.unlock();
 
-        tableidx_t currObj = entryPoint_;
-        tableidx_t entryPointCopy = entryPoint_;
+        tableidx_t currObj = entryPoint_.load(std::memory_order_acquire);
+        tableidx_t entryPointCopy = currObj;
 
         // Initialize element memory (zero entire element including L0 adjacency list)
         memset(pElementsBlock_ + curC * kElementSize_, 0, kElementSize_);
@@ -1280,14 +1325,14 @@ namespace hnsw {
             }
         } else {
             // First element
-            entryPoint_ = 0;
-            maxLevel_ = curLevel;
+            entryPoint_.store(0, std::memory_order_release);
+            maxLevel_.store(curLevel, std::memory_order_release);
         }
 
         // Update entry point if new max level
         if (curLevel > maxLevelCopy) {
-            entryPoint_ = curC;
-            maxLevel_ = curLevel;
+            entryPoint_.store(curC, std::memory_order_release);
+            maxLevel_.store(curLevel, std::memory_order_release);
         }
     }
 
@@ -1300,14 +1345,19 @@ namespace hnsw {
     std::priority_queue<std::pair<dist_t, label_t>>
     searchKnn(const void* queryData, size_t k, BaseFilterFunctor* isIdAllowed, size_t ef) const {
         std::priority_queue<std::pair<dist_t, label_t>> result;
-        if (elementCount_ == 0) return result;
+        if (elementCount_.load(std::memory_order_acquire) == 0) return result;
+
+        // Snapshot atomics for consistent view
+        tableidx_t currObj = entryPoint_.load();
+        int maxLevelSnap = maxLevel_.load();
+
+        if (currObj == INVALID_ID) return result;
 
         const dist_t* qData = static_cast<const dist_t*>(queryData);
-        tableidx_t currObj = entryPoint_;
-        dist_t curDist = distFunc_(qData, reinterpret_cast<const dist_t*>(getDataByInternalId(entryPoint_)), dim_);
+        dist_t curDist = distFunc_(qData, reinterpret_cast<const dist_t*>(getDataByInternalId(currObj)), dim_);
 
         // Greedy descent through upper layers
-        for (int level = maxLevel_; level > 0; level--) {
+        for (int level = maxLevelSnap; level > 0; level--) {
             bool changed = true;
             while (changed) {
                 changed = false;
@@ -1336,7 +1386,7 @@ namespace hnsw {
 
         // Search base layer
         CandidateQueue topCandidates;
-        bool bareBoneSearch = !deletedElementCount_ && !isIdAllowed;
+        bool bareBoneSearch = (deletedElementCount_.load(std::memory_order_acquire) == 0) && !isIdAllowed;
 
         if (bareBoneSearch) {
             topCandidates = searchBaseLayerST<true>(currObj, queryData, std::max(ef, k), isIdAllowed);
@@ -1386,12 +1436,12 @@ namespace hnsw {
     }
 
     void markDeletedInternal(tableidx_t internalId) {
-        if (internalId >= elementCount_)
+        if (internalId >= elementCount_.load(std::memory_order_acquire))
             throw std::runtime_error("markDeletedInternal: internal ID out of bounds");
         if (!isMarkedDeleted(internalId)) {
             unsigned char* llCur = reinterpret_cast<unsigned char*>(getAdjListL0(internalId)) + 2;
             *llCur |= DELETE_MARK;
-            deletedElementCount_++;
+            deletedElementCount_.fetch_add(1, std::memory_order_release);
             if (allowReuseDeleted_) {
                 std::unique_lock<std::mutex> lockDeleted(deletedElementMutex_);
                 deletedElementSet_.insert(internalId);
@@ -1416,12 +1466,12 @@ namespace hnsw {
     }
 
     void unmarkDeletedInternal(tableidx_t internalId) {
-        if (internalId >= elementCount_)
+        if (internalId >= elementCount_.load(std::memory_order_acquire))
             throw std::runtime_error("unmarkDeletedInternal: internal ID out of bounds");
         if (isMarkedDeleted(internalId)) {
             unsigned char* llCur = reinterpret_cast<unsigned char*>(getAdjListL0(internalId)) + 2;
             *llCur &= ~DELETE_MARK;
-            deletedElementCount_--;
+            deletedElementCount_.fetch_sub(1, std::memory_order_release);
             if (allowReuseDeleted_) {
                 std::unique_lock<std::mutex> lockDeleted(deletedElementMutex_);
                 deletedElementSet_.erase(internalId);
@@ -1435,11 +1485,11 @@ namespace hnsw {
         // Update vector data
         memcpy(getDataByInternalId(internalId), dataPoint, kElemVecSize_);
 
-        int maxLevelCopy = maxLevel_;
-        tableidx_t entryPointCopy = entryPoint_;
+        int maxLevelCopy = maxLevel_.load(std::memory_order_acquire);
+        tableidx_t entryPointCopy = entryPoint_.load(std::memory_order_acquire);
 
         // If single element and it's the entry point, nothing more to do
-        if (entryPointCopy == internalId && elementCount_ == 1)
+        if (entryPointCopy == internalId && elementCount_.load(std::memory_order_acquire) == 1)
             return;
 
         int elemLevel = elementLevels_[internalId];
