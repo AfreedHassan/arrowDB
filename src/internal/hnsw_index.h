@@ -68,9 +68,10 @@ public:
   
   /// Load an index from disk.
   /// @param path File path to load the index from
+  /// @return Status indicating success or failure
   /// @note This replaces the current index with the loaded one.
   ///       The dimension and space must match the saved index.
-  void loadIndex(const std::string& path);
+  utils::Status loadIndex(const std::string& path);
 
     // Number of vectors in the index.
     size_t size() const; 

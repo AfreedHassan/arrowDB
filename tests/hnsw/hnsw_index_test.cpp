@@ -249,27 +249,26 @@ TEST_F(HNSWIndexTest, LoadIndexReplacesExisting) {
     EXPECT_EQ(results[0].id, 10);
 }
 
-TEST_F(HNSWIndexTest, LoadIndexThrowsOnInvalidPath) {
+TEST_F(HNSWIndexTest, LoadIndexReturnsErrorOnInvalidPath) {
     HNSWIndex index(3, Space::Cosine);
-    
-    // Try to load from non-existent file
-    EXPECT_THROW(
-        index.loadIndex(GetTestPath("nonexistent.bin")),
-        std::runtime_error
-    );
+
+    // Try to load from non-existent file — returns error Status
+    auto status = index.loadIndex(GetTestPath("nonexistent.bin"));
+    EXPECT_FALSE(status.ok());
 }
 
-TEST_F(HNSWIndexTest, LoadIndexThrowsOnCorruptedFile) {
+TEST_F(HNSWIndexTest, LoadIndexReturnsErrorOnCorruptedFile) {
     // Create a corrupted file
     std::string path = GetTestPath("corrupted.bin");
     std::ofstream file(path, std::ios::binary);
     file << "This is not a valid index file";
     file.close();
-    
+
     HNSWIndex index(3, Space::Cosine);
-    
-    // Should throw when trying to load corrupted file
-    EXPECT_THROW(index.loadIndex(path), std::runtime_error);
+
+    // Should return error Status for corrupted file
+    auto status = index.loadIndex(path);
+    EXPECT_FALSE(status.ok());
 }
 
 TEST_F(HNSWIndexTest, LoadIndexRequiresMatchingDimension) {

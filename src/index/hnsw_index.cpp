@@ -100,8 +100,14 @@ utils::Status HNSWIndex::saveIndex(const std::string& path) const {
   }
 }
 
-void HNSWIndex::loadIndex(const std::string& path) {
-  hnsw_->loadIndex(path, space_.get());
+utils::Status HNSWIndex::loadIndex(const std::string& path) {
+  try {
+    hnsw_->loadIndex(path, space_.get());
+    return utils::OkStatus();
+  } catch (const std::exception& e) {
+    return utils::Status(utils::StatusCode::kCorruption,
+      std::string("loadIndex failed: ") + e.what());
+  }
 }
 
 size_t HNSWIndex::size() const {
