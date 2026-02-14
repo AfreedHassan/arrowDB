@@ -2,6 +2,8 @@
 #define ARROW_LOG_H
 
 #include <iostream>
+#include <mutex>
+#include <string>
 #include <string_view>
 
 namespace arrow {
@@ -16,8 +18,13 @@ inline LogLevel& globalLogLevel() {
 inline void log(LogLevel level, std::string_view component, std::string_view msg) {
   if (level < globalLogLevel()) return;
   static constexpr const char* levelStr[] = {"DEBUG", "INFO", "WARN", "ERROR"};
-  std::cerr << "[" << levelStr[static_cast<int>(level)] << "] "
-            << "[" << component << "] " << msg << "\n";
+  // Build the full line first, then write atomically with a single write call
+  // to prevent interleaving from concurrent threads.
+  std::string line = std::string("[") + levelStr[static_cast<int>(level)] + "] "
+                   + "[" + std::string(component) + "] " + std::string(msg) + "\n";
+  static std::mutex logMutex;
+  std::lock_guard<std::mutex> lock(logMutex);
+  std::cerr << line;
 }
 
 #define ARROW_LOG_DEBUG(comp, msg) ::arrow::log(::arrow::LogLevel::kDebug, comp, msg)

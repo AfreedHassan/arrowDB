@@ -174,7 +174,9 @@ inline DataType jsonToDataType(const json& j) {
  * @param filepath Path to output JSON file
  * @throws std::runtime_error if file cannot be written
  */
-inline void exportMetadataToJson(
+/// Export metadata to JSON file.
+/// @return true on success, false on I/O error.
+inline bool exportMetadataToJson(
     const std::unordered_map<InternalID, Metadata>& metadataMap,
     const std::string& filepath
 ) {
@@ -183,13 +185,14 @@ inline void exportMetadataToJson(
         // Convert VectorID to string for JSON key
         j[std::to_string(id)] = metadataToJson(metadata);
     }
-    
+
     std::ofstream file(filepath);
     if (!file.is_open()) {
-        throw std::runtime_error("Failed to open file for writing: " + filepath);
+        return false;
     }
     file << j.dump(2);  // Pretty print with 2-space indent
     file.close();
+    return !file.fail();
 }
 
 /**

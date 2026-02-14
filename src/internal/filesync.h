@@ -15,6 +15,23 @@
 namespace arrow {
 namespace utils {
 
+/// Fsync a directory to ensure metadata operations (rename, create, unlink) are durable.
+static inline bool syncDir(const std::string &dirPath) {
+#ifdef _WIN32
+  return true;  // Windows handles this differently
+#else
+  int fd = open(dirPath.c_str(), O_RDONLY);
+  if (fd == -1) return false;
+#ifdef __APPLE__
+  bool result = fcntl(fd, F_FULLFSYNC) == 0;
+#else
+  bool result = fsync(fd) == 0;
+#endif
+  close(fd);
+  return result;
+#endif
+}
+
 static inline bool syncFile(const std::string &filePath) {
 #ifdef _WIN32
   HANDLE hFile = CreateFileA(filePath.c_str(), GENERIC_WRITE, FILE_SHARE_WRITE,

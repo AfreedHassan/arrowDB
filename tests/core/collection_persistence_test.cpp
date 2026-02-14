@@ -114,7 +114,7 @@ TEST_F(CollectionPersistenceTest, SaveCreatesRequiredFiles) {
   EXPECT_TRUE(std::filesystem::exists(path / "id_space.bin"));
 }
 
-TEST_F(CollectionPersistenceTest, SaveWithEmptyMetadataDoesNotCreateFile) {
+TEST_F(CollectionPersistenceTest, SaveWithEmptyMetadataStillCreatesFile) {
   InternalConfig config = CreateTestConfig();
   HNSWConfig hnswConfig = CreateTestHNSWConfig();
   RecoveryMetadata recovery;
@@ -128,8 +128,9 @@ TEST_F(CollectionPersistenceTest, SaveWithEmptyMetadataDoesNotCreateFile) {
     savePath, config, hnswConfig, index, idSpace, metadata, recovery);
   ASSERT_TRUE(status.ok());
 
+  // metadata.json is always written (even when empty) to prevent stale data on disk
   std::filesystem::path path(savePath);
-  EXPECT_FALSE(std::filesystem::exists(path / "metadata.json"));
+  EXPECT_TRUE(std::filesystem::exists(path / "metadata.json"));
 }
 
 TEST_F(CollectionPersistenceTest, SaveWithMetadataCreatesFile) {
