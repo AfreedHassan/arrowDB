@@ -2,6 +2,7 @@
 #define TYPES_H
 
 #include <cstdint>
+#include <functional>
 #include <nlohmann/json.hpp>
 #include <variant>
 #include <unordered_map>
@@ -40,6 +41,9 @@ namespace arrow {
 	// Metadata value types
 	using MetadataValue = std::variant<int64_t, double, std::string, bool>;
 	using Metadata = std::unordered_map<std::string, MetadataValue>;
+
+	/// Predicate for filtering search results by metadata.
+	using MetadataFilter = std::function<bool(const Metadata&)>;
 
 	// Error handling
 	enum class ErrorCode { 
