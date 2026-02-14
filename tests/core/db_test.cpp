@@ -156,12 +156,12 @@ TEST_F(ArrowDBTest, InsertAndSearchWithQuery) {
   std::mt19937 gen(42);
   for (size_t i = 0; i < 100; ++i) {
     std::vector<float> vec = RandomVector(128, gen);
-    collection->insert(i, vec);
+    collection->insert(std::to_string(i), vec);
 
     Metadata meta;
     meta["category"] = std::string("test");
     meta["index"] = static_cast<int64_t>(i);
-    collection->setMetadata(i, meta);
+    collection->setMetadata(std::to_string(i), meta);
   }
 
   // Use new query() method that returns SearchResult
