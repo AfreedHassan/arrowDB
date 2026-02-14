@@ -1,4 +1,5 @@
 #include "arrow/collection.h"
+#include "arrow/utils/uuid.h"
 #include "internal/wal.h"
 #include "test_util.h"
 #include <chrono>
@@ -7,6 +8,7 @@
 #include <gtest/gtest.h>
 
 using namespace arrow;
+using namespace arrow::uuid;
 using arrow::testing::RandomVector;
 
 class CollectionTest : public ::testing::Test {
@@ -52,7 +54,7 @@ TEST_F(CollectionTest, InsertVectors) {
 
   for (size_t i = 0; i < num_vectors; ++i) {
     std::vector<float> vec = RandomVector(dim, gen);
-    collection.insert(static_cast<InternalID>(i), vec);
+    collection.insert(std::to_string(i), vec);
   }
 
   EXPECT_EQ(collection.size(), num_vectors);
@@ -70,7 +72,7 @@ TEST_F(CollectionTest, SearchFunctionality) {
   // Insert vectors
   for (size_t i = 0; i < num_vectors; ++i) {
     std::vector<float> vec = RandomVector(dim, gen);
-    collection.insert(static_cast<InternalID>(i), vec);
+    collection.insert(std::to_string(i), vec);
   }
 
   // Perform search
@@ -99,7 +101,7 @@ TEST_F(CollectionTest, SearchWithDifferentEf) {
   // Insert vectors
   for (size_t i = 0; i < num_vectors; ++i) {
     std::vector<float> vec = RandomVector(dim, gen);
-    collection.insert(static_cast<InternalID>(i), vec);
+    collection.insert(std::to_string(i), vec);
   }
 
   std::vector<float> query = RandomVector(dim, gen);
@@ -124,7 +126,7 @@ TEST_F(CollectionTest, SearchPerformance) {
   // Insert vectors
   for (size_t i = 0; i < num_vectors; ++i) {
     std::vector<float> vec = RandomVector(dim, gen);
-    collection.insert(static_cast<InternalID>(i), vec);
+    collection.insert(std::to_string(i), vec);
   }
 
   std::vector<float> query = RandomVector(dim, gen);
@@ -167,7 +169,7 @@ TEST_F(CollectionTest, SaveCreatesRequiredFiles) {
   std::mt19937 gen(42);
   for (size_t i = 0; i < 10; ++i) {
     std::vector<float> vec = RandomVector(128, gen);
-    collection.insert(i, vec);
+    collection.insert(uuidv4(i), vec);
   }
 
   std::string save_path = GetTestPath("test_collection");
@@ -191,12 +193,12 @@ TEST_F(CollectionTest, SaveIncludesMetadata) {
   std::mt19937 gen(42);
   for (size_t i = 0; i < 5; ++i) {
     std::vector<float> vec = RandomVector(128, gen);
-    collection.insert(i, vec);
+    collection.insert(uuidv4(i), vec);
 
     Metadata meta;
     meta["category"] = std::string("test");
     meta["score"] = static_cast<double>(i);
-    collection.setMetadata(i, meta);
+    collection.setMetadata(uuidv4(i), meta);
   }
 
   std::string save_path = GetTestPath("test_collection");
@@ -215,7 +217,7 @@ TEST_F(CollectionTest, LoadFromDirectory) {
   std::mt19937 gen(42);
   for (size_t i = 0; i < 100; ++i) {
     std::vector<float> vec = RandomVector(128, gen);
-    original.insert(i, vec);
+    original.insert(std::to_string(i), vec);
   }
 
   std::string save_path = GetTestPath("test_collection");
@@ -248,7 +250,7 @@ TEST_F(CollectionTest, RoundTripPreservesData) {
   for (size_t i = 0; i < 50; ++i) {
     std::vector<float> vec = RandomVector(64, gen);
     vectors.push_back(vec);
-    original.insert(i, vec);
+    original.insert(std::to_string(i), vec);
   }
 
   std::string save_path = GetTestPath("test_collection");
@@ -280,14 +282,14 @@ TEST_F(CollectionTest, RoundTripPreservesMetadata) {
   std::mt19937 gen(42);
   for (size_t i = 0; i < 10; ++i) {
     std::vector<float> vec = RandomVector(128, gen);
-    original.insert(i, vec);
+    original.insert(std::to_string(i), vec);
 
     Metadata meta;
     meta["id"] = static_cast<int64_t>(i);
     meta["name"] = std::string("vector_") + std::to_string(i);
     meta["score"] = static_cast<double>(i) * 0.1;
     meta["active"] = (i % 2 == 0);
-    original.setMetadata(i, meta);
+    original.setMetadata(std::to_string(i), meta);
   }
 
   std::string save_path = GetTestPath("test_collection");
@@ -391,22 +393,26 @@ TEST_F(CollectionWalTest, WalLoggingEnabledWithPersistencePath) {
     Collection collection(config, persistencePath);
 
     std::vector<float> vec = RandomVector(128, gen);
-    auto status = collection.insert(1, vec);
+    auto status = collection.insert(uuidv4(1), vec);
 
     EXPECT_TRUE(status.ok()) << status.message();
   }
 
   {
-    wal::WAL wal(persistencePath + "/wal");
-    auto result = wal.loadHeader();
-    ASSERT_TRUE(result.ok()) << result.status().message();
-    EXPECT_EQ(result.value().magic, 0x41574C01);
+    auto walResult = wal::WAL::open(persistencePath + "/wal");
+    ASSERT_TRUE(walResult.ok()) << walResult.status().message();
+    auto& wal = walResult.value();
+
+    auto headerResult = wal::LoadHeader(persistencePath + "/wal");
+    ASSERT_TRUE(headerResult.ok()) << headerResult.status().message();
+    EXPECT_EQ(headerResult.value().magic, 0x41574C01);
 
     auto entriesResult = wal.readAll();
     ASSERT_TRUE(entriesResult.ok()) << entriesResult.status().message();
-    EXPECT_EQ(entriesResult.value().size(), 1);
-    EXPECT_EQ(entriesResult.value()[0].type, wal::OperationType::INSERT);
-    EXPECT_EQ(entriesResult.value()[0].id, 1);
+    const auto& walContents = entriesResult.value();
+    EXPECT_EQ(walContents.entries.size(), 1);
+    EXPECT_EQ(walContents.entries[0].type, wal::OperationType::INSERT);
+    EXPECT_EQ(walContents.entries[0].getVectorID(), uuidv4(1));
   }
 }
 
@@ -415,7 +421,7 @@ TEST_F(CollectionWalTest, WalNotCreatedWithoutPersistencePath) {
   Collection collection(config);
 
   std::vector<float> vec = RandomVector(128, gen);
-  auto status = collection.insert(1, vec);
+  auto status = collection.insert(uuidv4(1), vec);
 
   EXPECT_TRUE(status.ok()) << status.message();
   EXPECT_EQ(collection.size(), 1);
@@ -430,21 +436,23 @@ TEST_F(CollectionWalTest, WalLogOnInsert) {
   const size_t numInserts = 10;
   for (size_t i = 0; i < numInserts; ++i) {
     std::vector<float> vec = RandomVector(128, gen);
-    auto status = collection.insert(static_cast<InternalID>(i), vec);
+    auto status = collection.insert(uuidv4(i), vec);
     ASSERT_TRUE(status.ok()) << status.message();
   }
 
   EXPECT_EQ(collection.size(), numInserts);
 
-  wal::WAL wal(persistencePath + "/wal");
+  auto walResult = wal::WAL::open(persistencePath + "/wal");
+  ASSERT_TRUE(walResult.ok()) << walResult.status().message();
+  auto& wal = walResult.value();
   auto entriesResult = wal.readAll();
   ASSERT_TRUE(entriesResult.ok()) << entriesResult.status().message();
-  const auto &entries = entriesResult.value();
+  const auto &entries = entriesResult.value().entries;
   EXPECT_EQ(entries.size(), numInserts);
 
   for (size_t i = 0; i < numInserts; ++i) {
     EXPECT_EQ(entries[i].type, wal::OperationType::INSERT);
-    EXPECT_EQ(entries[i].id, static_cast<InternalID>(i));
+    EXPECT_EQ(entries[i].getVectorID(), uuidv4(i));
     EXPECT_EQ(entries[i].dimension, 128);
     EXPECT_FALSE(entries[i].embedding.empty());
   }
@@ -459,17 +467,19 @@ TEST_F(CollectionWalTest, WalLogOnDelete) {
   const size_t numInserts = 5;
   for (size_t i = 0; i < numInserts; ++i) {
     std::vector<float> vec = RandomVector(128, gen);
-    auto status = collection.insert(i, vec);
+    auto status = collection.insert(uuidv4(i), vec);
     ASSERT_TRUE(status.ok()) << status.message();
   }
 
-  auto deleteStatus = collection.remove(2);
+  auto deleteStatus = collection.remove(uuidv4(2));
   ASSERT_TRUE(deleteStatus.ok()) << deleteStatus.message();
 
-  WAL wal(persistencePath + "/wal");
+  auto walResult = WAL::open(persistencePath + "/wal");
+  ASSERT_TRUE(walResult.ok()) << walResult.status().message();
+  auto& wal = walResult.value();
   auto entriesResult = wal.readAll();
   ASSERT_TRUE(entriesResult.ok()) << entriesResult.status().message();
-  const auto &entries = entriesResult.value();
+  const auto &entries = entriesResult.value().entries;
 
   EXPECT_EQ(entries.size(), numInserts + 1);
 
@@ -480,7 +490,7 @@ TEST_F(CollectionWalTest, WalLogOnDelete) {
       insertCount++;
     } else if (entry.type == wal::OperationType::DELETE) {
       deleteCount++;
-      EXPECT_EQ(entry.id, 2);
+      EXPECT_EQ(entry.getVectorID(), uuidv4(2));
     }
   }
   EXPECT_EQ(insertCount, numInserts);
@@ -496,24 +506,28 @@ TEST_F(CollectionWalTest, CheckpointTruncatesWalAfterSave) {
   const size_t numInserts = 10;
   for (size_t i = 0; i < numInserts; ++i) {
     std::vector<float> vec = RandomVector(128, gen);
-    auto status = collection.insert(i, vec);
+    auto status = collection.insert(uuidv4(i), vec);
     ASSERT_TRUE(status.ok()) << status.message();
   }
 
-  WAL walBefore(persistencePath + "/wal");
+  auto walBeforeResult = WAL::open(persistencePath + "/wal");
+  ASSERT_TRUE(walBeforeResult.ok());
+  auto& walBefore = walBeforeResult.value();
   auto entriesBefore = walBefore.readAll();
   ASSERT_TRUE(entriesBefore.ok());
-  EXPECT_EQ(entriesBefore.value().size(), numInserts);
+  EXPECT_EQ(entriesBefore.value().entries.size(), numInserts);
 
   auto saveStatus = collection.save(persistencePath);
   ASSERT_TRUE(saveStatus.ok()) << saveStatus.message();
 
-  WAL walAfter(persistencePath + "/wal");
+  auto walAfterResult = WAL::open(persistencePath + "/wal");
+  ASSERT_TRUE(walAfterResult.ok());
+  auto& walAfter = walAfterResult.value();
   auto entriesAfter = walAfter.readAll();
   ASSERT_TRUE(entriesAfter.ok());
-  EXPECT_EQ(entriesAfter.value().size(), 0);
+  EXPECT_EQ(entriesAfter.value().entries.size(), 0);
 
-  auto headerResult = walAfter.loadHeader();
+  auto headerResult = wal::LoadHeader(persistencePath + "/wal");
   ASSERT_TRUE(headerResult.ok());
   EXPECT_EQ(headerResult.value().magic, 0x41574C01);
 }
@@ -528,7 +542,7 @@ TEST_F(CollectionWalTest, CrashRecoveryReplaysWal) {
 
     for (size_t i = 0; i < 10; ++i) {
       std::vector<float> vec = RandomVector(128, gen);
-      auto status = collection.insert(i, vec);
+      auto status = collection.insert(uuidv4(i), vec);
       ASSERT_TRUE(status.ok()) << status.message();
     }
 
@@ -545,7 +559,7 @@ TEST_F(CollectionWalTest, CrashRecoveryReplaysWal) {
 
     for (size_t i = 10; i < 20; ++i) {
       std::vector<float> vec = RandomVector(128, gen);
-      auto status = collection2.insert(i, vec);
+      auto status = collection2.insert(uuidv4(i), vec);
       ASSERT_TRUE(status.ok()) << status.message();
     }
 
@@ -571,7 +585,7 @@ TEST_F(CollectionWalTest, LoadWithoutCrashDoesNotReplayWal) {
 
     for (size_t i = 0; i < 5; ++i) {
       std::vector<float> vec = RandomVector(128, gen);
-      auto status = collection.insert(i, vec);
+      auto status = collection.insert(uuidv4(i), vec);
       ASSERT_TRUE(status.ok()) << status.message();
     }
 
@@ -597,12 +611,12 @@ TEST_F(CollectionWalTest, WalReplayPreservesMetadata) {
 
     for (size_t i = 0; i < 10; ++i) {
       std::vector<float> vec = RandomVector(128, gen);
-      auto status = collection.insert(i, vec);
+      auto status = collection.insert(uuidv4(i), vec);
       ASSERT_TRUE(status.ok()) << status.message();
 
       Metadata meta;
       meta["idx"] = static_cast<int64_t>(i);
-      collection.setMetadata(i, meta);
+      collection.setMetadata(uuidv4(i), meta);
     }
 
     auto saveStatus = collection.save(persistencePath);
@@ -616,12 +630,12 @@ TEST_F(CollectionWalTest, WalReplayPreservesMetadata) {
     Collection collection2 = std::move(loadResult2.value());
 
     std::vector<float> vec = RandomVector(128, gen);
-    auto status = collection2.insert(10, vec);
+    auto status = collection2.insert(uuidv4(10), vec);
     ASSERT_TRUE(status.ok()) << status.message();
 
     Metadata meta;
     meta["idx"] = static_cast<int64_t>(10);
-    collection2.setMetadata(10, meta);
+    collection2.setMetadata(uuidv4(10), meta);
     // No save - simulating crash
   }
 
@@ -650,7 +664,7 @@ TEST_F(CollectionWalTest, DeleteReplayMarksVectorAsDeleted) {
       if (i == 5) {
         vector5 = vec;
       }
-      auto status = collection.insert(i, vec);
+      auto status = collection.insert(uuidv4(i), vec);
       ASSERT_TRUE(status.ok()) << status.message();
     }
 
@@ -664,7 +678,7 @@ TEST_F(CollectionWalTest, DeleteReplayMarksVectorAsDeleted) {
     ASSERT_TRUE(loadResult2.ok()) << loadResult2.status().message();
     Collection collection2 = std::move(loadResult2.value());
 
-    auto deleteStatus = collection2.remove(5);
+    auto deleteStatus = collection2.remove(uuidv4(5));
     ASSERT_TRUE(deleteStatus.ok()) << deleteStatus.message();
     // No save - simulating crash
   }
@@ -698,7 +712,7 @@ TEST_F(CollectionWalTest, ContinuityAcrossRestarts) {
 
     for (size_t i = 0; i < 5; ++i) {
       std::vector<float> vec = RandomVector(128, gen);
-      auto status = collection.insert(i, vec);
+      auto status = collection.insert(uuidv4(i), vec);
       ASSERT_TRUE(status.ok()) << status.message();
     }
 
@@ -718,7 +732,7 @@ TEST_F(CollectionWalTest, ContinuityAcrossRestarts) {
 
     for (size_t i = 5; i < 10; ++i) {
       std::vector<float> vec = RandomVector(128, gen);
-      auto status = collection.insert(i, vec);
+      auto status = collection.insert(uuidv4(i), vec);
       ASSERT_TRUE(status.ok()) << status.message();
     }
 
@@ -745,7 +759,7 @@ TEST_F(CollectionWalTest, EmptyWalDoesNotCauseRecovery) {
 
     for (size_t i = 0; i < 5; ++i) {
       std::vector<float> vec = RandomVector(128, gen);
-      auto status = collection.insert(i, vec);
+      auto status = collection.insert(uuidv4(i), vec);
       ASSERT_TRUE(status.ok()) << status.message();
     }
 
@@ -770,7 +784,7 @@ TEST_F(CollectionWalTest, RecoveryMetadataIsPersisted) {
 
     for (size_t i = 0; i < 10; ++i) {
       std::vector<float> vec = RandomVector(128, gen);
-      auto status = collection.insert(i, vec);
+      auto status = collection.insert(uuidv4(i), vec);
       ASSERT_TRUE(status.ok()) << status.message();
     }
 
@@ -825,10 +839,10 @@ TEST_F(CollectionBatchTest, InsertBatchSuccess) {
   Collection collection(cfg);
 
   // Prepare batch
-  std::vector<std::pair<InternalID, std::vector<float>>> batch;
+  std::vector<std::pair<VectorID, std::vector<float>>> batch;
   std::mt19937 gen(42);
   for (size_t i = 0; i < 100; ++i) {
-    batch.push_back({i, RandomVector(128, gen)});
+    batch.push_back({std::to_string(i), RandomVector(128, gen)});
   }
 
   // Insert batch
@@ -846,12 +860,12 @@ TEST_F(CollectionBatchTest, InsertBatchPartialFailure) {
   Collection collection(cfg);
 
   // Mixed valid and invalid dimensions
-  std::vector<std::pair<InternalID, std::vector<float>>> batch;
+  std::vector<std::pair<VectorID, std::vector<float>>> batch;
   std::mt19937 gen(42);
 
-  batch.push_back({0, RandomVector(128, gen)});  // Valid
-  batch.push_back({1, RandomVector(64, gen)});   // Invalid dimension
-  batch.push_back({2, RandomVector(128, gen)});  // Valid
+  batch.push_back({"0", RandomVector(128, gen)});  // Valid
+  batch.push_back({"1", RandomVector(64, gen)});   // Invalid dimension
+  batch.push_back({"2", RandomVector(128, gen)});  // Valid
 
   auto result = collection.insertBatch(batch);
   ASSERT_TRUE(result.ok());
@@ -876,9 +890,9 @@ TEST_F(CollectionBatchTest, SearchBatchParallel) {
 
   // Insert vectors using batch insert
   std::mt19937 gen(42);
-  std::vector<std::pair<InternalID, std::vector<float>>> batch;
+  std::vector<std::pair<VectorID, std::vector<float>>> batch;
   for (size_t i = 0; i < 1000; ++i) {
-    batch.push_back({i, RandomVector(128, gen)});
+    batch.push_back({std::to_string(i), RandomVector(128, gen)});
   }
   auto insertResult = collection.insertBatch(batch);
   ASSERT_TRUE(insertResult.ok());
@@ -911,7 +925,7 @@ TEST_F(CollectionBatchTest, SearchBatchDimensionMismatch) {
   // Insert a vector
   std::mt19937 gen(42);
   std::vector<float> vec = RandomVector(128, gen);
-  collection.insert(0, vec);
+  collection.insert(uuidv4(0), vec);
 
   // Try to search with wrong dimension
   std::vector<std::vector<float>> queries;
@@ -930,10 +944,10 @@ TEST_F(CollectionBatchTest, InsertBatchWithPersistence) {
   {
     Collection collection(config, persistencePath);
 
-    std::vector<std::pair<InternalID, std::vector<float>>> batch;
+    std::vector<std::pair<VectorID, std::vector<float>>> batch;
     std::mt19937 gen(42);
     for (size_t i = 0; i < 50; ++i) {
-      batch.push_back({i, RandomVector(128, gen)});
+      batch.push_back({std::to_string(i), RandomVector(128, gen)});
     }
 
     auto result = collection.insertBatch(batch);

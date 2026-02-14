@@ -64,7 +64,7 @@ public:
     /// @param id Unique identifier for the vector
     /// @param vec Vector data (must match collection dimension)
     /// @return Status indicating success or failure
-    utils::Status insert(InternalID id, const std::vector<float>& vec, Metadata metadata = {});
+    utils::Status insert(const VectorID& id, const std::vector<float>& vec, Metadata metadata = {});
 
     utils::Status insert(const std::vector<std::string>& data);
 
@@ -73,14 +73,20 @@ public:
     /// @param batch Vector of (id, vector) pairs to insert
     /// @return Result containing BatchInsertResult with per-vector status
     utils::Result<BatchInsertResult> insertBatch(
-        const std::vector<std::pair<InternalID, std::vector<float>>>& batch);
+        const std::vector<std::pair<VectorID, std::vector<float>>>& batch);
 
     /// Set metadata for a vector.
     ///
     /// @param id Vector identifier
     /// @param metadata Metadata to associate with the vector
-    void setMetadata(InternalID id, const Metadata& metadata);
-    Metadata getMetadata(InternalID id);
+    /// @return Status indicating success or failure
+    utils::Status setMetadata(const VectorID& id, const Metadata& metadata);
+
+    /// Get metadata for a vector.
+    ///
+    /// @param id Vector identifier
+    /// @return Result containing metadata or error if vector not found
+    utils::Result<Metadata> getMetadata(const VectorID& id);
 
     /// Search for k nearest neighbors.
     ///
@@ -117,11 +123,47 @@ public:
         uint32_t k,
         uint32_t ef = 200) const;
 
+    /// Search for k nearest neighbors with metadata filtering.
+    ///
+    /// @param query Query vector (must match collection dimension)
+    /// @param k Number of results to return
+    /// @param filter Predicate applied to each candidate's metadata
+    /// @param ef Search beam width (higher = better recall, slower)
+    /// @return Vector of search results passing the filter
+    std::vector<IndexSearchResult> search(const std::vector<float>& query,
+                                          uint32_t k,
+                                          MetadataFilter filter,
+                                          uint32_t ef = 200) const;
+
+    /// Retrieve a vector by ID.
+    ///
+    /// @param id Vector identifier
+    /// @return Result containing the vector data or error
+    utils::Result<std::vector<float>> get(const VectorID& id) const;
+
+    /// Update vector data and/or metadata for an existing ID.
+    ///
+    /// @param id Vector identifier (must already exist)
+    /// @param vec New vector data (must match collection dimension)
+    /// @param metadata New metadata (replaces existing)
+    /// @return Status indicating success or failure
+    utils::Status update(const VectorID& id, const std::vector<float>& vec,
+                         Metadata metadata = {});
+
+    /// Insert or update a vector.
+    ///
+    /// @param id Vector identifier
+    /// @param vec Vector data (must match collection dimension)
+    /// @param metadata Metadata to associate with the vector
+    /// @return Status indicating success or failure
+    utils::Status upsert(const VectorID& id, const std::vector<float>& vec,
+                         Metadata metadata = {});
+
     /// Remove a vector from the collection.
     ///
     /// @param id Vector identifier to remove
     /// @return Status indicating success or failure
-    utils::Status remove(InternalID id);
+    utils::Status remove(const VectorID& id);
 
     /// Save the collection to disk.
     ///
@@ -140,6 +182,17 @@ public:
 
     /// Check if collection recovered from WAL on load.
     bool recoveredFromWal() const;
+
+    /// Collection statistics.
+    struct Stats {
+      size_t vectorCount = 0;
+      size_t metadataCount = 0;
+      size_t maxCapacity = 0;
+      size_t dimensions = 0;
+    };
+
+    /// Get collection statistics.
+    Stats stats() const;
 
 private:
     class Impl;
