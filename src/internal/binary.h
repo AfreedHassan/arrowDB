@@ -42,6 +42,10 @@ public:
   }
 
   void flush() { pOstream_->flush(); }
+
+  // Check if stream is in good state
+  bool good() const { return pOstream_->good(); }
+  bool fail() const { return pOstream_->fail(); }
 };
 
 class BinaryReader {
@@ -80,10 +84,17 @@ public:
     return true;  // Empty vector is valid
   }
 
+  static constexpr uint64_t kMaxStringReadSize = 16 * 1024 * 1024; // 16MB
+
   std::string& read(std::string& out) {
     uint64_t size;
     if (!read(size)) {
       out.clear();
+      return out;
+    }
+    if (size > kMaxStringReadSize) {
+      out.clear();
+      pIstream_->setstate(std::ios::failbit);
       return out;
     }
 		out.resize(size);

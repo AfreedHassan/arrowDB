@@ -993,9 +993,9 @@ TEST_F(BinaryTest, BinaryReader_StringStream_BasicTypes) {
 	}
 
 	{
-		std::stringstream ss(data);
-		ss.exceptions(std::ios::binary | std::ios::in);
-		BinaryReader reader(std::make_unique<std::stringstream>(std::move(ss)));
+		auto ss = std::make_unique<std::stringstream>(data);
+		ss->exceptions(std::ios::binary | std::ios::in);
+		BinaryReader reader(std::move(ss));
 
 		bool b1, b2;
 		reader.read(b1);
@@ -1047,9 +1047,9 @@ TEST_F(BinaryTest, BinaryReader_StringStream_MultipleStrings) {
 	}
 
 	{
-		std::stringstream ss(data);
-		ss.exceptions(std::ios::binary | std::ios::in);
-		BinaryReader reader(std::make_unique<std::stringstream>(std::move(ss)));
+		auto ss = std::make_unique<std::stringstream>(data);
+		ss->exceptions(std::ios::binary | std::ios::in);
+		BinaryReader reader(std::move(ss));
 
 		std::string s1, s2, s3;
 		reader.read(s1);
@@ -1088,9 +1088,9 @@ TEST_F(BinaryTest, BinaryReader_StringStream_LargeVector) {
 	}
 
 	{
-		std::stringstream ss(data);
-		ss.exceptions(std::ios::binary | std::ios::in);
-		BinaryReader reader(std::make_unique<std::stringstream>(std::move(ss)));
+		auto ss = std::make_unique<std::stringstream>(data);
+		ss->exceptions(std::ios::binary | std::ios::in);
+		BinaryReader reader(std::move(ss));
 		std::vector<float> v(1000);
 		EXPECT_TRUE(reader.read(v));
 		for (size_t i = 0; i < v.size(); ++i) {
@@ -1120,9 +1120,9 @@ TEST_F(BinaryTest, BinaryReader_StringStream_EmptyString) {
 	}
 
 	{
-		std::stringstream ss(data);
-		ss.exceptions(std::ios::binary | std::ios::in);
-		BinaryReader reader(std::make_unique<std::stringstream>(std::move(ss)));
+		auto ss = std::make_unique<std::stringstream>(data);
+		ss->exceptions(std::ios::binary | std::ios::in);
+		BinaryReader reader(std::move(ss));
 		std::string s = "not empty";
 		reader.read(s);
 		EXPECT_EQ(s, "");
