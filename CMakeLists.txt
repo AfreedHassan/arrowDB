@@ -12,6 +12,12 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 
+option(ARROW_SANITIZE "Enable AddressSanitizer" OFF)
+if(ARROW_SANITIZE)
+  add_compile_options(-fsanitize=address -fno-omit-frame-pointer)
+  add_link_options(-fsanitize=address)
+endif()
+
 # ─────────────────────────────────────────────────────────────
 # Dependencies
 # ─────────────────────────────────────────────────────────────
@@ -74,6 +80,8 @@ add_library(arrow STATIC
     src/core/collection.cpp
     src/core/client.cpp
     src/core/wal.cpp
+    src/core/wal_writer.cpp
+    src/core/collection_persistence.cpp
     src/core/id_space.cpp
     src/index/hnsw_index.cpp
     src/embedder/embedder.cpp
@@ -91,7 +99,7 @@ target_link_libraries(arrow
     PRIVATE hnswlib ${ARROW_EMBED_LIB}
 )
 
-target_compile_options(arrow PRIVATE -O3 -march=native)
+target_compile_options(arrow PRIVATE -O3)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -127,7 +135,7 @@ if(APPLE)
     )
 endif()
 
-target_compile_options(arrowDB PRIVATE -O3 -march=native)
+target_compile_options(arrowDB PRIVATE -O3 )
 
 
 # ─────────────────────────────────────────────────────────────
@@ -159,7 +167,7 @@ target_compile_definitions(tests PRIVATE
     ARROW_EMBEDDING_MODEL_DIR="${CMAKE_SOURCE_DIR}/embed/models"
 )
 
-target_compile_options(tests PRIVATE -O3 -march=native)
+target_compile_options(tests PRIVATE -O3 )
 
 # Test entries - organized by category
 # HNSW Tests
@@ -212,4 +220,4 @@ target_link_libraries(benchmarks PRIVATE
     benchmark::benchmark_main
 )
 
-target_compile_options(benchmarks PRIVATE -O3 -march=native)
+target_compile_options(benchmarks PRIVATE -O3 )
