@@ -31,11 +31,16 @@ protected:
     std::filesystem::path testDir;
     std::mt19937 gen;
 
-    std::string GetTestPath(const std::string& dirname) {
-        return (testDir / dirname).string();
+    std::filesystem::path GetTestPath(const std::string& dirname) {
+        return testDir / dirname;
     }
 
-    wal::Entry CreateTestEntry(wal::OperationType type = wal::OperationType::INSERT, VectorID id = "1", uint32_t dim = 3, uint64_t lsn = 1, uint64_t txid = 1, const std::vector<float>& embedding = {}) {
+    wal::Entry CreateTestEntry(wal::OperationType type = wal::OperationType::INSERT,
+                               const std::string& id = "1",
+                               uint32_t dim = 3,
+                               uint64_t lsn = 1,
+                               uint64_t txid = 1,
+                               const std::vector<float>& embedding = {}) {
         std::vector<float> vec = embedding.empty() ? RandomVector(dim, gen) : embedding;
         wal::Entry entry{
             .type = type,
@@ -43,18 +48,23 @@ protected:
             .lsn = lsn,
             .txid = txid,
             .headerCRC = 0,
-            .payloadLength = static_cast<uint32_t>(vec.size() * sizeof(float)),
+            .payloadLength = 0,
             .dimension = dim,
             .padding = 0,
             .embedding = vec,
             .payloadCRC = 0
         };
         entry.setVectorID(id);
+        entry.payloadLength = entry.computePayloadLength();
         entry.headerCRC = entry.computeHeaderCrc();
         entry.payloadCRC = entry.computePayloadCrc();
         return entry;
     }
 };
+
+// =========================================================================
+// Pure unit tests (Header/Entry structs, no WAL object needed)
+// =========================================================================
 
 TEST_F(WALTest, HeaderDefaults) {
     wal::Header header;
@@ -77,9 +87,9 @@ TEST_F(WALTest, HeaderWriteReadRoundTrip) {
     original.flags = 0x1234;
     original.creationTime = 1234567890;
     original.padding = 0;
-    original.headerCrc32 = original.computeCrc32();  // Compute CRC before writing
+    original.headerCrc32 = original.computeCrc32();
 
-    std::string path = GetTestPath("header_roundtrip.bin");
+    auto path = GetTestPath("header_roundtrip.bin");
     {
         std::ofstream file(path, std::ios::binary);
         BinaryWriter writer(std::make_unique<std::ofstream>(std::move(file)));
@@ -90,10 +100,7 @@ TEST_F(WALTest, HeaderWriteReadRoundTrip) {
         std::ifstream file(path, std::ios::binary);
         BinaryReader reader(std::make_unique<std::ifstream>(std::move(file)));
         auto result = wal::ParseHeader(reader);
-        if (!result.ok()) {
-            std::cout << "ParseHeader failed: " << result.error().message() << "\n";
-        }
-        ASSERT_TRUE(result.ok());
+        ASSERT_TRUE(result.ok()) << result.status().message();
         const auto& read = result.value();
 
         EXPECT_EQ(read.magic, original.magic);
@@ -106,7 +113,7 @@ TEST_F(WALTest, HeaderWriteReadRoundTrip) {
 }
 
 TEST_F(WALTest, HeaderReadFailure) {
-    std::string path = GetTestPath("header_empty.bin");
+    auto path = GetTestPath("header_empty.bin");
     {
         std::ofstream file(path, std::ios::binary);
         file.close();
@@ -116,7 +123,6 @@ TEST_F(WALTest, HeaderReadFailure) {
         std::ifstream file(path, std::ios::binary);
         BinaryReader reader(std::make_unique<std::ifstream>(std::move(file)));
         auto result = wal::ParseHeader(reader);
-
         EXPECT_FALSE(result.ok());
     }
 }
@@ -129,13 +135,14 @@ TEST_F(WALTest, EntryConstructor) {
         .lsn = 1,
         .txid = 42,
         .headerCRC = 0,
-        .payloadLength = static_cast<uint32_t>(embedding.size() * sizeof(float)),
+        .payloadLength = 0,
         .dimension = 3,
         .padding = 0,
         .embedding = embedding,
         .payloadCRC = 0
     };
     entry.setVectorID("42");
+    entry.payloadLength = entry.computePayloadLength();
     entry.headerCRC = entry.computeHeaderCrc();
     entry.payloadCRC = entry.computePayloadCrc();
     EXPECT_EQ(entry.type, wal::OperationType::INSERT);
@@ -154,13 +161,14 @@ TEST_F(WALTest, EntryToJson) {
         .lsn = 5,
         .txid = 10,
         .headerCRC = 0,
-        .payloadLength = static_cast<uint32_t>(embedding.size() * sizeof(float)),
+        .payloadLength = 0,
         .dimension = 2,
         .padding = 0,
         .embedding = embedding,
         .payloadCRC = 0
     };
     entry.setVectorID("42");
+    entry.payloadLength = entry.computePayloadLength();
     entry.headerCRC = entry.computeHeaderCrc();
     entry.payloadCRC = entry.computePayloadCrc();
     utils::json j = entry.toJson();
@@ -182,7 +190,7 @@ TEST_F(WALTest, EntryCrcComputation) {
         .lsn = 1,
         .txid = 1,
         .headerCRC = 0,
-        .payloadLength = static_cast<uint32_t>(embedding.size() * sizeof(float)),
+        .payloadLength = 0,
         .dimension = 2,
         .padding = 0,
         .embedding = embedding,
@@ -195,7 +203,7 @@ TEST_F(WALTest, EntryCrcComputation) {
         .lsn = 1,
         .txid = 1,
         .headerCRC = 0,
-        .payloadLength = static_cast<uint32_t>(embedding.size() * sizeof(float)),
+        .payloadLength = 0,
         .dimension = 2,
         .padding = 0,
         .embedding = embedding,
@@ -208,7 +216,7 @@ TEST_F(WALTest, EntryCrcComputation) {
         .lsn = 1,
         .txid = 1,
         .headerCRC = 0,
-        .payloadLength = static_cast<uint32_t>(embedding.size() * sizeof(float)),
+        .payloadLength = 0,
         .dimension = 2,
         .padding = 0,
         .embedding = embedding,
@@ -243,17 +251,18 @@ TEST_F(WALTest, EntryWriteReadRoundTrip) {
         .lsn = 123,
         .txid = 456,
         .headerCRC = 0,
-        .payloadLength = static_cast<uint32_t>(embedding.size() * sizeof(float)),
+        .payloadLength = 0,
         .dimension = 4,
         .padding = 0,
         .embedding = embedding,
         .payloadCRC = 0
     };
     original.setVectorID("123");
+    original.payloadLength = original.computePayloadLength();
     original.headerCRC = original.computeHeaderCrc();
     original.payloadCRC = original.computePayloadCrc();
 
-    std::string path = GetTestPath("entry_roundtrip.bin");
+    auto path = GetTestPath("entry_roundtrip.bin");
     {
         std::ofstream file(path, std::ios::binary);
         BinaryWriter writer(std::make_unique<std::ofstream>(std::move(file)));
@@ -277,7 +286,6 @@ TEST_F(WALTest, EntryWriteReadRoundTrip) {
     }
 }
 
-
 TEST_F(WALTest, EntryReadWithCrcMismatch) {
     std::vector<float> embedding = {1.0f, 2.0f};
     wal::Entry original{
@@ -286,17 +294,18 @@ TEST_F(WALTest, EntryReadWithCrcMismatch) {
         .lsn = 1,
         .txid = 1,
         .headerCRC = 0,
-        .payloadLength = static_cast<uint32_t>(embedding.size() * sizeof(float)),
+        .payloadLength = 0,
         .dimension = 2,
         .padding = 0,
         .embedding = embedding,
         .payloadCRC = 0
     };
     original.setVectorID("1");
+    original.payloadLength = original.computePayloadLength();
     original.headerCRC = original.computeHeaderCrc();
     original.payloadCRC = original.computePayloadCrc();
 
-    std::string path = GetTestPath("entry_crc_mismatch.bin");
+    auto path = GetTestPath("entry_crc_mismatch.bin");
     {
         std::ofstream file(path, std::ios::binary);
         BinaryWriter writer(std::make_unique<std::ofstream>(std::move(file)));
@@ -319,7 +328,7 @@ TEST_F(WALTest, EntryReadWithCrcMismatch) {
 }
 
 TEST_F(WALTest, EntryDimensionMismatch) {
-    std::string path = GetTestPath("entry_dimension_mismatch.bin");
+    auto path = GetTestPath("entry_dimension_mismatch.bin");
     {
         std::ofstream file(path, std::ios::binary);
         BinaryWriter writer(std::make_unique<std::ofstream>(std::move(file)));
@@ -348,457 +357,6 @@ TEST_F(WALTest, EntryDimensionMismatch) {
     }
 }
 
-TEST_F(WALTest, WALLogCreatesDirectory) {
-    wal::WAL wal(testDir);
-    wal::Entry entry = CreateTestEntry();
-
-    std::string walPath = GetTestPath("test_wal_dir");
-    std::string dbPath = (std::filesystem::path(walPath) / "db.wal").string();
-    auto result = wal.log(entry, walPath, true);
-    EXPECT_TRUE(result.ok());
-    EXPECT_TRUE(std::filesystem::exists(walPath));
-    EXPECT_TRUE(std::filesystem::is_directory(walPath));
-    EXPECT_TRUE(std::filesystem::exists(dbPath));
-}
-
-TEST_F(WALTest, WALLogResetMode) {
-    wal::WAL wal(testDir);
-    wal::Entry entry1 = CreateTestEntry(wal::OperationType::INSERT, "1", 3, 1, 1, {1.0f, 2.0f, 3.0f});
-    wal::Entry entry2 = CreateTestEntry(wal::OperationType::DELETE, "2", 3, 2, 1, {4.0f, 5.0f, 6.0f});
-
-    std::string walPath = GetTestPath("reset_test");
-
-    EXPECT_TRUE(wal.log(entry1, walPath, true).ok());
-    EXPECT_TRUE(wal.log(entry2, walPath, true).ok());
-
-    auto result = wal.readAll(walPath);
-    EXPECT_TRUE(result.ok());
-    auto& entries = result.value();
-    EXPECT_EQ(entries.size(), 1);
-    EXPECT_EQ((entries[0]).getVectorID(), "2");
-}
-
-TEST_F(WALTest, WALLogAppendMode) {
-    wal::WAL wal(testDir);
-    wal::Entry entry1 = CreateTestEntry(wal::OperationType::INSERT, "1", 3, 1, 1, {1.0f, 2.0f, 3.0f});
-    wal::Entry entry2 = CreateTestEntry(wal::OperationType::UPDATE, "2", 3, 2, 2, {4.0f, 5.0f, 6.0f});
-
-    std::string walPath = GetTestPath("append_test");
-
-    EXPECT_TRUE(wal.log(entry1, walPath, true).ok());
-    EXPECT_TRUE(wal.log(entry2, walPath, false).ok());
-
-    auto result = wal.readAll(walPath);
-    if (!result.ok()) {
-        std::cerr << "readAll failed: " << result.error().message() << "\n";
-    }
-    EXPECT_TRUE(result.ok());
-    auto& entries = result.value();
-    EXPECT_EQ(entries.size(), 2);
-    EXPECT_EQ((entries[0]).getVectorID(), "1");
-    EXPECT_EQ((entries[1]).getVectorID(), "2");
-}
-
-TEST_F(WALTest, WALReadFirstEntry) {
-    wal::WAL wal(testDir);
-    wal::Entry entry = CreateTestEntry(wal::OperationType::INSERT, "42", 2, 5, 10, {3.14f, 2.71f});
-
-    std::string walPath = GetTestPath("read_entry_test");
-    wal.log(entry, walPath, true);
-
-    auto readResult = wal.readAll(walPath);
-    EXPECT_TRUE(readResult.ok());
-
-    auto& entries = readResult.value();
-    EXPECT_EQ(entries.size(), 1);
-    const wal::Entry& readEntry = entries[0];
-    EXPECT_EQ(readEntry.type, entry.type);
-    EXPECT_EQ(readEntry.getVectorID(), entry.getVectorID());
-    EXPECT_EQ(readEntry.dimension, entry.dimension);
-    EXPECT_EQ(readEntry.embedding, entry.embedding);
-}
-
-TEST_F(WALTest, WALReadAllEntries) {
-    wal::WAL wal(testDir);
-    std::vector<wal::Entry> testEntries;
-    testEntries.push_back(CreateTestEntry(wal::OperationType::INSERT, "1", 2, 1, 1, {1.0f, 2.0f}));
-    testEntries.push_back(CreateTestEntry(wal::OperationType::UPDATE, "2", 2, 2, 2, {3.0f, 4.0f}));
-    testEntries.push_back(CreateTestEntry(wal::OperationType::DELETE, "3", 2, 3, 3, {5.0f, 6.0f}));
-
-    std::string walPath = GetTestPath("read_all_test");
-
-    wal.log(testEntries[0], walPath, true);
-    wal.log(testEntries[1], walPath, false);
-    wal.log(testEntries[2], walPath, false);
-
-    auto readResult = wal.readAll(walPath);
-    EXPECT_TRUE(readResult.ok());
-
-    auto& entries = readResult.value();
-    EXPECT_EQ(entries.size(), 3);
-
-    for (size_t i = 0; i < entries.size(); ++i) {
-        EXPECT_EQ(entries[i].getVectorID(), testEntries[i].getVectorID());
-        EXPECT_EQ(entries[i].type, testEntries[i].type);
-        EXPECT_EQ(entries[i].embedding, testEntries[i].embedding);
-    }
-}
-
-TEST_F(WALTest, WALReadAllEmptyFile) {
-    wal::WAL wal(testDir);
-
-    std::string walPath = GetTestPath("empty_read_test");
-    std::filesystem::create_directories(walPath);
-
-    std::string dbPath = (std::filesystem::path(walPath) / "db.wal").string();
-    std::ofstream file(dbPath, std::ios::binary);
-    file.close();
-
-    auto readResult = wal.readAll(walPath);
-    EXPECT_FALSE(readResult.ok());
-    EXPECT_EQ(readResult.error().code(), arrow::utils::StatusCode::kEof);
-}
-
-TEST_F(WALTest, WALReadAllCorruptedEntry) {
-    wal::WAL wal(testDir);
-    wal::Entry goodEntry = CreateTestEntry();
-
-    std::string walPath = GetTestPath("corrupted_test");
-    wal.log(goodEntry, walPath, true);
-
-    std::string dbPath = (std::filesystem::path(walPath) / "db.wal").string();
-    std::ofstream file(dbPath, std::ios::binary | std::ios::trunc);
-    file.write("corrupted", 9);
-    file.close();
-
-    auto readResult = wal.readAll(walPath);
-    EXPECT_FALSE(readResult.ok());
-}
-
-TEST_F(WALTest, WALLogCreatesParentDirectories) {
-    wal::WAL wal(testDir);
-    wal::Entry entry = CreateTestEntry();
-
-    std::string walPath = GetTestPath("nonexistent_dir/subdir");
-
-    EXPECT_TRUE(wal.log(entry, walPath, true).ok());
-
-    EXPECT_TRUE(std::filesystem::exists(walPath));
-    EXPECT_TRUE(std::filesystem::is_directory(walPath));
-
-    std::string dbPath = (std::filesystem::path(walPath) / "db.wal").string();
-    EXPECT_TRUE(std::filesystem::exists(dbPath));
-}
-
-TEST_F(WALTest, WALReadFromNonexistentDirectory) {
-    wal::WAL wal(testDir);
-
-    auto readResult = wal.readAll("/nonexistent/directory");
-    EXPECT_FALSE(readResult.ok());
-}
-
-TEST_F(WALTest, WALRoundTripMultipleEntries) {
-    wal::WAL wal(testDir);
-    const size_t numEntries = 10;
-    std::vector<wal::Entry> originalEntries;
-
-    for (size_t i = 0; i < numEntries; ++i) {
-        originalEntries.push_back(CreateTestEntry(wal::OperationType::INSERT, std::to_string(i),
-            3,
-            static_cast<uint64_t>(i + 1),
-            static_cast<uint64_t>(i + 1)
-        ));
-    }
-
-    std::string walPath = GetTestPath("roundtrip_test");
-
-    wal.log(originalEntries[0], walPath, true);
-    for (size_t i = 1; i < numEntries; ++i) {
-        wal.log(originalEntries[i], walPath, false);
-    }
-
-    auto readResult = wal.readAll(walPath);
-    EXPECT_TRUE(readResult.ok());
-
-    auto& readEntries = readResult.value();
-    EXPECT_EQ(readEntries.size(), numEntries);
-
-    for (size_t i = 0; i < numEntries; ++i) {
-        EXPECT_EQ(readEntries[i].getVectorID(), originalEntries[i].getVectorID());
-        EXPECT_EQ(readEntries[i].type, originalEntries[i].type);
-        EXPECT_EQ(readEntries[i].dimension, originalEntries[i].dimension);
-        EXPECT_EQ(readEntries[i].embedding, originalEntries[i].embedding);
-    }
-}
-
-TEST_F(WALTest, WALEmptyEmbedding) {
-    wal::WAL wal(testDir);
-    wal::Entry entry{
-        .type = wal::OperationType::DELETE,
-        .version = 1,
-        .lsn = 1,
-        .txid = 1,
-        .headerCRC = 0,
-        .payloadLength = 0,
-        .dimension = 0,
-        .padding = 0,
-        .embedding = {},
-        .payloadCRC = 0
-    };
-    entry.setVectorID("1");
-
-    std::string walPath = GetTestPath("empty_embedding_test");
-    EXPECT_TRUE(wal.log(entry, walPath, true).ok());
-
-    auto readResult = wal.readAll(walPath);
-    EXPECT_TRUE(readResult.ok());
-
-    auto& entries = readResult.value();
-    const wal::Entry& readEntry = entries[0];
-    EXPECT_EQ(readEntry.dimension, 0);
-    EXPECT_TRUE(readEntry.embedding.empty());
-}
-
-TEST_F(WALTest, WALReadHeaderSuccess) {
-    wal::WAL wal(testDir);
-    wal::Entry entry = CreateTestEntry();
-
-    std::string walPath = GetTestPath("read_header_test");
-    auto res = wal.log(entry, walPath, true);
-    if (!res.ok()) {
-        std::cout << "log failed: " << res.message() << "\n";
-    }
-
-    auto headerResult = wal.loadHeader(walPath);
-    if (!headerResult.ok()) {
-        std::cout << "loadHeader failed: " << headerResult.error().message() << "\n";
-    }
-    EXPECT_TRUE(headerResult.ok());
-
-    const wal::Header& header = headerResult.value();
-    EXPECT_EQ(header.magic, wal::kWalMagic);
-    EXPECT_EQ(header.version, 1);
-}
-
-TEST_F(WALTest, WALReadHeaderEmptyFile) {
-    wal::WAL wal(testDir);
-
-    std::string walPath = GetTestPath("read_header_empty");
-    std::filesystem::create_directories(walPath);
-
-    std::string dbPath = (std::filesystem::path(walPath) / "db.wal").string();
-    std::ofstream file(dbPath, std::ios::binary);
-    file.close();
-
-    auto headerResult = wal.loadHeader(walPath);
-    EXPECT_FALSE(headerResult.ok());
-    EXPECT_EQ(headerResult.error().code(), arrow::utils::StatusCode::kBadHeader);
-}
-
-TEST_F(WALTest, WALReadHeaderNonexistentDirectory) {
-    wal::WAL wal(testDir);
-
-    auto headerResult = wal.loadHeader("/nonexistent/directory");
-    EXPECT_FALSE(headerResult.ok());
-}
-
-TEST_F(WALTest, WALReadHeaderNonexistentFile) {
-    wal::WAL wal(testDir);
-
-    std::string walPath = GetTestPath("read_header_nonexistent_file");
-    std::filesystem::create_directories(walPath);
-
-    auto headerResult = wal.loadHeader(walPath);
-    EXPECT_FALSE(headerResult.ok());
-}
-
-TEST_F(WALTest, WALReadHeaderCorruptedMagic) {
-    wal::WAL wal(testDir);
-    wal::Entry entry = CreateTestEntry();
-
-    std::string walPath = GetTestPath("read_header_corrupted_magic");
-    wal.log(entry, walPath, true);
-
-    std::string dbPath = (std::filesystem::path(walPath) / "db.wal").string();
-    std::fstream file(dbPath, std::ios::in | std::ios::out | std::ios::binary);
-    file.seekp(0, std::ios::beg);
-    uint32_t badMagic = 0xDEADBEEF;
-    file.write(reinterpret_cast<char*>(&badMagic), sizeof(badMagic));
-    file.close();
-
-    auto headerResult = wal.loadHeader(walPath);
-    EXPECT_FALSE(headerResult.ok());
-}
-
-TEST_F(WALTest, WALReadHeaderTooSmall) {
-    wal::WAL wal(testDir);
-
-    std::string walPath = GetTestPath("read_header_too_small");
-    std::filesystem::create_directories(walPath);
-
-    std::string dbPath = (std::filesystem::path(walPath) / "db.wal").string();
-    std::ofstream file(dbPath, std::ios::binary);
-    uint32_t dummy = 0x12345678;
-    file.write(reinterpret_cast<char*>(&dummy), sizeof(dummy));
-    file.close();
-
-    auto headerResult = wal.loadHeader(walPath);
-    EXPECT_FALSE(headerResult.ok());
-}
-
-TEST_F(WALTest, WALReadHeaderRoundTrip) {
-    wal::WAL wal(testDir);
-    wal::Entry entry = CreateTestEntry();
-
-    std::string walPath = GetTestPath("read_header_roundtrip");
-
-    wal::Header header{.magic = wal::kWalMagic, .version = 1, .flags = 0, .creationTime = 1234567890, .headerCrc32 = 0, .padding = 0};
-    header.headerCrc32 = header.computeCrc32();  // Compute CRC before writing
-    wal.writeHeader(header, walPath);
-    wal.log(entry, walPath, true);
-
-    auto headerResult = wal.loadHeader(walPath);
-    if (!headerResult.ok()) {
-        std::cout << "loadHeader failed: " << headerResult.error().message() << "\n";
-    }
-    EXPECT_TRUE(headerResult.ok());
-
-    const wal::Header& res = headerResult.value();
-    EXPECT_EQ(res.magic, wal::kWalMagic);
-    EXPECT_EQ(res.version, 1);
-}
-
-TEST_F(WALTest, DISABLED_WALReadHeaderWithStream) {
-    wal::WAL wal(testDir);
-    wal::Entry entry = CreateTestEntry();
-
-    std::string walPath = GetTestPath("read_header_stream");
-    wal.log(entry, walPath, true);
-
-    std::string dbPath = (std::filesystem::path(walPath) / "db.wal").string();
-    std::ifstream file(dbPath, std::ios::binary);
-
-    auto headerResult = wal::LoadHeader(walPath);
-    EXPECT_TRUE(headerResult.ok());
-
-    const wal::Header& header = headerResult.value();
-    EXPECT_EQ(header.magic, wal::kWalMagic);
-    EXPECT_EQ(header.version, 1);
-}
-
-TEST_F(WALTest, WALReadEmptyFile) {
-    wal::WAL wal(testDir);
-
-    std::string walPath = GetTestPath("read_empty_file");
-    std::filesystem::create_directories(walPath);
-
-    std::string dbPath = (std::filesystem::path(walPath) / "db.wal").string();
-    std::ofstream file(dbPath, std::ios::binary);
-    file.close();
-
-    auto readResult = wal.readAll(walPath);
-    EXPECT_FALSE(readResult.ok());
-}
-
-TEST_F(WALTest, WALReadFileTooSmallForHeader) {
-    wal::WAL wal(testDir);
-
-    std::string walPath = GetTestPath("read_too_small");
-    std::filesystem::create_directories(walPath);
-
-    std::string dbPath = (std::filesystem::path(walPath) / "db.wal").string();
-    std::ofstream file(dbPath, std::ios::binary);
-    file.write("abc", 3);
-    file.close();
-
-    auto readResult = wal.readAll(walPath);
-    EXPECT_FALSE(readResult.ok());
-
-    auto readAllResult = wal.readAll(walPath);
-    EXPECT_FALSE(readAllResult.ok());
-}
-
-TEST_F(WALTest, WALPrintMethod) {
-    wal::WAL wal(testDir);
-    wal::Entry entry1 = CreateTestEntry(wal::OperationType::INSERT, "1", 2, 1, 1, {1.0f, 2.0f});
-    wal::Entry entry2 = CreateTestEntry(wal::OperationType::UPDATE, "2", 2, 2, 2, {3.0f, 4.0f});
-
-    wal.log(entry1, "", true);
-    wal.log(entry2, "", false);
-
-    EXPECT_NO_THROW(wal.print());
-}
-
-TEST_F(WALTest, WALTransactionTypes) {
-    wal::WAL wal(testDir);
-
-    wal::Entry commitEntry{
-        .type = wal::OperationType::COMMIT_TXN,
-        .version = 1,
-        .lsn = 1,
-        .txid = 0,
-        .headerCRC = 0,
-        .payloadLength = 0,
-        .dimension = 0,
-        .padding = 0,
-        .embedding = {},
-        .payloadCRC = 0
-    };
-    commitEntry.setVectorID("");
-    wal::Entry abortEntry{
-        .type = wal::OperationType::ABORT_TXN,
-        .version = 1,
-        .lsn = 2,
-        .txid = 1,
-        .headerCRC = 0,
-        .payloadLength = 0,
-        .dimension = 0,
-        .padding = 0,
-        .embedding = {},
-        .payloadCRC = 0
-    };
-    abortEntry.setVectorID("");
-
-    std::string walPath = GetTestPath("txn_types_test");
-
-    EXPECT_TRUE(wal.log(commitEntry, walPath, true).ok());
-    EXPECT_TRUE(wal.log(abortEntry, walPath, false).ok());
-
-    auto result = wal.readAll(walPath);
-    EXPECT_TRUE(result.ok());
-    auto& entries = result.value();
-    EXPECT_EQ(entries.size(), 2);
-    EXPECT_EQ(entries[0].type, wal::OperationType::COMMIT_TXN);
-    EXPECT_EQ(entries[1].type, wal::OperationType::ABORT_TXN);
-}
-
-TEST_F(WALTest, WALBatchInsert) {
-    wal::WAL wal(testDir);
-    wal::Entry batchEntry{
-        .type = wal::OperationType::BATCH_INSERT,
-        .version = 1,
-        .lsn = 1,
-        .txid = 1,
-        .headerCRC = 0,
-        .payloadLength = static_cast<uint32_t>(4 * sizeof(float)),
-        .dimension = 4,
-        .padding = 0,
-        .embedding = {1.0f, 2.0f, 3.0f, 4.0f},
-        .payloadCRC = 0
-    };
-    batchEntry.setVectorID("0");
-
-    std::string walPath = GetTestPath("batch_insert_test");
-    EXPECT_TRUE(wal.log(batchEntry, walPath, true).ok());
-
-    auto result = wal.readAll(walPath);
-    EXPECT_TRUE(result.ok());
-    auto& entries = result.value();
-    const wal::Entry& entry = entries[0];
-    EXPECT_EQ(entry.type, wal::OperationType::BATCH_INSERT);
-    EXPECT_EQ(entry.dimension, 4);
-}
-
 TEST_F(WALTest, EntryWithAllFields) {
     wal::Entry entry{
         .type = wal::OperationType::INSERT,
@@ -806,13 +364,16 @@ TEST_F(WALTest, EntryWithAllFields) {
         .lsn = 100,
         .txid = 200,
         .headerCRC = 0,
-        .payloadLength = static_cast<uint32_t>(5 * sizeof(float)),
+        .payloadLength = 0,
         .dimension = 5,
         .padding = 0,
         .embedding = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f},
         .payloadCRC = 0
     };
     entry.setVectorID("42");
+    entry.payloadLength = entry.computePayloadLength();
+    entry.headerCRC = entry.computeHeaderCrc();
+    entry.payloadCRC = entry.computePayloadCrc();
 
     EXPECT_EQ(entry.type, wal::OperationType::INSERT);
     EXPECT_EQ(entry.lsn, 100);
@@ -822,7 +383,7 @@ TEST_F(WALTest, EntryWithAllFields) {
     EXPECT_EQ(entry.version, 1);
     EXPECT_EQ(entry.padding, 0);
 
-    std::string path = GetTestPath("entry_all_fields.bin");
+    auto path = GetTestPath("entry_all_fields.bin");
     {
         std::ofstream file(path, std::ios::binary);
         BinaryWriter writer(std::make_unique<std::ofstream>(std::move(file)));
@@ -854,9 +415,9 @@ TEST_F(WALTest, HeaderComputeCrc) {
     header.padding = 0;
 
     header.headerCrc32 = header.computeCrc32();
-    EXPECT_NE(header.headerCrc32, 0);
+    EXPECT_NE(header.headerCrc32, 0u);
 
-    std::string path = GetTestPath("header_compute_crc.bin");
+    auto path = GetTestPath("header_compute_crc.bin");
     {
         std::ofstream file(path, std::ios::binary);
         BinaryWriter writer(std::make_unique<std::ofstream>(std::move(file)));
@@ -867,189 +428,628 @@ TEST_F(WALTest, HeaderComputeCrc) {
         std::ifstream file(path, std::ios::binary);
         BinaryReader reader(std::make_unique<std::ifstream>(std::move(file)));
         auto resHeaderResult = wal::ParseHeader(reader);
-        if (!resHeaderResult.ok()) {
-            std::cerr << resHeaderResult.error().message() << "\n";
-        }
+        ASSERT_TRUE(resHeaderResult.ok()) << resHeaderResult.status().message();
         EXPECT_EQ(resHeaderResult.value().headerCrc32, header.headerCrc32);
     }
 }
 
-TEST_F(WALTest, BatchLogMultipleEntries) {
-  wal::WAL wal(testDir);
+TEST_F(WALTest, EntryRejectsLongVectorID) {
+    wal::Entry entry;
+    // Create a string that's exactly 128 bytes (1 byte too long)
+    std::string longId(128, 'x');
+    auto status = entry.setVectorID(longId);
+    EXPECT_FALSE(status.ok());
+    EXPECT_EQ(status.code(), arrow::utils::StatusCode::kInvalidArgument);
 
-  // Create entries to batch log
-  std::vector<wal::Entry> entries;
-  for (uint64_t i = 0; i < 10; ++i) {
+    // Create a string that's 127 bytes (should be accepted)
+    std::string maxId(127, 'y');
+    status = entry.setVectorID(maxId);
+    EXPECT_TRUE(status.ok());
+    EXPECT_EQ(entry.getVectorID(), maxId);
+
+    // Empty string should also work
+    status = entry.setVectorID("");
+    EXPECT_TRUE(status.ok());
+    EXPECT_EQ(entry.getVectorID(), "");
+}
+
+// =========================================================================
+// WAL object tests (ported to WAL::open + log/readAll/truncate/recover API)
+// =========================================================================
+
+TEST_F(WALTest, WALLogCreatesDirectory) {
+    auto walPath = GetTestPath("test_wal_dir");
+    auto walResult = wal::WAL::open(walPath);
+    ASSERT_TRUE(walResult.ok()) << walResult.status().message();
+    auto wal = std::move(walResult.value());
+
+    wal::Entry entry = CreateTestEntry();
+    auto result = wal.log(entry);
+    EXPECT_TRUE(result.ok());
+    EXPECT_TRUE(std::filesystem::exists(walPath));
+    EXPECT_TRUE(std::filesystem::is_directory(walPath));
+    EXPECT_TRUE(std::filesystem::exists(walPath / "db.wal"));
+}
+
+TEST_F(WALTest, WALTruncateResetsEntries) {
+    auto walPath = GetTestPath("truncate_test");
+    auto walResult = wal::WAL::open(walPath);
+    ASSERT_TRUE(walResult.ok());
+    auto wal = std::move(walResult.value());
+
+    wal::Entry entry1 = CreateTestEntry(wal::OperationType::INSERT, "1", 3, 1, 1, {1.0f, 2.0f, 3.0f});
+    wal::Entry entry2 = CreateTestEntry(wal::OperationType::DELETE, "2", 3, 2, 1, {4.0f, 5.0f, 6.0f});
+
+    EXPECT_TRUE(wal.log(entry1).ok());
+
+    // Truncate and write only entry2
+    EXPECT_TRUE(wal.truncate().ok());
+    EXPECT_TRUE(wal.log(entry2).ok());
+
+    auto result = wal.readAll();
+    ASSERT_TRUE(result.ok()) << result.status().message();
+    auto& contents = result.value();
+    EXPECT_EQ(contents.entries.size(), 1u);
+    EXPECT_EQ(contents.entries[0].getVectorID(), "2");
+}
+
+TEST_F(WALTest, WALLogAppendMode) {
+    auto walPath = GetTestPath("append_test");
+    auto walResult = wal::WAL::open(walPath);
+    ASSERT_TRUE(walResult.ok());
+    auto wal = std::move(walResult.value());
+
+    wal::Entry entry1 = CreateTestEntry(wal::OperationType::INSERT, "1", 3, 1, 1, {1.0f, 2.0f, 3.0f});
+    wal::Entry entry2 = CreateTestEntry(wal::OperationType::UPDATE, "2", 3, 2, 2, {4.0f, 5.0f, 6.0f});
+
+    EXPECT_TRUE(wal.log(entry1).ok());
+    EXPECT_TRUE(wal.log(entry2).ok());
+
+    auto result = wal.readAll();
+    ASSERT_TRUE(result.ok()) << result.status().message();
+    auto& contents = result.value();
+    EXPECT_EQ(contents.entries.size(), 2u);
+    EXPECT_EQ(contents.entries[0].getVectorID(), "1");
+    EXPECT_EQ(contents.entries[1].getVectorID(), "2");
+}
+
+TEST_F(WALTest, WALReadFirstEntry) {
+    auto walPath = GetTestPath("read_entry_test");
+    auto walResult = wal::WAL::open(walPath);
+    ASSERT_TRUE(walResult.ok());
+    auto wal = std::move(walResult.value());
+
+    wal::Entry entry = CreateTestEntry(wal::OperationType::INSERT, "42", 2, 5, 10, {3.14f, 2.71f});
+    EXPECT_TRUE(wal.log(entry).ok());
+
+    auto readResult = wal.readAll();
+    ASSERT_TRUE(readResult.ok());
+
+    auto& entries = readResult.value().entries;
+    EXPECT_EQ(entries.size(), 1u);
+    const wal::Entry& readEntry = entries[0];
+    EXPECT_EQ(readEntry.type, entry.type);
+    EXPECT_EQ(readEntry.getVectorID(), entry.getVectorID());
+    EXPECT_EQ(readEntry.dimension, entry.dimension);
+    EXPECT_EQ(readEntry.embedding, entry.embedding);
+}
+
+TEST_F(WALTest, WALReadAllEntries) {
+    auto walPath = GetTestPath("read_all_test");
+    auto walResult = wal::WAL::open(walPath);
+    ASSERT_TRUE(walResult.ok());
+    auto wal = std::move(walResult.value());
+
+    std::vector<wal::Entry> testEntries;
+    testEntries.push_back(CreateTestEntry(wal::OperationType::INSERT, "1", 2, 1, 1, {1.0f, 2.0f}));
+    testEntries.push_back(CreateTestEntry(wal::OperationType::UPDATE, "2", 2, 2, 2, {3.0f, 4.0f}));
+    testEntries.push_back(CreateTestEntry(wal::OperationType::DELETE, "3", 2, 3, 3, {5.0f, 6.0f}));
+
+    for (auto& e : testEntries) {
+        EXPECT_TRUE(wal.log(e).ok());
+    }
+
+    auto readResult = wal.readAll();
+    ASSERT_TRUE(readResult.ok());
+
+    auto& entries = readResult.value().entries;
+    EXPECT_EQ(entries.size(), 3u);
+
+    for (size_t i = 0; i < entries.size(); ++i) {
+        EXPECT_EQ(entries[i].getVectorID(), testEntries[i].getVectorID());
+        EXPECT_EQ(entries[i].type, testEntries[i].type);
+        EXPECT_EQ(entries[i].embedding, testEntries[i].embedding);
+    }
+}
+
+TEST_F(WALTest, WALReadAllEmptyFile) {
+    auto walPath = GetTestPath("empty_read_test");
+    std::filesystem::create_directories(walPath);
+
+    auto dbPath = walPath / "db.wal";
+    std::ofstream file(dbPath, std::ios::binary);
+    file.close();
+
+    // Use the free function ReadAll directly on the empty file
+    auto readResult = wal::ReadAll(dbPath);
+    EXPECT_FALSE(readResult.ok());
+    EXPECT_EQ(readResult.status().code(), arrow::utils::StatusCode::kEof);
+}
+
+TEST_F(WALTest, WALReadAllCorruptedEntry) {
+    auto walPath = GetTestPath("corrupted_test");
+    auto walResult = wal::WAL::open(walPath);
+    ASSERT_TRUE(walResult.ok());
+    auto wal = std::move(walResult.value());
+
+    wal::Entry goodEntry = CreateTestEntry();
+    EXPECT_TRUE(wal.log(goodEntry).ok());
+
+    // Overwrite the WAL file with garbage
+    auto dbPath = walPath / "db.wal";
+    std::ofstream file(dbPath, std::ios::binary | std::ios::trunc);
+    file.write("corrupted", 9);
+    file.close();
+
+    auto readResult = wal.readAll();
+    EXPECT_FALSE(readResult.ok());
+}
+
+TEST_F(WALTest, WALLogCreatesParentDirectories) {
+    auto walPath = GetTestPath("nonexistent_dir/subdir");
+
+    auto walResult = wal::WAL::open(walPath);
+    ASSERT_TRUE(walResult.ok()) << walResult.status().message();
+    auto wal = std::move(walResult.value());
+
+    wal::Entry entry = CreateTestEntry();
+    EXPECT_TRUE(wal.log(entry).ok());
+
+    EXPECT_TRUE(std::filesystem::exists(walPath));
+    EXPECT_TRUE(std::filesystem::is_directory(walPath));
+    EXPECT_TRUE(std::filesystem::exists(walPath / "db.wal"));
+}
+
+TEST_F(WALTest, WALReadFromNonexistentDirectory) {
+    // Use the free function ReadAll on a nonexistent path
+    auto readResult = wal::ReadAll("/nonexistent/directory/db.wal");
+    EXPECT_FALSE(readResult.ok());
+}
+
+TEST_F(WALTest, WALRoundTripMultipleEntries) {
+    auto walPath = GetTestPath("roundtrip_test");
+    auto walResult = wal::WAL::open(walPath);
+    ASSERT_TRUE(walResult.ok());
+    auto wal = std::move(walResult.value());
+
+    const size_t numEntries = 10;
+    std::vector<wal::Entry> originalEntries;
+
+    for (size_t i = 0; i < numEntries; ++i) {
+        originalEntries.push_back(CreateTestEntry(wal::OperationType::INSERT, std::to_string(i),
+            3,
+            static_cast<uint64_t>(i + 1),
+            static_cast<uint64_t>(i + 1)
+        ));
+    }
+
+    for (auto& e : originalEntries) {
+        EXPECT_TRUE(wal.log(e).ok());
+    }
+
+    auto readResult = wal.readAll();
+    ASSERT_TRUE(readResult.ok());
+
+    auto& readEntries = readResult.value().entries;
+    EXPECT_EQ(readEntries.size(), numEntries);
+
+    for (size_t i = 0; i < numEntries; ++i) {
+        EXPECT_EQ(readEntries[i].getVectorID(), originalEntries[i].getVectorID());
+        EXPECT_EQ(readEntries[i].type, originalEntries[i].type);
+        EXPECT_EQ(readEntries[i].dimension, originalEntries[i].dimension);
+        EXPECT_EQ(readEntries[i].embedding, originalEntries[i].embedding);
+    }
+}
+
+TEST_F(WALTest, WALEmptyEmbedding) {
+    auto walPath = GetTestPath("empty_embedding_test");
+    auto walResult = wal::WAL::open(walPath);
+    ASSERT_TRUE(walResult.ok());
+    auto wal = std::move(walResult.value());
+
     wal::Entry entry{
-      .type = wal::OperationType::INSERT,
-      .version = 1,
-      .lsn = i + 1,
-      .txid = i + 1,
-      .headerCRC = 0,
-      .payloadLength = 0,
-      .dimension = 128,
-      .padding = 0,
-      .embedding = std::vector<float>(128, 1.0f),
-      .payloadCRC = 0
+        .type = wal::OperationType::DELETE,
+        .version = 1,
+        .lsn = 1,
+        .txid = 1,
+        .headerCRC = 0,
+        .payloadLength = 0,
+        .dimension = 0,
+        .padding = 0,
+        .embedding = {},
+        .payloadCRC = 0
     };
-    entry.setVectorID(std::to_string(i));
+    entry.setVectorID("1");
+    entry.payloadLength = entry.computePayloadLength();
     entry.headerCRC = entry.computeHeaderCrc();
     entry.payloadCRC = entry.computePayloadCrc();
-    entry.payloadLength = entry.computePayloadLength();
-    entries.push_back(entry);
-  }
 
-  // Batch log all entries (this initializes the WAL with header automatically)
-  wal::Status status = wal.logBatch(entries);
-  ASSERT_TRUE(status.ok()) << status.message();
+    EXPECT_TRUE(wal.log(entry).ok());
 
-  // Read all entries back
-  auto readResult = wal.readAll();
-  ASSERT_TRUE(readResult.ok()) << readResult.error().message();
-  const auto& readEntries = readResult.value();
-  EXPECT_EQ(readEntries.size(), 10);
+    auto readResult = wal.readAll();
+    ASSERT_TRUE(readResult.ok());
 
-  // Verify all entries were read correctly
-  for (size_t i = 0; i < readEntries.size(); ++i) {
-    EXPECT_EQ(readEntries[i].getVectorID(), std::to_string(i));
-    EXPECT_EQ(readEntries[i].lsn, i + 1);
-    EXPECT_EQ(readEntries[i].txid, i + 1);
-    EXPECT_EQ(readEntries[i].dimension, 128);
-  }
+    auto& entries = readResult.value().entries;
+    ASSERT_EQ(entries.size(), 1u);
+    EXPECT_EQ(entries[0].dimension, 0u);
+    EXPECT_TRUE(entries[0].embedding.empty());
 }
 
-TEST_F(WALTest, EntryRejectsLongVectorID) {
-  wal::Entry entry;
-  // Create a string that's exactly 128 bytes (1 byte too long)
-  std::string longId(128, 'x');
-  auto status = entry.setVectorID(longId);
-  EXPECT_FALSE(status.ok());
-  EXPECT_EQ(status.code(), arrow::utils::StatusCode::kInvalidArgument);
+TEST_F(WALTest, WALLoadHeaderSuccess) {
+    auto walPath = GetTestPath("read_header_test");
+    auto walResult = wal::WAL::open(walPath);
+    ASSERT_TRUE(walResult.ok());
+    auto wal = std::move(walResult.value());
 
-  // Create a string that's 127 bytes (should be accepted)
-  std::string maxId(127, 'y');
-  status = entry.setVectorID(maxId);
-  EXPECT_TRUE(status.ok());
-  EXPECT_EQ(entry.getVectorID(), maxId);
+    wal::Entry entry = CreateTestEntry();
+    auto res = wal.log(entry);
+    ASSERT_TRUE(res.ok()) << res.message();
 
-  // Empty string should also work
-  status = entry.setVectorID("");
-  EXPECT_TRUE(status.ok());
-  EXPECT_EQ(entry.getVectorID(), "");
+    auto headerResult = wal::LoadHeader(walPath);
+    ASSERT_TRUE(headerResult.ok()) << headerResult.status().message();
+
+    const wal::Header& header = headerResult.value();
+    EXPECT_EQ(header.magic, wal::kWalMagic);
+    EXPECT_EQ(header.version, 1);
 }
+
+TEST_F(WALTest, WALLoadHeaderEmptyFile) {
+    auto walPath = GetTestPath("read_header_empty");
+    std::filesystem::create_directories(walPath);
+
+    auto dbPath = walPath / "db.wal";
+    std::ofstream file(dbPath, std::ios::binary);
+    file.close();
+
+    auto headerResult = wal::LoadHeader(walPath);
+    EXPECT_FALSE(headerResult.ok());
+    EXPECT_EQ(headerResult.status().code(), arrow::utils::StatusCode::kBadHeader);
+}
+
+TEST_F(WALTest, WALLoadHeaderNonexistentDirectory) {
+    auto headerResult = wal::LoadHeader("/nonexistent/directory");
+    EXPECT_FALSE(headerResult.ok());
+}
+
+TEST_F(WALTest, WALLoadHeaderNonexistentFile) {
+    auto walPath = GetTestPath("read_header_nonexistent_file");
+    std::filesystem::create_directories(walPath);
+
+    auto headerResult = wal::LoadHeader(walPath);
+    EXPECT_FALSE(headerResult.ok());
+}
+
+TEST_F(WALTest, WALLoadHeaderCorruptedMagic) {
+    auto walPath = GetTestPath("read_header_corrupted_magic");
+    auto walResult = wal::WAL::open(walPath);
+    ASSERT_TRUE(walResult.ok());
+    {
+        auto wal = std::move(walResult.value());
+        wal::Entry entry = CreateTestEntry();
+        EXPECT_TRUE(wal.log(entry).ok());
+    }
+
+    auto dbPath = walPath / "db.wal";
+    std::fstream file(dbPath, std::ios::in | std::ios::out | std::ios::binary);
+    file.seekp(0, std::ios::beg);
+    uint32_t badMagic = 0xDEADBEEF;
+    file.write(reinterpret_cast<char*>(&badMagic), sizeof(badMagic));
+    file.close();
+
+    auto headerResult = wal::LoadHeader(walPath);
+    EXPECT_FALSE(headerResult.ok());
+}
+
+TEST_F(WALTest, WALLoadHeaderTooSmall) {
+    auto walPath = GetTestPath("read_header_too_small");
+    std::filesystem::create_directories(walPath);
+
+    auto dbPath = walPath / "db.wal";
+    std::ofstream file(dbPath, std::ios::binary);
+    uint32_t dummy = 0x12345678;
+    file.write(reinterpret_cast<char*>(&dummy), sizeof(dummy));
+    file.close();
+
+    auto headerResult = wal::LoadHeader(walPath);
+    EXPECT_FALSE(headerResult.ok());
+}
+
+TEST_F(WALTest, WALReadEmptyFile) {
+    auto walPath = GetTestPath("read_empty_file");
+    std::filesystem::create_directories(walPath);
+
+    auto dbPath = walPath / "db.wal";
+    std::ofstream file(dbPath, std::ios::binary);
+    file.close();
+
+    auto readResult = wal::ReadAll(dbPath);
+    EXPECT_FALSE(readResult.ok());
+}
+
+TEST_F(WALTest, WALReadFileTooSmallForHeader) {
+    auto walPath = GetTestPath("read_too_small");
+    std::filesystem::create_directories(walPath);
+
+    auto dbPath = walPath / "db.wal";
+    std::ofstream file(dbPath, std::ios::binary);
+    file.write("abc", 3);
+    file.close();
+
+    auto readResult = wal::ReadAll(dbPath);
+    EXPECT_FALSE(readResult.ok());
+}
+
+TEST_F(WALTest, WALPrintMethod) {
+    auto walPath = GetTestPath("print_test");
+    auto walResult = wal::WAL::open(walPath);
+    ASSERT_TRUE(walResult.ok());
+    auto wal = std::move(walResult.value());
+
+    wal::Entry entry1 = CreateTestEntry(wal::OperationType::INSERT, "1", 2, 1, 1, {1.0f, 2.0f});
+    wal::Entry entry2 = CreateTestEntry(wal::OperationType::UPDATE, "2", 2, 2, 2, {3.0f, 4.0f});
+
+    EXPECT_TRUE(wal.log(entry1).ok());
+    EXPECT_TRUE(wal.log(entry2).ok());
+
+    EXPECT_NO_THROW(wal.print());
+}
+
+TEST_F(WALTest, WALTransactionTypes) {
+    auto walPath = GetTestPath("txn_types_test");
+    auto walResult = wal::WAL::open(walPath);
+    ASSERT_TRUE(walResult.ok());
+    auto wal = std::move(walResult.value());
+
+    wal::Entry commitEntry{
+        .type = wal::OperationType::COMMIT_TXN,
+        .version = 1,
+        .lsn = 1,
+        .txid = 0,
+        .headerCRC = 0,
+        .payloadLength = 0,
+        .dimension = 0,
+        .padding = 0,
+        .embedding = {},
+        .payloadCRC = 0
+    };
+    commitEntry.setVectorID("");
+    commitEntry.payloadLength = commitEntry.computePayloadLength();
+    commitEntry.headerCRC = commitEntry.computeHeaderCrc();
+    commitEntry.payloadCRC = commitEntry.computePayloadCrc();
+
+    wal::Entry abortEntry{
+        .type = wal::OperationType::ABORT_TXN,
+        .version = 1,
+        .lsn = 2,
+        .txid = 1,
+        .headerCRC = 0,
+        .payloadLength = 0,
+        .dimension = 0,
+        .padding = 0,
+        .embedding = {},
+        .payloadCRC = 0
+    };
+    abortEntry.setVectorID("");
+    abortEntry.payloadLength = abortEntry.computePayloadLength();
+    abortEntry.headerCRC = abortEntry.computeHeaderCrc();
+    abortEntry.payloadCRC = abortEntry.computePayloadCrc();
+
+    EXPECT_TRUE(wal.log(commitEntry).ok());
+    EXPECT_TRUE(wal.log(abortEntry).ok());
+
+    auto result = wal.readAll();
+    ASSERT_TRUE(result.ok());
+    auto& entries = result.value().entries;
+    EXPECT_EQ(entries.size(), 2u);
+    EXPECT_EQ(entries[0].type, wal::OperationType::COMMIT_TXN);
+    EXPECT_EQ(entries[1].type, wal::OperationType::ABORT_TXN);
+}
+
+TEST_F(WALTest, WALBatchInsert) {
+    auto walPath = GetTestPath("batch_insert_test");
+    auto walResult = wal::WAL::open(walPath);
+    ASSERT_TRUE(walResult.ok());
+    auto wal = std::move(walResult.value());
+
+    wal::Entry batchEntry{
+        .type = wal::OperationType::BATCH_INSERT,
+        .version = 1,
+        .lsn = 1,
+        .txid = 1,
+        .headerCRC = 0,
+        .payloadLength = 0,
+        .dimension = 4,
+        .padding = 0,
+        .embedding = {1.0f, 2.0f, 3.0f, 4.0f},
+        .payloadCRC = 0
+    };
+    batchEntry.setVectorID("0");
+    batchEntry.payloadLength = batchEntry.computePayloadLength();
+    batchEntry.headerCRC = batchEntry.computeHeaderCrc();
+    batchEntry.payloadCRC = batchEntry.computePayloadCrc();
+
+    EXPECT_TRUE(wal.log(batchEntry).ok());
+
+    auto result = wal.readAll();
+    ASSERT_TRUE(result.ok());
+    auto& entries = result.value().entries;
+    ASSERT_EQ(entries.size(), 1u);
+    EXPECT_EQ(entries[0].type, wal::OperationType::BATCH_INSERT);
+    EXPECT_EQ(entries[0].dimension, 4u);
+}
+
+TEST_F(WALTest, BatchLogMultipleEntries) {
+    auto walPath = GetTestPath("batch_log_test");
+    auto walResult = wal::WAL::open(walPath);
+    ASSERT_TRUE(walResult.ok());
+    auto wal = std::move(walResult.value());
+
+    std::vector<wal::Entry> entries;
+    for (uint64_t i = 0; i < 10; ++i) {
+        wal::Entry entry{
+            .type = wal::OperationType::INSERT,
+            .version = 1,
+            .lsn = i + 1,
+            .txid = i + 1,
+            .headerCRC = 0,
+            .payloadLength = 0,
+            .dimension = 128,
+            .padding = 0,
+            .embedding = std::vector<float>(128, 1.0f),
+            .payloadCRC = 0
+        };
+        entry.setVectorID(std::to_string(i));
+        entry.payloadLength = entry.computePayloadLength();
+        entry.headerCRC = entry.computeHeaderCrc();
+        entry.payloadCRC = entry.computePayloadCrc();
+        entries.push_back(entry);
+    }
+
+    wal::Status status = wal.logBatch(entries);
+    ASSERT_TRUE(status.ok()) << status.message();
+
+    auto readResult = wal.readAll();
+    ASSERT_TRUE(readResult.ok()) << readResult.status().message();
+    const auto& readEntries = readResult.value().entries;
+    EXPECT_EQ(readEntries.size(), 10u);
+
+    for (size_t i = 0; i < readEntries.size(); ++i) {
+        EXPECT_EQ(readEntries[i].getVectorID(), std::to_string(i));
+        EXPECT_EQ(readEntries[i].lsn, i + 1);
+        EXPECT_EQ(readEntries[i].txid, i + 1);
+        EXPECT_EQ(readEntries[i].dimension, 128u);
+    }
+}
+
+// =========================================================================
+// Recovery tests
+// =========================================================================
 
 TEST_F(WALTest, CrashRecovery) {
-  std::string path = GetTestPath("crash_recovery");
-  std::filesystem::create_directories(path);
-  
-  wal::WAL wal(path);
-  
-  // Write 3 valid entries (first one with reset=true to write header)
-  wal::Entry entry1 = CreateTestEntry(wal::OperationType::INSERT, "1", 3, 1, 1);
-  wal::Entry entry2 = CreateTestEntry(wal::OperationType::INSERT, "2", 3, 2, 2);
-  wal::Entry entry3 = CreateTestEntry(wal::OperationType::INSERT, "3", 3, 3, 3);
-  
-  EXPECT_TRUE(wal.log(entry1, path, true).ok());
-  EXPECT_TRUE(wal.log(entry2, path, false).ok());
-  EXPECT_TRUE(wal.log(entry3, path, false).ok());
+    auto walPath = GetTestPath("crash_recovery");
 
-  // Verify all 3 entries exist
-  auto entriesBefore = wal.readAll();
-  if (!entriesBefore.ok()) {
-    std::cout << "readAll error: " << entriesBefore.error().message() << "\n";
-  }
-  ASSERT_TRUE(entriesBefore.ok());
-  EXPECT_EQ(entriesBefore.value().size(), 3);
-  
-  // Simulate crash by corrupting/truncating file mid-entry
-  // Append partial data (half an entry)
-  std::ofstream corruptFile(path + "/db.wal", std::ios::binary | std::ios::app);
-  uint8_t partialData[10] = {0x03, 0x00, 0x01, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00};
-  corruptFile.write(reinterpret_cast<char*>(partialData), 10);
-  corruptFile.close();
-  
-  // Call recover
-  wal::Status recoverStatus = wal.recover();
-  EXPECT_TRUE(recoverStatus.ok());
-  
-  // Verify only 3 valid entries remain
-  auto entriesAfter = wal.readAll();
-  ASSERT_TRUE(entriesAfter.ok());
-  EXPECT_EQ(entriesAfter.value().size(), 3);
+    {
+        auto walResult = wal::WAL::open(walPath);
+        ASSERT_TRUE(walResult.ok());
+        auto wal = std::move(walResult.value());
+
+        wal::Entry entry1 = CreateTestEntry(wal::OperationType::INSERT, "1", 3, 1, 1);
+        wal::Entry entry2 = CreateTestEntry(wal::OperationType::INSERT, "2", 3, 2, 2);
+        wal::Entry entry3 = CreateTestEntry(wal::OperationType::INSERT, "3", 3, 3, 3);
+
+        EXPECT_TRUE(wal.log(entry1).ok());
+        EXPECT_TRUE(wal.log(entry2).ok());
+        EXPECT_TRUE(wal.log(entry3).ok());
+
+        // Verify all 3 entries exist
+        auto entriesBefore = wal.readAll();
+        ASSERT_TRUE(entriesBefore.ok()) << entriesBefore.status().message();
+        EXPECT_EQ(entriesBefore.value().entries.size(), 3u);
+    }
+
+    // Simulate crash by appending partial/corrupt data
+    auto dbPath = walPath / "db.wal";
+    {
+        std::ofstream corruptFile(dbPath, std::ios::binary | std::ios::app);
+        uint8_t partialData[10] = {0x03, 0x00, 0x01, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00};
+        corruptFile.write(reinterpret_cast<char*>(partialData), 10);
+    }
+
+    // Reopen and recover
+    auto walResult = wal::WAL::open(walPath);
+    ASSERT_TRUE(walResult.ok());
+    auto wal = std::move(walResult.value());
+
+    auto recoverResult = wal.recover();
+    ASSERT_TRUE(recoverResult.ok()) << recoverResult.status().message();
+    EXPECT_TRUE(recoverResult.value().truncationPerformed);
+
+    // Verify only 3 valid entries remain
+    auto entriesAfter = wal.readAll();
+    ASSERT_TRUE(entriesAfter.ok());
+    EXPECT_EQ(entriesAfter.value().entries.size(), 3u);
 }
 
 TEST_F(WALTest, PartialWriteRecovery) {
-  std::string path = GetTestPath("partial_write");
-  std::filesystem::create_directories(path);
+    auto walPath = GetTestPath("partial_write");
 
-  // Create WAL and write entry
-  {
-    wal::WAL wal(path);
-    wal::Entry entry = CreateTestEntry(wal::OperationType::INSERT, "1", 3, 1, 1);
-    EXPECT_TRUE(wal.log(entry, path, true).ok());
-  }
-  
-  // Append partial entry (header only, no payload)
-  {
-    std::ofstream ofs(path + "/db.wal", std::ios::binary | std::ios::app);
-    uint8_t partialHeader[25] = {};  // Entry header without payload
-    partialHeader[0] = 0x03;  // INSERT type
-    partialHeader[1] = 0x00;
-    ofs.write(reinterpret_cast<char*>(partialHeader), 25);
-  }
-  
-  // Recover should truncate the partial entry
-  wal::WAL wal(path);
-  wal::Status recoverStatus = wal.recover();
-  EXPECT_TRUE(recoverStatus.ok());
-  
-  auto entries = wal.readAll();
-  ASSERT_TRUE(entries.ok());
-  EXPECT_EQ(entries.value().size(), 1);
-  EXPECT_EQ(entries.value()[0].getVectorID(), "1");
+    // Create WAL and write one entry
+    {
+        auto walResult = wal::WAL::open(walPath);
+        ASSERT_TRUE(walResult.ok());
+        auto wal = std::move(walResult.value());
+
+        wal::Entry entry = CreateTestEntry(wal::OperationType::INSERT, "1", 3, 1, 1);
+        EXPECT_TRUE(wal.log(entry).ok());
+    }
+
+    // Append partial entry (header only, no payload)
+    {
+        auto dbPath = walPath / "db.wal";
+        std::ofstream ofs(dbPath, std::ios::binary | std::ios::app);
+        uint8_t partialHeader[25] = {};
+        partialHeader[0] = 0x03;  // INSERT type
+        partialHeader[1] = 0x00;
+        ofs.write(reinterpret_cast<char*>(partialHeader), 25);
+    }
+
+    // Reopen and recover
+    auto walResult = wal::WAL::open(walPath);
+    ASSERT_TRUE(walResult.ok());
+    auto wal = std::move(walResult.value());
+
+    auto recoverResult = wal.recover();
+    ASSERT_TRUE(recoverResult.ok());
+
+    auto entries = wal.readAll();
+    ASSERT_TRUE(entries.ok());
+    EXPECT_EQ(entries.value().entries.size(), 1u);
+    EXPECT_EQ(entries.value().entries[0].getVectorID(), "1");
 }
 
 TEST_F(WALTest, IdempotentReplay) {
-  std::string path = GetTestPath("idempotent_replay");
-  std::filesystem::create_directories(path);
+    auto colPath = GetTestPath("idempotent_replay");
 
-  // Create WAL and write entries first
-  {
-    wal::WAL wal(path);
-    wal::Entry entry1 = CreateTestEntry(wal::OperationType::INSERT, "1", 3, 1, 1, {1.0f, 2.0f, 3.0f});
-    wal::Entry entry2 = CreateTestEntry(wal::OperationType::INSERT, "2", 3, 2, 2, {4.0f, 5.0f, 6.0f});
-    wal::Entry entry3 = CreateTestEntry(wal::OperationType::DELETE, "1", 3, 3, 3);
+    // Create collection, insert data, and save (this also creates the WAL)
+    {
+        CollectionConfig config{.name = "test", .dimensions = 3, .space = Space::Cosine};
+        Collection col(config, colPath);
 
-    EXPECT_TRUE(wal.log(entry1, path, true).ok());
-    EXPECT_TRUE(wal.log(entry2, path, false).ok());
-    EXPECT_TRUE(wal.log(entry3, path, false).ok());
-  }
+        EXPECT_TRUE(col.insert("1", {1.0f, 2.0f, 3.0f}).ok());
+        EXPECT_TRUE(col.insert("2", {4.0f, 5.0f, 6.0f}).ok());
 
-  // Create collection and insert the same data
-  CollectionConfig config{.name = "test", .dimensions = 3, .space = Space::Cosine};
-  Collection col(config, path);
+        // Save creates checkpoint
+        EXPECT_TRUE(col.save(colPath.string()).ok());
+    }
+    // Collection destructor releases file lock
 
-  EXPECT_TRUE(col.insert("1", {1.0f, 2.0f, 3.0f}).ok());
-  EXPECT_TRUE(col.insert("2", {4.0f, 5.0f, 6.0f}).ok());
-  
-  // Save creates checkpoint
-  EXPECT_TRUE(col.save(path).ok());
-  
-  // Simulate dirty shutdown by setting cleanShutdown to false
-  std::ifstream metaFile(path + "/meta.json");
-  nlohmann::json meta;
-  metaFile >> meta;
-  metaFile.close();
-  meta["recovery"]["cleanShutdown"] = false;
-  std::ofstream outMetaFile(path + "/meta.json");
-  outMetaFile << meta.dump(2);
-  outMetaFile.close();
-  
-  // Load collection - should recover from WAL
-  auto loadResult = Collection::load(path);
-  ASSERT_TRUE(loadResult.ok());
-  Collection col2 = std::move(loadResult.value());
-  
-  // Verify collection has correct size (should not have duplicates)
-  EXPECT_EQ(col2.size(), 2);
+    // Simulate dirty shutdown by setting cleanShutdown to false
+    auto metaPath = colPath / "meta.json";
+    {
+        std::ifstream metaFile(metaPath);
+        nlohmann::json meta;
+        metaFile >> meta;
+        metaFile.close();
+        meta["recovery"]["cleanShutdown"] = false;
+        std::ofstream outMetaFile(metaPath);
+        outMetaFile << meta.dump(2);
+    }
+
+    // Load collection - should recover from WAL
+    auto loadResult = Collection::load(colPath.string());
+    ASSERT_TRUE(loadResult.ok()) << loadResult.status().message();
+    Collection col2 = std::move(loadResult.value());
+
+    // Verify collection has correct size (should not have duplicates)
+    EXPECT_EQ(col2.size(), 2u);
 }

@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -119,6 +121,45 @@ Status WriteEntry(const Entry& e, BinaryWriter& w);
 Status IsEntryValid(const Entry& e) noexcept;
 
 //////////////////////////////////////////////////////////////////////////
+// Entry Builder - Factory for correctly-populated WAL entries
+//////////////////////////////////////////////////////////////////////////
+
+/// Builds WAL entries with correct CRCs and manages LSN/TXID counters.
+class EntryBuilder {
+ public:
+  explicit EntryBuilder(uint64_t startLsn = 1, uint64_t startTxid = 1)
+      : lsn_(startLsn), txid_(startTxid) {}
+
+  /// Build an INSERT entry.
+  Result<Entry> buildInsert(const std::string& vectorID,
+                            uint32_t dimension,
+                            const std::vector<float>& embedding);
+
+  /// Build a DELETE entry (no embedding needed).
+  Result<Entry> buildDelete(const std::string& vectorID);
+
+  /// Current LSN (for persistence metadata).
+  uint64_t currentLsn() const noexcept { return lsn_; }
+  uint64_t currentTxid() const noexcept { return txid_; }
+
+  /// Restore counters (e.g., after loading from disk).
+  void restoreCounters(uint64_t lsn, uint64_t txid) {
+    lsn_ = lsn;
+    txid_ = txid;
+  }
+
+  /// Roll back N entries worth of counter increments (for batch failure).
+  void rollbackCounters(uint64_t count) {
+    if (lsn_ >= count) lsn_ -= count;
+    if (txid_ >= count) txid_ -= count;
+  }
+
+ private:
+  uint64_t lsn_;
+  uint64_t txid_;
+};
+
+//////////////////////////////////////////////////////////////////////////
 // Filesystem helpers (domain namespace, not utils)
 //////////////////////////////////////////////////////////////////////////
 
@@ -132,39 +173,78 @@ Result<Header> LoadHeader(const std::filesystem::path& dir,
                           const std::string& filename = "db.wal");
 
 //////////////////////////////////////////////////////////////////////////
+// ReadAll free function - one-shot WAL reading
+//////////////////////////////////////////////////////////////////////////
+
+/// Contents of a WAL file (header + entries).
+struct WALContents {
+  Header header;
+  std::vector<Entry> entries;
+};
+
+/// Read entire WAL file in one shot. Opens reader, parses header, parses entries, closes.
+Result<WALContents> ReadAll(const std::filesystem::path& walFilePath);
+
+//////////////////////////////////////////////////////////////////////////
+// Recovery report
+//////////////////////////////////////////////////////////////////////////
+
+/// Information about what happened during WAL recovery.
+struct RecoveryReport {
+  uint64_t validEntries = 0;
+  uint64_t discardedBytes = 0;
+  bool truncationPerformed = false;
+};
+
+//////////////////////////////////////////////////////////////////////////
+// Forward declaration for WALWriter
+//////////////////////////////////////////////////////////////////////////
+
+class WALWriter;
+
+//////////////////////////////////////////////////////////////////////////
 // WAL orchestration object (coordinator, no parsing internals)
 //////////////////////////////////////////////////////////////////////////
 
 class WAL {
  public:
-  explicit WAL(std::filesystem::path dbPath);
+  /// Factory method to open a WAL. Binds to its path at construction.
+  static Result<WAL> open(std::filesystem::path walDir);
+
+  // Destructor must be defined in .cpp where WALWriter is fully defined
   ~WAL();
 
-  [[nodiscard]] Result<Header> loadHeader(const std::string& pathParam = "") const;
-  [[nodiscard]] Status writeHeader(const Header& header,
-                                   const std::string& pathParam = "") const;
+  // Move-only type (unique_ptr member)
+  WAL(WAL&&) noexcept;
+  WAL& operator=(WAL&&) noexcept;
+  WAL(const WAL&) = delete;
+  WAL& operator=(const WAL&) = delete;
 
-  [[nodiscard]] Result<std::vector<Entry>> readAll(const std::string& pathParam = "") const;
-  [[nodiscard]] Result<Entry> readNext(BinaryReader& r) const;
-  [[nodiscard]] Status log(const Entry& entry, const std::string& pathParam = "",
-                           bool reset = false);
+  /// Log a single entry (delegates to writer_.append()).
+  [[nodiscard]] Status log(const Entry& entry);
 
-  /// Log multiple entries in batch with single fsync.
+  /// Log multiple entries in batch with single fsync (delegates to writer_.appendBatch()).
   /// More efficient than calling log() multiple times (N-1 fewer fsyncs).
-  [[nodiscard]] Status logBatch(const std::vector<Entry>& entries,
-                                const std::string& pathParam = "");
+  [[nodiscard]] Status logBatch(std::span<const Entry> entries);
+
+  /// Read all entries from the WAL (delegates to ReadAll()).
+  [[nodiscard]] Result<WALContents> readAll() const;
+
+  /// Truncate WAL to header-only state (checkpoint operation).
+  /// Closes writer, truncates file, reopens writer.
+  [[nodiscard]] Status truncate();
+
+  /// Recover from corruption by truncating to last valid entry.
+  /// Returns report of what was recovered/discarded.
+  [[nodiscard]] Result<RecoveryReport> recover();
 
   void print() const;
 
-  /// Truncate WAL to header-only state (checkpoint operation).
-  /// Creates a fresh WAL with only a header, discarding all entries.
-  [[nodiscard]] Status truncate();
-  [[nodiscard]] Status recover();
-
-  Status ValidateOrCreatePath(const std::filesystem::path& basePath, const std::string& pathParam, std::filesystem::path& outPath) const;
-
  private:
-  std::filesystem::path walPath_;
+  explicit WAL(std::filesystem::path walDir, std::unique_ptr<WALWriter>&& writer);
+
+  std::filesystem::path walDir_;
+  std::unique_ptr<WALWriter> writer_;
 };
 
 }  // namespace wal

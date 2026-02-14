@@ -1,5 +1,6 @@
 // Copyright 2025 ArrowDB
 #include "internal/wal.h"
+#include "internal/wal_writer.h"
 #include "internal/crc32.h"
 #include "internal/filesync.h"
 #include <cstdio>
@@ -18,7 +19,7 @@ static constexpr size_t FILECRC32SIZE = sizeof(uint32_t);
 
 // Header helpers
 uint32_t Header::computeCrc32() const noexcept {
-  return utils::crc32((const void *)this, 16);
+  return utils::crc32((const void *)this, offsetof(Header, headerCrc32));
 }
 
 utils::json Header::toJson() const {
@@ -42,6 +43,11 @@ void Header::print() const noexcept {
 
 uint32_t Entry::computePayloadCrc() const noexcept {
   uint32_t crc = 0;
+  // Include entry metadata fields for complete integrity coverage
+  crc = utils::crc32(&type, sizeof(type), crc);
+  crc = utils::crc32(&version, sizeof(version), crc);
+  crc = utils::crc32(&lsn, sizeof(lsn), crc);
+  crc = utils::crc32(&txid, sizeof(txid), crc);
   // Include dimension
   crc = utils::crc32(&dimension, sizeof(dimension), crc);
   // Include vectorID (all 128 bytes)
@@ -100,6 +106,74 @@ utils::json Entry::toJson() const {
 void Entry::print() const noexcept { std::cout << toJson().dump(2) << "\n"; }
 
 //////////////////////////////////////////////////////////////////////////
+// Entry Builder
+//////////////////////////////////////////////////////////////////////////
+
+Result<Entry> EntryBuilder::buildInsert(const std::string& vectorID,
+                                         uint32_t dimension,
+                                         const std::vector<float>& embedding) {
+  if (vectorID.size() > kMaxVectorIDSize) {
+    return Status(StatusCode::kInvalidArgument,
+                  "Vector ID exceeds maximum length of " +
+                      std::to_string(kMaxVectorIDSize) + " bytes");
+  }
+
+  Entry entry{
+      .type = OperationType::INSERT,
+      .version = 1,
+      .lsn = lsn_++,
+      .txid = txid_++,
+      .headerCRC = 0,
+      .payloadLength = 0,
+      .dimension = dimension,
+      .padding = 0,
+      .embedding = embedding,
+      .payloadCRC = 0};
+
+  auto status = entry.setVectorID(vectorID);
+  if (!status.ok()) {
+    return status;
+  }
+
+  entry.headerCRC = entry.computeHeaderCrc();
+  entry.payloadCRC = entry.computePayloadCrc();
+  entry.payloadLength = entry.computePayloadLength();
+
+  return entry;
+}
+
+Result<Entry> EntryBuilder::buildDelete(const std::string& vectorID) {
+  if (vectorID.size() > kMaxVectorIDSize) {
+    return Status(StatusCode::kInvalidArgument,
+                  "Vector ID exceeds maximum length of " +
+                      std::to_string(kMaxVectorIDSize) + " bytes");
+  }
+
+  Entry entry{
+      .type = OperationType::DELETE,
+      .version = 1,
+      .lsn = lsn_++,
+      .txid = txid_++,
+      .headerCRC = 0,
+      .payloadLength = 0,
+      .dimension = 0,
+      .padding = 0,
+      .embedding = {},
+      .payloadCRC = 0};
+
+  auto status = entry.setVectorID(vectorID);
+  if (!status.ok()) {
+    return status;
+  }
+
+  entry.headerCRC = entry.computeHeaderCrc();
+  entry.payloadCRC = entry.computePayloadCrc();
+  entry.payloadLength = entry.computePayloadLength();
+
+  return entry;
+}
+
+//////////////////////////////////////////////////////////////////////////
 // Protocol: Header
 //////////////////////////////////////////////////////////////////////////
 
@@ -154,7 +228,7 @@ Status IsHeaderValid(const Header &h) noexcept {
   if (h.magic != kWalMagic) {
     return Status(StatusCode::kBadHeader, "Invalid WAL magic number");
   }
-  uint32_t computedCrc = utils::crc32((const void *)&h, 16);
+  uint32_t computedCrc = utils::crc32((const void *)&h, offsetof(Header, headerCrc32));
   if (computedCrc != h.headerCrc32) {
     return Status(StatusCode::kChecksumMismatch, "Header CRC32 mismatch");
   }
@@ -328,7 +402,7 @@ Result<Header> LoadHeader(const std::filesystem::path &dir,
   Result<BinaryReader> res = OpenBinaryReader(dir, filename);
 
   if (!res.ok()) {
-    return res.error();
+    return res.status();
   }
 
   BinaryReader &r = res.value();
@@ -342,289 +416,201 @@ Result<Header> LoadHeader(const std::filesystem::path &dir,
   return ParseHeader(r);
 }
 
-//////////////////////////////////////////////////////////////////////////
-// WAL orchestration
-//////////////////////////////////////////////////////////////////////////
-
-WAL::WAL(std::filesystem::path dbPath) : walPath_(std::move(dbPath)) {
+Result<WALContents> ReadAll(const std::filesystem::path& walFilePath) {
   namespace fs = std::filesystem;
-  if (!fs::exists(walPath_)) {
-    fs::create_directories(walPath_);
-    std::cout << "Created WAL directory at " << fs::absolute(walPath_) << "\n";
-  }
-}
 
-WAL::~WAL() = default;
-
-Result<Header> WAL::loadHeader(const std::string& pathParam) const {
-  namespace fs = std::filesystem;
-  fs::path path = walPath_;
-
-  if (!pathParam.empty()) {
-    path = fs::path(pathParam);
+  if (!fs::exists(walFilePath)) {
+    return Status(StatusCode::kNotFound, "WAL file does not exist");
   }
 
-  return LoadHeader(path);
-}
-
-Status WAL::writeHeader(const Header &header, const std::string& pathParam) const {
-  namespace fs = std::filesystem;
-  fs::path path = walPath_;
-
-  if (!pathParam.empty()) {
-    path = fs::path(pathParam);
-  }
-
-  const std::string filename = "db.wal";
-  Result<BinaryWriter> res = OpenBinaryWriter(path, filename, false);
-  if (!res.ok()) {
-    return res.error();
-  }
-  BinaryWriter &w = res.value();
-
-  Status writeStatus = WriteHeader(header, w);
-  if (!writeStatus.ok()) {
-    return writeStatus;
-  }
-
-  w.flush();
-  if (!utils::syncFile((path / filename).string())) {
-    return Status(StatusCode::kIoError, "fsync failed during header write");
-  }
-
-  return OkStatus();
-}
-
-Status WAL::log(const Entry &entry, const std::string& pathParam, bool reset) {
-  namespace fs = std::filesystem;
-  fs::path path = walPath_;
-  const std::string filename = "db.wal";
-
-  if (!pathParam.empty()) {
-    path = pathParam;
-  }
-
-  Result<BinaryWriter> res = OpenBinaryWriter(path, filename, !reset);
-  if (!res.ok()) {
-    return res.error();
-  }
-  BinaryWriter &w = res.value();
-
-  if (reset) {
-    Header header;
-    header.magic = kWalMagic;
-    header.creationTime = time(nullptr);
-    header.headerCrc32 = header.computeCrc32();
-    header.padding = 2;
-    Status writeStatus = WriteHeader(header, w);
-    if (!writeStatus.ok()) {
-      return Status(StatusCode::kIoError, "Failed to write WAL header to file");
-    }
-  }
-
-  Status writeStatus = WriteEntry(entry, w);
-  if (!writeStatus.ok()) {
-    return Status(StatusCode::kIoError, "Failed to write WAL entry to file");
-  }
-
-  w.flush();
-  if (!utils::syncFile((path / filename).string())) {
-    return Status(StatusCode::kIoError, "fsync failed during log write");
-  }
-  return OkStatus();
-}
-
-Status WAL::logBatch(const std::vector<Entry>& entries, const std::string& pathParam) {
-  namespace fs = std::filesystem;
-  fs::path path = walPath_;
-  const std::string filename = "db.wal";
-
-  if (!pathParam.empty()) {
-    path = pathParam;
-  }
-
-  // Check if we need to write a header (file doesn't exist yet)
-  fs::path filePath = path / filename;
-  bool needsHeader = !fs::exists(filePath);
-
-  Result<BinaryWriter> res = OpenBinaryWriter(path, filename, !needsHeader);
-  if (!res.ok()) {
-    return res.error();
-  }
-  BinaryWriter& w = res.value();
-
-  // Write header if needed (first time creating the file)
-  if (needsHeader) {
-    Header header;
-    header.magic = kWalMagic;
-    header.creationTime = time(nullptr);
-    header.headerCrc32 = header.computeCrc32();
-    header.padding = 0;
-    Status headerStatus = WriteHeader(header, w);
-    if (!headerStatus.ok()) {
-      return headerStatus;
-    }
-  }
-
-  // Write all entries
-  for (const Entry& entry : entries) {
-    Status writeStatus = WriteEntry(entry, w);
-    if (!writeStatus.ok()) {
-      return writeStatus;
-    }
-  }
-
-  // Single flush and fsync for entire batch
-  w.flush();
-  if (!utils::syncFile((path / filename).string())) {
-    return Status(StatusCode::kIoError, "fsync failed during batch log write");
-  }
-  return OkStatus();
-}
-
-Result<Entry> WAL::readNext(BinaryReader &r) const { return ParseEntry(r); }
-
-Result<std::vector<Entry>> WAL::readAll(const std::string& pathParam) const {
-  namespace fs = std::filesystem;
-  fs::path path = walPath_;
-
-  if (!pathParam.empty()) {
-    path = fs::path(pathParam);
-  }
-  const std::string filename = "db.wal";
-
-  Result<BinaryReader> res = OpenBinaryReader(path, filename);
-  if (!res.ok()) {
-    return res.error();
-  }
-  BinaryReader &r = res.value();
-
-  fs::path filePath = path / filename;
-  // Use filesystem for reliable file size detection
-  auto fileSize = fs::file_size(filePath);
-
+  auto fileSize = fs::file_size(walFilePath);
   if (fileSize == 0) {
     return Status(StatusCode::kEof, "File is empty");
   }
 
-  r.seek(0, std::ios::end);
-  const std::streampos fileEnd = r.tell();
-  r.seek(0, std::ios::beg);
-
-  Result<Header> resHeader = ParseHeader(r);
-  if (!resHeader.ok()) {
-    return resHeader.error();
+  auto ifs = std::make_unique<std::ifstream>(walFilePath, std::ios::in | std::ios::binary);
+  if (!ifs->is_open()) {
+    return Status(StatusCode::kIoError, "Failed to open WAL file");
   }
 
-  if (!r.good()) {
+  BinaryReader reader(std::move(ifs));
+
+  // Parse header
+  Result<Header> headerResult = ParseHeader(reader);
+  if (!headerResult.ok()) {
+    return headerResult.status();
+  }
+
+  // Parse entries
+  reader.seek(0, std::ios::end);
+  const std::streampos fileEnd = reader.tell();
+  reader.seek(kHeaderWireSize, std::ios::beg);
+
+  if (!reader.good()) {
     return Status(StatusCode::kEof, "Failed to seek past header");
   }
+
   std::vector<Entry> entries;
-  // Parse entries - fail fast on corruption rather than trying to recover
-  while (r.good() && r.tell() < fileEnd) {
-    auto curPos = r.tell();
-    Result<Entry> resEntry = ParseEntry(r);
-    if (!resEntry.ok()) {
+  while (reader.good() && reader.tell() < fileEnd) {
+    auto curPos = reader.tell();
+    Result<Entry> entryResult = ParseEntry(reader);
+    if (!entryResult.ok()) {
       // If no progress was made, we're stuck - return what we have
-      if (r.tell() == curPos) {
+      if (reader.tell() == curPos) {
         break;
       }
       // Otherwise, corruption detected - fail fast
-      return resEntry.error();
+      return entryResult.status();
     }
-    entries.push_back(std::move(resEntry.value()));
+    entries.push_back(std::move(entryResult.value()));
   }
-  return entries;
+
+  return WALContents{.header = std::move(headerResult.value()), .entries = std::move(entries)};
+}
+
+//////////////////////////////////////////////////////////////////////////
+// WAL orchestration
+//////////////////////////////////////////////////////////////////////////
+
+WAL::WAL(std::filesystem::path walDir, std::unique_ptr<WALWriter>&& writer)
+    : walDir_(std::move(walDir)), writer_(std::move(writer)) {}
+
+WAL::~WAL() = default;
+
+WAL::WAL(WAL&&) noexcept = default;
+WAL& WAL::operator=(WAL&&) noexcept = default;
+
+Result<WAL> WAL::open(std::filesystem::path walDir) {
+  namespace fs = std::filesystem;
+
+  // Create directory if needed
+  if (!fs::exists(walDir)) {
+    try {
+      fs::create_directories(walDir);
+    } catch (const std::exception& e) {
+      return Status(StatusCode::kIoError,
+                    "Failed to create WAL directory: " + std::string(e.what()));
+    }
+  }
+
+  // Open the WAL file
+  fs::path walFilePath = walDir / "db.wal";
+  Result<WALWriter> writerResult = WALWriter::open(walFilePath);
+  if (!writerResult.ok()) {
+    return writerResult.status();
+  }
+
+  auto writer = std::make_unique<WALWriter>(std::move(writerResult.value()));
+  return WAL(std::move(walDir), std::move(writer));
+}
+
+Status WAL::log(const Entry& entry) {
+  if (!writer_) {
+    return Status(StatusCode::kIoError, "WAL writer is not open");
+  }
+  return writer_->append(entry);
+}
+
+Status WAL::logBatch(std::span<const Entry> entries) {
+  if (!writer_) {
+    return Status(StatusCode::kIoError, "WAL writer is not open");
+  }
+  return writer_->appendBatch(entries);
+}
+
+Result<WALContents> WAL::readAll() const {
+  namespace fs = std::filesystem;
+  fs::path walFilePath = walDir_ / "db.wal";
+  return ReadAll(walFilePath);
 }
 
 void WAL::print() const {
-  Result<Header> h = loadHeader();
-
-  if (!h.ok()) {
-    std::cerr << h.error().message() << "\n";
+  Result<WALContents> contents = readAll();
+  if (!contents.ok()) {
+    std::cerr << contents.status().message() << "\n";
     return;
   }
 
-  auto entries = readAll();
-  if (!entries.ok()) {
-    std::cerr << entries.error().message() << "\n";
-    return;
-  }
+  contents.value().header.print();
 
-  h.value().print();
-
-  const auto &entryVec = entries.value();
-  std::cout << "WAL Entries (" << entryVec.size() << "):\n";
-  for (const auto &entry : entryVec) {
+  const auto& entries = contents.value().entries;
+  std::cout << "WAL Entries (" << entries.size() << "):\n";
+  for (const auto& entry : entries) {
     entry.print();
   }
 }
 
 Status WAL::truncate() {
-  const std::string filename = "db.wal";
+  namespace fs = std::filesystem;
 
-  // Open in truncate mode (not append)
-  Result<BinaryWriter> res = OpenBinaryWriter(walPath_, filename, false);
-  if (!res.ok()) {
-    return res.error();
-  }
-  BinaryWriter &w = res.value();
+  // Close writer
+  writer_.reset();
 
-  // Write fresh header
-  Header header;
-  header.magic = kWalMagic;
-  header.creationTime = time(nullptr);
-  header.headerCrc32 = header.computeCrc32();
-  header.padding = 0;
+  // Truncate file and reopen
+  fs::path walFilePath = walDir_ / "db.wal";
 
-  Status writeStatus = WriteHeader(header, w);
-  if (!writeStatus.ok()) {
-    return writeStatus;
+  // Remove the file
+  if (fs::exists(walFilePath)) {
+    fs::remove(walFilePath);
   }
 
-  w.flush();
-  if (!utils::syncFile((walPath_ / filename).string())) {
-    return Status(StatusCode::kIoError, "fsync failed during truncate");
+  // Reopen writer (will create fresh header)
+  Result<WALWriter> writerResult = WALWriter::open(walFilePath);
+  if (!writerResult.ok()) {
+    return writerResult.status();
   }
 
+  writer_ = std::make_unique<WALWriter>(std::move(writerResult.value()));
   return OkStatus();
 }
 
-Status WAL::recover() {
+Result<RecoveryReport> WAL::recover() {
   namespace fs = std::filesystem;
 
-  fs::path walFile = walPath_/ "db.wal";
+  fs::path walFile = walDir_ / "db.wal";
 
+  RecoveryReport report;
 
   if (!fs::exists(walFile)) {
-    return OkStatus();
+    return report;
   }
 
   auto fileSize = fs::file_size(walFile);
   if (fileSize == 0) {
-    std::ofstream ofs(walFile, std::ios::binary | std::ios::trunc);
-    return OkStatus();
+    return report;
   }
 
-  Result<BinaryReader> readerResult = OpenBinaryReader(walPath_, "db.wal");
-  if (!readerResult) {
-    return readerResult.error();
+  // Close writer before reading
+  writer_.reset();
+
+  auto ifs = std::make_unique<std::ifstream>(walFile, std::ios::in | std::ios::binary);
+  if (!ifs->is_open()) {
+    return Status(StatusCode::kIoError, "Failed to open WAL for recovery");
   }
-  BinaryReader& reader = readerResult.value();
- 
+  BinaryReader reader(std::move(ifs));
+
   // Validate header
   Result<Header> headerResult = ParseHeader(reader);
-  if (!headerResult) {
+  if (!headerResult.ok()) {
     // Corrupt header - truncate entire file
     std::ofstream ofs(walFile, std::ios::binary | std::ios::trunc);
-    return OkStatus();
+    report.discardedBytes = fileSize;
+    report.truncationPerformed = true;
+    // Reopen writer
+    Result<WALWriter> writerResult = WALWriter::open(walFile);
+    if (!writerResult.ok()) {
+      return writerResult.status();
+    }
+    writer_ = std::make_unique<WALWriter>(std::move(writerResult.value()));
+    return report;
   }
-  
+
   std::streampos lastValidPos = reader.tell();
-  
+  uint64_t validEntries = 0;
+
   while (reader.good()) {
     std::streampos entryStart = reader.tell();
-    
+
     Result<Entry> entryResult = ParseEntry(reader);
     if (!entryResult.ok()) {
       if (!reader.good() && entryStart == lastValidPos) {
@@ -632,24 +618,32 @@ Status WAL::recover() {
       }
       break;
     }
+    validEntries++;
     lastValidPos = reader.tell();
   }
 
+  report.validEntries = validEntries;
+
   if (lastValidPos < static_cast<std::streampos>(fileSize)) {
-    std::fstream fs(walFile, std::ios::in | std::ios::out | std::ios::binary);
-    if (!fs.is_open()) {
-      return Status(StatusCode::kIoError, "Failed to open WAL for truncation");
-    }
-    
-    fs.seekp(lastValidPos);
-    fs.close();
-    
+    report.discardedBytes = fileSize - lastValidPos;
+    report.truncationPerformed = true;
+
     if (::truncate(walFile.string().c_str(), lastValidPos) != 0) {
       return Status(StatusCode::kIoError, "Failed to truncate WAL file");
     }
+    if (!utils::syncFile(walFile.string())) {
+      return Status(StatusCode::kIoError, "Failed to fsync WAL after truncation");
+    }
   }
-  
-  return OkStatus();
+
+  // Reopen writer in append mode
+  Result<WALWriter> writerResult = WALWriter::open(walFile);
+  if (!writerResult.ok()) {
+    return writerResult.status();
+  }
+  writer_ = std::make_unique<WALWriter>(std::move(writerResult.value()));
+
+  return report;
 }
 
 } // namespace arrow::wal
