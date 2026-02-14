@@ -222,7 +222,7 @@ TEST(SIFTTest, DISABLED_SIFT1M_Recall) {
     std::cout << "Building HNSW index..." << std::endl;
     start = std::chrono::high_resolution_clock::now();
     for (size_t i = 0; i < vectors.size(); ++i) {
-        collection.insert(i, vectors[i]);
+        collection.insert(std::to_string(i), vectors[i]);
     }
     auto build_time = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::high_resolution_clock::now() - start).count();
@@ -285,7 +285,7 @@ TEST(SIFTTest, DISABLED_SIFT_Performance) {
         
         auto start = std::chrono::high_resolution_clock::now();
         for (size_t i = 0; i < vectors.size(); ++i) {
-            collection.insert(i, vectors[i]);
+            collection.insert(std::to_string(i), vectors[i]);
         }
         auto build_time = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::high_resolution_clock::now() - start).count();

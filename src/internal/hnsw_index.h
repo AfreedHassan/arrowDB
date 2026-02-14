@@ -63,7 +63,8 @@ public:
 
   /// Save the index to disk.
   /// @param path File path where the index will be saved
-  void saveIndex(const std::string& path) const;
+  /// @return Status indicating success or failure
+  utils::Status saveIndex(const std::string& path) const;
   
   /// Load an index from disk.
   /// @param path File path to load the index from
@@ -84,6 +85,12 @@ public:
     ///
     /// @param id Vector identifier to mark as deleted
     utils::Status markDelete(InternalID id);
+
+    /// Get a pointer to vector data for a given external label.
+    const float* getVectorData(InternalID id) const;
+
+    /// Get current max capacity.
+    size_t capacity() const;
 };
 
 }  // namespace arrow

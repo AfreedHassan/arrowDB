@@ -155,6 +155,8 @@ namespace hnsw {
         kLabelOffset_ = kLvl0AdjListSize_ + kElemVecSize_;
         kElementSize_ = kLvl0AdjListSize_ + kElemVecSize_ + sizeof(label_t);
 
+        if (maxElements_ > SIZE_MAX / kElementSize_)
+            throw std::runtime_error("Element count too large: would overflow allocation size");
         pElementsBlock_ = (char *) malloc(maxElements_ * kElementSize_);
         if (pElementsBlock_ == nullptr)
             throw std::runtime_error("Not enough memory");
@@ -168,6 +170,8 @@ namespace hnsw {
         entryPoint_ = INVALID_ID;
         maxLevel_ = -1;
 
+        if (maxElements_ > SIZE_MAX / sizeof(void *))
+            throw std::runtime_error("Element count too large: would overflow adjacency allocation size");
         pAdjListsBlock_ = (char **) malloc(sizeof(void *) * maxElements_);
         if (pAdjListsBlock_ == nullptr)
             throw std::runtime_error("Not enough memory: HierarchicalNSW failed to allocate linklists");
@@ -297,6 +301,8 @@ namespace hnsw {
         }
 
         // Allocate memory block for the elements
+        if (maxElements_ > SIZE_MAX / kElementSize_)
+          throw std::runtime_error("Element count too large: would overflow allocation size");
         pElementsBlock_ = static_cast<char*>(malloc(maxElements_ * kElementSize_));
         if (pElementsBlock_ == nullptr)
           throw std::runtime_error("Not enough memory: loadIndex failed to allocate vector data");
@@ -313,13 +319,15 @@ namespace hnsw {
 
         visitedListPool_.reset(new VisitedListPool(1, maxElements_));
 
+        if (maxElements_ > SIZE_MAX / sizeof(void *))
+          throw std::runtime_error("Element count too large: would overflow adjacency allocation size");
         pAdjListsBlock_ = static_cast<char**>(malloc(sizeof(void *) * maxElements_));
         if (pAdjListsBlock_ == nullptr)
           throw std::runtime_error("Not enough memory: loadIndex failed to allocate adjacency lists");
 
         elementLevels_ = std::vector<int>(maxElements_);
         invLevelMult_ = 1.0 / levelMult_;
-        efSearch_ = 10;
+        efSearch_ = efConstruction_;
 
         // Read the adjacency lists
         for (size_t i = 0; i < elementCount_; i++) {
@@ -367,6 +375,8 @@ namespace hnsw {
         std::vector<std::shared_mutex>(newMaxElems).swap(adjacencyMutexes_);
 
         // Reallocate base layer
+        if (newMaxElems > SIZE_MAX / kElementSize_)
+            throw std::runtime_error("Element count too large: would overflow allocation size");
         char * newPElementsBlock = (char *) realloc(pElementsBlock_, newMaxElems * kElementSize_);
         if (newPElementsBlock == nullptr)
             throw std::runtime_error("Not enough memory: resizeIndex failed to allocate base layer");
@@ -876,6 +886,7 @@ namespace hnsw {
 
       void setEF(size_t ef) { efSearch_ = ef; }
       size_t getEF() const noexcept { return efSearch_; }
+      size_t getMaxElements() const noexcept { return maxElements_; }
 
       size_t getConstructionEf(int layer) const noexcept {
         return efConstruction_;
@@ -924,6 +935,9 @@ namespace hnsw {
     }
 
     inline char *getDataByInternalId(tableidx_t internalId) const {
+        if (internalId >= maxElements_) {
+            throw std::runtime_error("Internal ID out of bounds: " + std::to_string(internalId));
+        }
         return (pElementsBlock_ + (internalId * kElementSize_) + kVectorOffset_);
     }
 
@@ -1279,6 +1293,12 @@ namespace hnsw {
 
     std::priority_queue<std::pair<dist_t, label_t>>
     searchKnn(const void* queryData, size_t k, BaseFilterFunctor* isIdAllowed = nullptr) const override {
+        return searchKnn(queryData, k, isIdAllowed, efSearch_);
+    }
+
+    /// Search with explicit ef parameter (thread-safe, avoids mutating efSearch_).
+    std::priority_queue<std::pair<dist_t, label_t>>
+    searchKnn(const void* queryData, size_t k, BaseFilterFunctor* isIdAllowed, size_t ef) const {
         std::priority_queue<std::pair<dist_t, label_t>> result;
         if (elementCount_ == 0) return result;
 
@@ -1301,8 +1321,8 @@ namespace hnsw {
                 for (int i = 0; i < size; i++) {
                     tableidx_t cand = datal[i];
                     if (isMarkedDeleted(cand)) continue;
-                    if (cand > maxElements_)
-                        throw std::runtime_error("cand error");
+                    if (cand >= maxElements_)
+                        throw std::runtime_error("cand error: neighbor ID out of bounds");
 
                     dist_t d = distFunc_(qData, reinterpret_cast<const dist_t*>(getDataByInternalId(cand)), dim_);
                     if (d < curDist) {
@@ -1319,9 +1339,9 @@ namespace hnsw {
         bool bareBoneSearch = !deletedElementCount_ && !isIdAllowed;
 
         if (bareBoneSearch) {
-            topCandidates = searchBaseLayerST<true>(currObj, queryData, std::max(efSearch_, k), isIdAllowed);
+            topCandidates = searchBaseLayerST<true>(currObj, queryData, std::max(ef, k), isIdAllowed);
         } else {
-            topCandidates = searchBaseLayerST<false>(currObj, queryData, std::max(efSearch_, k), isIdAllowed);
+            topCandidates = searchBaseLayerST<false>(currObj, queryData, std::max(ef, k), isIdAllowed);
         }
 
         // Trim to k results
@@ -1339,6 +1359,18 @@ namespace hnsw {
         return result;
     }
 
+    /// Get a pointer to the vector data for a given external label.
+    const dist_t* getDataByLabel(label_t label) const {
+        std::unique_lock<std::mutex> lockTable(labelLookupMutex_);
+        auto search = labelLookup_.find(label);
+        if (search == labelLookup_.end()) {
+            throw std::runtime_error("Label not found");
+        }
+        tableidx_t internalId = search->second;
+        lockTable.unlock();
+        return reinterpret_cast<const dist_t*>(getDataByInternalId(internalId));
+    }
+
     void markDelete(label_t label) {
         std::unique_lock<std::mutex> lockLabel(labelMutex(label));
 
@@ -1354,7 +1386,8 @@ namespace hnsw {
     }
 
     void markDeletedInternal(tableidx_t internalId) {
-        assert(internalId < elementCount_);
+        if (internalId >= elementCount_)
+            throw std::runtime_error("markDeletedInternal: internal ID out of bounds");
         if (!isMarkedDeleted(internalId)) {
             unsigned char* llCur = reinterpret_cast<unsigned char*>(getAdjListL0(internalId)) + 2;
             *llCur |= DELETE_MARK;
@@ -1383,7 +1416,8 @@ namespace hnsw {
     }
 
     void unmarkDeletedInternal(tableidx_t internalId) {
-        assert(internalId < elementCount_);
+        if (internalId >= elementCount_)
+            throw std::runtime_error("unmarkDeletedInternal: internal ID out of bounds");
         if (isMarkedDeleted(internalId)) {
             unsigned char* llCur = reinterpret_cast<unsigned char*>(getAdjListL0(internalId)) + 2;
             *llCur &= ~DELETE_MARK;

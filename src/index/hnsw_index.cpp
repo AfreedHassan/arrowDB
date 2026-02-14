@@ -50,6 +50,11 @@ bool HNSWIndex::insert(InternalID id, const std::vector<float>& vec) {
               << ", got " << vec.size() << "\n";
     return false;
   }
+  // Auto-grow if at capacity
+  if (hnsw_->size() >= capacity()) {
+    size_t newMax = capacity() * 2;
+    hnsw_->resizeIndex(newMax);
+  }
   hnsw_->addPoint(vec.data(), static_cast<hnsw::label_t>(id));
   return true;
 }
@@ -62,11 +67,9 @@ std::vector<IndexSearchResult> HNSWIndex::search(
     throw std::invalid_argument("Query dimension mismatch");
   }
 
-  hnsw_->setEF(ef);
-
   using QueueItem = std::pair<float, hnsw::label_t>;  // (distance, label)
   std::priority_queue<QueueItem> resultsQueue =
-      hnsw_->searchKnn(query.data(), k);
+      hnsw_->searchKnn(query.data(), k, nullptr, ef);
 
   std::vector<IndexSearchResult> results;
   results.reserve(resultsQueue.size());
@@ -87,8 +90,14 @@ std::vector<IndexSearchResult> HNSWIndex::search(
   return results;
 }
 
-void HNSWIndex::saveIndex(const std::string& path) const {
-  hnsw_->saveIndex(path);
+utils::Status HNSWIndex::saveIndex(const std::string& path) const {
+  try {
+    hnsw_->saveIndex(path);
+    return utils::OkStatus();
+  } catch (const std::exception& e) {
+    return utils::Status(utils::StatusCode::kIoError,
+      std::string("saveIndex failed: ") + e.what());
+  }
 }
 
 void HNSWIndex::loadIndex(const std::string& path) {
@@ -104,14 +113,27 @@ void HNSWIndex::reserve(size_t max_elements) {
 }
 
 utils::Status HNSWIndex::markDelete(InternalID id) {
-    const std::string_view labelNotFoundError = "Label not found";
     try {
       hnsw_->markDelete(static_cast<hnsw::label_t>(id));
     } catch (const std::exception& e) {
-      if (e.what() == labelNotFoundError) {
+      if (std::string_view(e.what()) == "Label not found") {
         return utils::Status(utils::StatusCode::kNotFound, e.what());
       }
+      return utils::Status(utils::StatusCode::kInternal, e.what());
     }
     return utils::OkStatus();
 }
+
+const float* HNSWIndex::getVectorData(InternalID id) const {
+    try {
+      return hnsw_->getDataByLabel(static_cast<hnsw::label_t>(id));
+    } catch (...) {
+      return nullptr;
+    }
+}
+
+size_t HNSWIndex::capacity() const {
+    return hnsw_->getMaxElements();
+}
+
 }  // namespace arrow
