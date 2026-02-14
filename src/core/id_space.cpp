@@ -58,11 +58,24 @@ utils::Result<std::string_view> IDSpace::resolve(InternalID id) const {
 	if (id >= resolveList.size()) {
 		return utils::Status(utils::StatusCode::kNotFound, "Internal ID out of bounds");
 	}
+	if (removedIds_.contains(id)) {
+		return utils::Status(utils::StatusCode::kNotFound, "Internal ID has been removed");
+	}
 	return std::string_view(resolveList[id]);
 }
 
 utils::Status IDSpace::remove(const VectorID& vectorID) {
-  lookupMap.erase(vectorID);
+  auto it = lookupMap.find(vectorID);
+  if (it == lookupMap.end()) {
+    return utils::Status(utils::StatusCode::kNotFound, "Vector ID not found");
+  }
+  InternalID id = it->second;
+  removedIds_.insert(id);
+  // Clear the resolveList entry (tombstone — empty string)
+  if (id < resolveList.size()) {
+    resolveList[id].clear();
+  }
+  lookupMap.erase(it);
   return utils::OkStatus();
 }
 
@@ -86,6 +99,10 @@ utils::Status IDSpace::save(const std::filesystem::path& path) const {
 
 	writer.flush();
 
+	if (writer.fail()) {
+		return utils::Status(utils::StatusCode::kIoError, "Write error while saving id_space");
+	}
+
 	if (!utils::syncFile(tempPath.string())) {
 		return utils::Status(utils::StatusCode::kIoError, "Failed to fsync id_space temp file");
 	}
@@ -95,6 +112,9 @@ utils::Status IDSpace::save(const std::filesystem::path& path) const {
 	if (ec) {
 		return utils::Status(utils::StatusCode::kIoError, "Failed to rename temp file");
 	}
+
+	// Fsync parent directory to ensure rename is durable
+	utils::syncDir(path.parent_path().string());
 
 	return utils::Status();
 }
@@ -112,6 +132,15 @@ utils::Result<IDSpace> IDSpace::load(const std::filesystem::path& path) {
 	uint64_t count;
 	if (!reader.read(count)) {
 		return utils::Status(utils::StatusCode::kCorruption, "Failed to read count");
+	}
+
+	// Sanity bound: prevent OOM from corrupt count values.
+	// 100M vectors is a generous upper bound for a single collection.
+	static constexpr uint64_t kMaxReasonableCount = 100'000'000;
+	if (count > kMaxReasonableCount) {
+		return utils::Status(utils::StatusCode::kCorruption,
+			"ID space count (" + std::to_string(count) + ") exceeds maximum (" +
+			std::to_string(kMaxReasonableCount) + ")");
 	}
 
 	for (uint64_t i = 0; i < count; ++i) {
