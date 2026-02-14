@@ -268,6 +268,23 @@ Result<Entry> ParseEntry(BinaryReader &r) {
                   "Dimension exceeds maximum allowed: " + std::to_string(e.dimension));
   }
 
+  // Validate remaining file bytes can actually hold the embedding data.
+  // This prevents OOM from a corrupt WAL declaring large dimensions with
+  // only a few bytes of actual data.
+  if (e.dimension > 0) {
+    const size_t embeddingBytes = static_cast<size_t>(e.dimension) * sizeof(float);
+    std::streampos curPos = r.tell();
+    r.seek(0, std::ios::end);
+    std::streampos endPos = r.tell();
+    r.seek(curPos, std::ios::beg);
+    if (endPos - curPos < static_cast<std::streamoff>(embeddingBytes + sizeof(uint32_t))) {
+      return Status(StatusCode::kBadRecord,
+                    "WAL entry claims " + std::to_string(embeddingBytes) +
+                    " bytes for embedding but only " +
+                    std::to_string(static_cast<size_t>(endPos - curPos)) + " bytes remain");
+    }
+  }
+
   e.embedding.resize(e.dimension);
   if (!r.read(e.embedding)) {
     return Status(StatusCode::kIoError, "Failed to read entry embedding data");
@@ -549,9 +566,10 @@ Status WAL::truncate() {
   // Truncate file and reopen
   fs::path walFilePath = walDir_ / "db.wal";
 
-  // Remove the file
+  // Remove the file and sync directory to make removal durable
   if (fs::exists(walFilePath)) {
     fs::remove(walFilePath);
+    utils::syncDir(walDir_.string());
   }
 
   // Reopen writer (will create fresh header)
