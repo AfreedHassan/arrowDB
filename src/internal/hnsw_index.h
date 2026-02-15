@@ -1,6 +1,7 @@
 #ifndef HNSW_INDEX_H
 #define HNSW_INDEX_H
 
+#include <functional>
 #include <vector>
 #include <memory>
 #include "arrow/types.h"
@@ -56,6 +57,18 @@ public:
         const std::vector<float>& query,
         size_t k,
         size_t ef = 200  // Optimized for 100K+ vectors (benchmark-optimized)
+    ) const;
+
+    /// Filter predicate: returns true if the vector with the given ID should
+    /// be included in search results. Evaluated during HNSW graph traversal.
+    using IDFilter = std::function<bool(InternalID)>;
+
+    /// Search for k nearest neighbors, only considering vectors accepted by filter.
+    std::vector<IndexSearchResult> search(
+        const std::vector<float>& query,
+        size_t k,
+        const IDFilter& filter,
+        size_t ef = 200
     ) const;
     
     /// Vector dimension.

@@ -90,6 +90,51 @@ std::vector<IndexSearchResult> HNSWIndex::search(
   return results;
 }
 
+namespace {
+
+/// Adapts HNSWIndex::IDFilter to hnsw::BaseFilterFunctor so the HNSW
+/// internals never leak past the HNSWIndex boundary.
+class IDFilterAdapter final : public hnsw::BaseFilterFunctor {
+public:
+  explicit IDFilterAdapter(const HNSWIndex::IDFilter& filter) : filter_(filter) {}
+  bool operator()(hnsw::label_t id) override {
+    return filter_(static_cast<InternalID>(id));
+  }
+private:
+  const HNSWIndex::IDFilter& filter_;
+};
+
+}  // namespace
+
+std::vector<IndexSearchResult> HNSWIndex::search(
+    const std::vector<float>& query,
+    size_t k,
+    const IDFilter& filter,
+    size_t ef) const {
+  if (query.size() != dim_) {
+    throw std::invalid_argument("Query dimension mismatch");
+  }
+
+  IDFilterAdapter adapter(filter);
+  using QueueItem = std::pair<float, hnsw::label_t>;
+  std::priority_queue<QueueItem> resultsQueue =
+      hnsw_->searchKnn(query.data(), k, &adapter, ef);
+
+  std::vector<IndexSearchResult> results;
+  results.reserve(resultsQueue.size());
+
+  int8_t distToScoreConverter = (spaceKind_ == Space::L2) ? 1 : -1;
+
+  while (!resultsQueue.empty()) {
+    auto [dist, label] = resultsQueue.top();
+    resultsQueue.pop();
+    float score = distToScoreConverter * dist;
+    results.push_back({static_cast<InternalID>(label), score});
+  }
+  std::reverse(results.begin(), results.end());
+  return results;
+}
+
 utils::Status HNSWIndex::saveIndex(const std::string& path) const {
   try {
     hnsw_->saveIndex(path);
