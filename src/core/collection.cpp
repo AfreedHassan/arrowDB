@@ -719,38 +719,17 @@ Collection::search(const std::vector<float> &query, uint32_t k,
 std::vector<IndexSearchResult>
 Collection::search(const std::vector<float>& query, uint32_t k,
                    MetadataFilter filter, uint32_t ef) const {
-  // Collect candidates and their metadata under the lock, then filter outside
-  std::vector<IndexSearchResult> candidates;
-  std::vector<Metadata> candidateMeta;
+  std::shared_lock lock(pImpl_->mutex_);
+  if (pImpl_->pIndex_->size() == 0) return {};
 
-  {
-    std::shared_lock lock(pImpl_->mutex_);
-
-    // Over-fetch to account for filtering
-    const uint32_t fetchK = std::min(k * 4, static_cast<uint32_t>(pImpl_->pIndex_->size()));
-    if (fetchK == 0) return {};
-
-    candidates = pImpl_->pIndex_->search(query, fetchK, ef);
-    candidateMeta.reserve(candidates.size());
-
-    for (const auto& candidate : candidates) {
-      auto it = pImpl_->metadata_.find(candidate.id);
-      candidateMeta.push_back(
-          (it != pImpl_->metadata_.end()) ? it->second : Metadata{});
-    }
-  }
-  // Lock released — filter callback runs without holding mutex
-
-  std::vector<IndexSearchResult> results;
-  results.reserve(k);
-
-  for (size_t i = 0; i < candidates.size(); ++i) {
-    if (results.size() >= k) break;
-    if (filter(candidateMeta[i])) {
-      results.push_back(candidates[i]);
-    }
-  }
-  return results;
+  const auto& metadata = pImpl_->metadata_;
+  HNSWIndex::IDFilter idFilter = [&metadata, &filter](InternalID id) -> bool {
+    auto it = metadata.find(id);
+    if (it != metadata.end()) return filter(it->second);
+    static const Metadata empty;
+    return filter(empty);
+  };
+  return pImpl_->pIndex_->search(query, k, idFilter, ef);
 }
 
 std::vector<IndexSearchResult>
