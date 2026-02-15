@@ -1,5 +1,6 @@
 // Copyright 2025 ArrowDB
 #include "arrow/collection.h"
+#include "arrow/utils/uuid.h"
 #include "arrow/utils/utils.h"
 #include "embedder/embedder.h"
 #include "internal/hnsw_index.h"
@@ -535,6 +536,13 @@ bool Collection::recoveredFromWal() const {
   return pImpl_->recoveredFromWal_;
 }
 
+utils::Result<VectorID> Collection::insert(const std::vector<float>& vec, Metadata metadata) {
+  VectorID id = arrow::uuid::uuidv4();
+  auto status = insert(id, vec, std::move(metadata));
+  if (!status.ok()) return status;
+  return id;
+}
+
 utils::Status Collection::insert(const VectorID& id, const std::vector<float>& vec, Metadata metadata) {
   std::unique_lock lock(pImpl_->mutex_);
   return pImpl_->insertLocked(id, vec, std::move(metadata));
@@ -732,22 +740,15 @@ Collection::search(const std::vector<float>& query, uint32_t k,
   return pImpl_->pIndex_->search(query, k, idFilter, ef);
 }
 
-std::vector<IndexSearchResult>
-Collection::query(const std::string &query, uint32_t k, uint32_t ef) const {
+SearchResult
+Collection::query(const std::string &queryText, uint32_t k, uint32_t ef) const {
   Embedder embedder;
-  if (!embedder.ok()) {
-    std::cout << "Error: Failed to create embedder\n";
-    return {};
-  }
+  if (!embedder.ok()) return {};
 
-  std::vector<float> vec = embedder.embed(query.c_str());
-  if (vec.empty()) {
-    std::cout << "Error: Failed to embed query\n";
-    return {};
-  }
+  std::vector<float> vec = embedder.embed(queryText.c_str());
+  if (vec.empty()) return {};
 
-  std::shared_lock lock(pImpl_->mutex_);
-  return pImpl_->pIndex_->search(vec, k, ef);
+  return query(vec, k, ef);
 }
 
 SearchResult Collection::query(const std::vector<float> &queryVec, uint32_t k,
@@ -929,6 +930,18 @@ Collection::Stats Collection::stats() const {
     .maxCapacity = pImpl_->pIndex_->capacity(),
     .dimensions = pImpl_->config_.dimensions,
   };
+}
+
+void Collection::printStats() const {
+  auto s = stats();
+  nlohmann::json j = {
+    {"name", name()},
+    {"vectorCount", s.vectorCount},
+    {"metadataCount", s.metadataCount},
+    {"maxCapacity", s.maxCapacity},
+    {"dimensions", s.dimensions},
+  };
+  std::cout << j.dump(2) << "\n";
 }
 
 } // namespace arrow

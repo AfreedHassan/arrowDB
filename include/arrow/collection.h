@@ -59,6 +59,13 @@ public:
     /// Get the number of vectors in the collection.
     size_t size() const;
 
+    /// Insert a vector with an auto-generated UUID.
+    ///
+    /// @param vec Vector data (must match collection dimension)
+    /// @param metadata Optional metadata
+    /// @return The generated VectorID, or error
+    utils::Result<VectorID> insert(const std::vector<float>& vec, Metadata metadata = {});
+
     /// Insert a vector into the collection.
     ///
     /// @param id Unique identifier for the vector
@@ -98,9 +105,9 @@ public:
                                           uint32_t k,
                                           uint32_t ef = 200) const;
 
-    std::vector<IndexSearchResult> query(const std::string& query,
-                                          uint32_t k,
-                                          uint32_t ef = 200) const; 
+    SearchResult query(const std::string& query,
+                       uint32_t k,
+                       uint32_t ef = 200) const;
 
     /// Query for k nearest neighbors with metadata.
     ///
@@ -193,6 +200,9 @@ public:
 
     /// Get collection statistics.
     Stats stats() const;
+
+    /// Print collection statistics as JSON to stdout.
+    void printStats() const;
 
 private:
     class Impl;
