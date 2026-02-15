@@ -219,6 +219,47 @@ TEST_F(ArrowDBTest, CreateOrGetCollection) {
   EXPECT_EQ(result1.value(), result2.value());
 }
 
+TEST_F(ArrowDBTest, ZeroToSearchConvenienceAPI) {
+  // "Zero to search in 5 lines" pattern
+  Client db(testDir.string());                                              // 1
+  auto* coll = db.getOrCreateCollection("docs", {.dimensions = 4}).value(); // 2
+  auto id1 = coll->insert({0.1f, 0.2f, 0.3f, 0.4f});                      // 3 (auto-ID)
+  ASSERT_TRUE(id1.ok()) << id1.status().message();
+  EXPECT_FALSE(id1.value().empty());
+  EXPECT_EQ(id1.value().size(), 36);  // UUID format
+
+  auto status = coll->insert("my-id", {0.5f, 0.6f, 0.7f, 0.8f});          // 4 (explicit ID)
+  ASSERT_TRUE(status.ok());
+
+  auto hits = coll->search({0.1f, 0.2f, 0.3f, 0.4f}, 10);                 // 5
+  EXPECT_EQ(hits.size(), 2);
+
+  // Verify the auto-generated ID is retrievable
+  auto vec = coll->get(id1.value());
+  ASSERT_TRUE(vec.ok());
+  EXPECT_EQ(vec.value().size(), 4);
+}
+
+TEST_F(ArrowDBTest, AutoIdInsertDimensionMismatch) {
+  Client db(testDir.string());
+  auto* coll = db.getOrCreateCollection("docs", {.dimensions = 4}).value();
+  auto result = coll->insert({0.1f, 0.2f});  // wrong dimension
+  EXPECT_FALSE(result.ok());
+  EXPECT_EQ(result.status().code(), utils::StatusCode::kDimensionMismatch);
+}
+
+TEST_F(ArrowDBTest, PathConstructor) {
+  Client db(testDir);  // filesystem::path overload
+  EXPECT_EQ(db.dataDir(), testDir);
+  EXPECT_TRUE(db.listCollections().empty());
+}
+
+TEST_F(ArrowDBTest, StringPathConstructor) {
+  Client db(std::filesystem::path(testDir.string()));
+  EXPECT_EQ(db.dataDir(), testDir);
+  EXPECT_TRUE(db.listCollections().empty());
+}
+
 TEST_F(ArrowDBTest, CreateOrGetCollectionLoadsFromDisk) {
   CollectionConfig config{
       .name = "test_collection",
