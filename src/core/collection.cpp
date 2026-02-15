@@ -90,6 +90,14 @@ public:
     );
   }
 
+  ~Impl() {
+    // Must notify the CV so the compaction thread can observe the stop request
+    // from jthread's destructor. Without this, the thread blocks on cv_.wait()
+    // forever since jthread::~jthread only calls request_stop() + join().
+    compactionThread_.request_stop();
+    cv_.notify_one();
+  }
+
   explicit Impl(const CollectionConfig &config)
       : config_{config.name, config.dimensions, config.space,
                 DataType::Float32},
