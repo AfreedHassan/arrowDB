@@ -103,6 +103,10 @@ target_link_libraries(arrow
     PRIVATE hnswlib ${ARROW_EMBED_LIB}
 )
 
+target_compile_definitions(arrow PRIVATE
+    ARROW_EMBEDDING_MODEL_DIR="${ARROW_EMBEDDING_MODEL_DIR}"
+)
+
 # Optimization handled by CMAKE_BUILD_TYPE (Release = -O3, Debug = -g -O0)
 
 
