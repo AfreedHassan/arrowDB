@@ -14,6 +14,7 @@
 #include <condition_variable>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <shared_mutex>
 #include <thread>
 #include <unordered_map>
@@ -59,10 +60,12 @@ public:
   InternalConfig config_;
   HNSWConfig hnswConfig_;
 
+  using MetadataMap = std::unordered_map<InternalID, Metadata>;
+
   std::unique_ptr<HNSWIndex> pIndex_;
   std::unique_ptr<wal::WAL> pWal_;
 
-  std::unordered_map<InternalID, Metadata> metadata_;
+  std::shared_ptr<MetadataMap> metadata_ = std::make_shared<MetadataMap>();
 
   IDSpace idSpace_;
   wal::EntryBuilder builder_;
@@ -71,10 +74,13 @@ public:
   bool recoveredFromWal_ = false;
 
   mutable std::shared_mutex mutex_;
+  std::mutex saveMutex_;  // Serializes save operations (separate from data mutex_)
   std::optional<FileLock> fileLock_;
 
   static constexpr uint32_t kCompactionOpsThreshold = 5000;
+  static constexpr uint32_t kWalSyncBatchSize = 64;
   uint32_t opsSinceLastSave_ = 0;
+  uint32_t walPendingSyncs_ = 0;
   std::condition_variable_any cv_;
   std::jthread compactionThread_;
 
@@ -103,13 +109,14 @@ public:
       : config_{config.name, config.dimensions, config.space,
                 DataType::Float32},
         hnswConfig_{config.index.max_elements, config.index.M,
-                    config.index.ef_construction},
+                    config.index.ef_construction, config.index.quantize},
         pIndex_(std::make_unique<HNSWIndex>(config.dimensions, config.space,
                                             hnswConfig_)) {}
 
   static utils::Result<std::unique_ptr<Impl>> create(
       const CollectionConfig& config,
-      const std::filesystem::path& persistencePath) {
+      const std::filesystem::path& persistencePath,
+      bool launchCompaction = true) {
     auto impl = std::make_unique<Impl>(config);
     impl->persistencePath_ = persistencePath;
 
@@ -123,40 +130,48 @@ public:
     }
     impl->fileLock_ = std::move(lockResult.value());
 
-    impl->initializeWal();
+    auto walStatus = impl->openWal();
+    if (!walStatus.ok()) return walStatus;
+
     auto markerStatus = impl->writeDirtyShutdownMarker();
     if (!markerStatus.ok()) {
       ARROW_LOG_WARN("Collection", "Failed to write dirty shutdown marker: " +
           markerStatus.message());
     }
 
+    if (launchCompaction) impl->startCompaction();
+
     return impl;
   }
 
-  void initializeWal() {
-    if (persistencePath_) {
-      namespace fs = std::filesystem;
-      fs::path walDir = *persistencePath_ / "wal";
+  utils::Status openWal() {
+    if (!persistencePath_) return utils::OkStatus();
+    namespace fs = std::filesystem;
+    fs::path walDir = *persistencePath_ / "wal";
 
-      wal::Result<wal::WAL> walResult = wal::WAL::open(walDir);
-      if (!walResult.ok()) {
-        ARROW_LOG_ERROR("WAL", "Open failed: " + walResult.status().message());
-        return;
-      }
-      pWal_ = std::make_unique<wal::WAL>(std::move(walResult.value()));
+    wal::Result<wal::WAL> walResult = wal::WAL::open(walDir);
+    if (!walResult.ok()) {
+      return utils::Status(utils::StatusCode::kIoError,
+          "Failed to open WAL: " + walResult.status().message());
+    }
+    pWal_ = std::make_unique<wal::WAL>(std::move(walResult.value()));
 
-      wal::Result<wal::RecoveryReport> recoverResult = pWal_->recover();
-      if (!recoverResult.ok()) {
-        ARROW_LOG_ERROR("WAL", "Recovery failed: " + recoverResult.status().message());
-      } else {
-        const auto& report = recoverResult.value();
-        if (report.truncationPerformed) {
-          ARROW_LOG_WARN("WAL", "Recovery: truncated " +
-            std::to_string(report.discardedBytes) + " corrupt bytes, recovered " +
-            std::to_string(report.validEntries) + " entries");
-        }
-      }
+    wal::Result<wal::RecoveryReport> recoverResult = pWal_->recover();
+    if (!recoverResult.ok()) {
+      return utils::Status(utils::StatusCode::kCorruption,
+          "WAL recovery failed: " + recoverResult.status().message());
+    }
+    const auto& report = recoverResult.value();
+    if (report.truncationPerformed) {
+      ARROW_LOG_WARN("WAL", "Recovery: truncated " +
+          std::to_string(report.discardedBytes) + " corrupt bytes, recovered " +
+          std::to_string(report.validEntries) + " entries");
+    }
+    return utils::OkStatus();
+  }
 
+  void startCompaction() {
+    if (persistencePath_ && pWal_) {
       compactionThread_ = std::jthread([this](std::stop_token st) {
           compactionLoop(st);
       });
@@ -232,7 +247,7 @@ public:
           if (internalIDResult.ok()) {
             InternalID internalID = internalIDResult.value();
             pIndex_->markDelete(internalID);
-            metadata_.erase(internalID);
+            mutableMetadata().erase(internalID);
           }
         }
         ++replayedCount;
@@ -329,7 +344,7 @@ public:
       return utils::Status(utils::StatusCode::kInternal, "Insert failed");
     }
 
-    // Log to WAL after successful index insert.
+    // Log to WAL after successful index insert (deferred sync for throughput).
     // WAL failures are logged but not propagated — the insert already
     // succeeded in-memory and is immediately searchable. The only risk
     // is losing this entry on crash (it won't be replayed from WAL).
@@ -339,16 +354,19 @@ public:
         ARROW_LOG_ERROR("Collection", "WAL entry build failed for " + id +
             ": " + entryResult.status().message());
       } else {
-        wal::Status walStatus = pWal_->log(entryResult.value());
+        wal::Status walStatus = pWal_->logDeferred(entryResult.value());
         if (!walStatus.ok()) {
           ARROW_LOG_ERROR("Collection", "WAL log failed for " + id +
               ": " + walStatus.message());
+        } else {
+          walPendingSyncs_++;
+          maybeFlushWal();
         }
       }
     }
 
     opsSinceLastSave_++;
-    metadata_[internalID] = std::move(metadata);
+    mutableMetadata()[internalID] = std::move(metadata);
     requestCheckpoint();
     return utils::OkStatus();
   }
@@ -378,7 +396,7 @@ public:
       return utils::Status(utils::StatusCode::kInternal, "Update failed: HNSW insert error");
 
     if (!metadata.empty())
-      metadata_[internalID] = std::move(metadata);
+      mutableMetadata()[internalID] = std::move(metadata);
 
     // WAL: log as INSERT (idempotent on replay since addPoint handles duplicates)
     if (pWal_) {
@@ -387,11 +405,13 @@ public:
         ARROW_LOG_ERROR("Collection", "WAL entry build failed for update " + id + ": " + entry.status().message());
         return entry.status();
       }
-      wal::Status walStatus = pWal_->log(entry.value());
+      wal::Status walStatus = pWal_->logDeferred(entry.value());
       if (!walStatus.ok()) {
         ARROW_LOG_ERROR("Collection", "WAL log failed for update " + id + ": " + walStatus.message());
         return walStatus;
       }
+      walPendingSyncs_++;
+      maybeFlushWal();
     }
 
     opsSinceLastSave_++;
@@ -424,16 +444,18 @@ public:
         ARROW_LOG_ERROR("Collection", "WAL entry build failed for delete " + id + ": " + entryResult.status().message());
         return entryResult.status();
       }
-      wal::Status status = pWal_->log(entryResult.value());
+      wal::Status status = pWal_->logDeferred(entryResult.value());
       if (!status.ok()) {
         ARROW_LOG_ERROR("Collection", "WAL log failed for delete " + id + ": " + status.message());
         return status;
       }
+      walPendingSyncs_++;
+      maybeFlushWal();
     }
 
     opsSinceLastSave_++;
     idSpace_.remove(id);
-    metadata_.erase(internalID);
+    mutableMetadata().erase(internalID);
     requestCheckpoint();
     return utils::OkStatus();
   }
@@ -445,11 +467,52 @@ public:
           return opsSinceLastSave_ >= kCompactionOpsThreshold || st.stop_requested();
           });
       if (st.stop_requested()) break;
-      auto status = saveLocked(persistencePath_->string());
+
+      // Flush deferred WAL entries before snapshotting state
+      auto flushStatus = flushWal();
+      if (!flushStatus.ok()) {
+        ARROW_LOG_ERROR("Collection", "WAL flush failed during compaction: " + flushStatus.message());
+      }
+
+      // Snapshot mutable state under lock, then release.
+      // Metadata: O(1) shared_ptr copy; COW on next mutation if needed.
+      // IDSpace: full copy (smaller than metadata typically).
+      auto metadataSnap = metadata_;
+      IDSpace idSpaceCopy = idSpace_;
+      uint64_t lsn = builder_.currentLsn();
+      uint64_t txid = builder_.currentTxid();
+      opsSinceLastSave_ = 0;
+      lock.unlock();
+
+      // Save without holding collection lock.
+      // saveMutex_ prevents concurrent saves (from Collection::save()).
+      // config_/hnswConfig_ are immutable; pIndex_ has internal thread safety.
+      std::lock_guard saveLock(saveMutex_);
+
+      RecoveryMetadata recovery{
+        .lastPersistedLsn = (lsn > 0) ? lsn - 1 : 0,
+        .lastPersistedTxid = (txid > 0) ? txid - 1 : 0,
+        .cleanShutdown = true
+      };
+      auto status = CollectionPersistence::save(
+          *persistencePath_, config_, hnswConfig_,
+          *pIndex_, idSpaceCopy, *metadataSnap, recovery);
+
+      lock.lock();
+
       if (!status.ok()) {
         ARROW_LOG_ERROR("Collection", "Background compaction save failed: " +
             status.message());
-        // Don't reset opsSinceLastSave_ — next cycle will retry
+        opsSinceLastSave_ += kCompactionOpsThreshold;  // ensure retry
+      } else {
+        lastPersistedLsn_ = recovery.lastPersistedLsn;
+        if (pWal_) {
+          wal::Status walStatus = pWal_->truncate();
+          if (!walStatus.ok()) {
+            ARROW_LOG_ERROR("Collection", "WAL truncate failed: " +
+                walStatus.message());
+          }
+        }
       }
     }
   }
@@ -460,8 +523,47 @@ public:
     }
   }
 
+  // COW accessor: returns a mutable reference to the metadata map.
+  // If another thread holds a snapshot (use_count > 1), copies first.
+  // Caller must hold unique_lock on mutex_.
+  MetadataMap& mutableMetadata() {
+    if (metadata_.use_count() > 1) {
+      metadata_ = std::make_shared<MetadataMap>(*metadata_);
+    }
+    return *metadata_;
+  }
+
+  // Sync deferred WAL entries when batch threshold is reached.
+  // Caller must hold unique_lock on mutex_.
+  void maybeFlushWal() {
+    if (walPendingSyncs_ >= kWalSyncBatchSize && pWal_) {
+      wal::Status status = pWal_->sync();
+      if (!status.ok()) {
+        ARROW_LOG_ERROR("Collection", "WAL sync failed: " + status.message());
+      }
+      walPendingSyncs_ = 0;
+    }
+  }
+
+  // Force-sync all deferred WAL entries to disk.
+  // Caller must hold unique_lock on mutex_.
+  utils::Status flushWal() {
+    if (walPendingSyncs_ > 0 && pWal_) {
+      wal::Status status = pWal_->sync();
+      walPendingSyncs_ = 0;
+      if (!status.ok()) return status;
+    }
+    return utils::OkStatus();
+  }
+
   utils::Status saveLocked(const std::string &directoryPath) {
     namespace fs = std::filesystem;
+
+    // Flush any deferred WAL entries before persisting
+    auto flushStatus = flushWal();
+    if (!flushStatus.ok()) {
+      ARROW_LOG_ERROR("Collection", "WAL flush failed during save: " + flushStatus.message());
+    }
 
     RecoveryMetadata recovery{
       .lastPersistedLsn = (builder_.currentLsn() > 0) ? builder_.currentLsn() - 1 : 0,
@@ -475,7 +577,7 @@ public:
         hnswConfig_,
         *pIndex_,
         idSpace_,
-        metadata_,
+        *metadata_,
         recovery
         );
     if (!status.ok()) return status;
@@ -490,6 +592,62 @@ public:
     return utils::OkStatus();
   }
 
+  // Phased save that minimizes lock contention:
+  // Phase 1 (unique_lock): flush WAL, snapshot mutable state
+  // Phase 2 (no lock): persist snapshots + index to disk
+  //   (HNSW saveIndex is safe without collection lock — it has internal thread safety,
+  //    and concurrent inserts are blocked by unique_lock holders only)
+  // Phase 3 (unique_lock): truncate WAL, update counters
+  utils::Status savePhased() {
+    if (!persistencePath_) {
+      return utils::Status(utils::StatusCode::kInvalidArgument, "No persistence path set");
+    }
+
+    // saveMutex_ serializes concurrent save() and compaction saves
+    std::lock_guard saveLock(saveMutex_);
+
+    // Phase 1: snapshot under exclusive lock
+    std::shared_ptr<MetadataMap> metadataSnap;
+    IDSpace idSpaceCopy;
+    uint64_t lsn, txid;
+    {
+      std::unique_lock lock(mutex_);
+      auto flushStatus = flushWal();
+      if (!flushStatus.ok()) {
+        ARROW_LOG_ERROR("Collection", "WAL flush failed during save: " + flushStatus.message());
+      }
+      metadataSnap = metadata_;
+      idSpaceCopy = idSpace_;
+      lsn = builder_.currentLsn();
+      txid = builder_.currentTxid();
+    }
+
+    // Phase 2: persist to disk without holding collection lock.
+    // config_/hnswConfig_ are immutable; pIndex_ has internal thread safety.
+    RecoveryMetadata recovery{
+      .lastPersistedLsn = (lsn > 0) ? lsn - 1 : 0,
+      .lastPersistedTxid = (txid > 0) ? txid - 1 : 0,
+      .cleanShutdown = true
+    };
+    utils::Status status = CollectionPersistence::save(
+        *persistencePath_, config_, hnswConfig_,
+        *pIndex_, idSpaceCopy, *metadataSnap, recovery);
+    if (!status.ok()) return status;
+
+    // Phase 3: post-save cleanup under exclusive lock
+    {
+      std::unique_lock lock(mutex_);
+      if (pWal_) {
+        wal::Status walStatus = pWal_->truncate();
+        if (!walStatus.ok()) return walStatus;
+      }
+      opsSinceLastSave_ = 0;
+      lastPersistedLsn_ = recovery.lastPersistedLsn;
+    }
+
+    return utils::OkStatus();
+  }
+
   utils::Status close() {
     compactionThread_.request_stop();
     cv_.notify_one();
@@ -497,9 +655,16 @@ public:
     if (compactionThread_.joinable()) {
       compactionThread_.join();
     }
-    if (persistencePath_ && opsSinceLastSave_) {
+    if (persistencePath_) {
       std::unique_lock lock(mutex_);
-      return saveLocked(persistencePath_->string());
+      // Flush any deferred WAL entries before final save
+      auto flushStatus = flushWal();
+      if (!flushStatus.ok()) {
+        ARROW_LOG_ERROR("Collection", "WAL flush failed during close: " + flushStatus.message());
+      }
+      if (opsSinceLastSave_ > 0) {
+        return saveLocked(persistencePath_->string());
+      }
     }
     return utils::OkStatus();
   }
@@ -600,7 +765,7 @@ utils::Result<BatchInsertResult> Collection::insertBatch(
     const auto &[vectorID, vec] = batch[i];
 
     if (vec.size() != pImpl_->config_.dimensions) {
-      result.results[i].id = 0;
+      result.results[i].id = vectorID;
       result.results[i].status = utils::Status(utils::StatusCode::kDimensionMismatch,
                                          "Vector dimension mismatch");
       result.failureCount++;
@@ -609,7 +774,7 @@ utils::Result<BatchInsertResult> Collection::insertBatch(
 
     auto vecStatus = validateVector(vec);
     if (!vecStatus.ok()) {
-      result.results[i].id = 0;
+      result.results[i].id = vectorID;
       result.results[i].status = vecStatus;
       result.failureCount++;
       continue;
@@ -638,7 +803,7 @@ utils::Result<BatchInsertResult> Collection::insertBatch(
 
     auto internalIDResult = pImpl_->idSpace_.assign(vectorID);
     if (!internalIDResult.ok()) {
-      result.results[i].id = 0;
+      result.results[i].id = vectorID;
       result.results[i].status = internalIDResult.status();
       result.failureCount++;
       continue;
@@ -646,7 +811,7 @@ utils::Result<BatchInsertResult> Collection::insertBatch(
     InternalID internalID = internalIDResult.value();
 
     if (pImpl_->pIndex_->insert(internalID, vec)) {
-      result.results[i].id = internalID;
+      result.results[i].id = vectorID;
       result.results[i].status = utils::OkStatus();
       result.successCount++;
 
@@ -667,28 +832,21 @@ utils::Result<BatchInsertResult> Collection::insertBatch(
       }
     } else {
       pImpl_->idSpace_.remove(vectorID);
-      result.results[i].id = internalID;
+      result.results[i].id = vectorID;
       result.results[i].status = utils::Status(utils::StatusCode::kInternal,
                                              "HNSW insert failed");
       result.failureCount++;
     }
   }
 
-  // Phase 3: Log WAL batch (single fsync), then assign metadata
+  // Phase 3: Log WAL batch (single fsync)
   if (pImpl_->pWal_ && !successfulWalEntries.empty()) {
     utils::Status walStatus = pImpl_->pWal_->logBatch(successfulWalEntries);
     if (!walStatus.ok()) {
-      ARROW_LOG_ERROR("Collection", "WAL batch log failed: " + walStatus.message());
-      // Vectors are in the index but WAL failed — report partial success
-      // so caller knows the true state (vectors inserted, not durable)
-      result.failureCount += result.successCount;
-      result.successCount = 0;
-      for (auto& r : result.results) {
-        if (r.status.ok()) {
-          r.status = utils::Status(utils::StatusCode::kIoError, "WAL batch log failed");
-        }
-      }
-      return result;
+      ARROW_LOG_ERROR("Collection", "WAL batch log failed: " + walStatus.message()
+          + " (" + std::to_string(result.successCount) + " vectors inserted but not durable)");
+      // Vectors are in the index and searchable. WAL failure means they
+      // won't survive a crash, but that matches insertLocked() behavior.
     }
   }
 
@@ -697,7 +855,7 @@ utils::Result<BatchInsertResult> Collection::insertBatch(
     if (result.results[pending.batchIdx].status.ok()) {
       // batch entries don't carry metadata in current API, but ensure
       // an empty metadata entry exists so getMetadata() is consistent
-      pImpl_->metadata_[pending.internalID];
+      pImpl_->mutableMetadata()[pending.internalID];
     }
   }
   pImpl_->opsSinceLastSave_ += result.successCount;
@@ -714,7 +872,7 @@ utils::Status Collection::setMetadata(const VectorID& id, const Metadata& metada
   if (!internalIDResult.ok()) {
     return utils::Status(utils::StatusCode::kNotFound, "Vector not found: " + id);
   }
-  pImpl_->metadata_[internalIDResult.value()] = metadata;
+  pImpl_->mutableMetadata()[internalIDResult.value()] = metadata;
   return utils::OkStatus();
 }
 
@@ -724,8 +882,8 @@ utils::Result<Metadata> Collection::getMetadata(const VectorID& id) {
   if (!internalIDResult.ok()) {
     return utils::Status(utils::StatusCode::kNotFound, "Vector not found: " + id);
   }
-  auto it = pImpl_->metadata_.find(internalIDResult.value());
-  if (it != pImpl_->metadata_.end())
+  auto it = pImpl_->metadata_->find(internalIDResult.value());
+  if (it != pImpl_->metadata_->end())
     return it->second;
   return Metadata{};
 }
@@ -740,13 +898,17 @@ Collection::search(const std::vector<float> &query, uint32_t k,
 std::vector<IndexSearchResult>
 Collection::search(const std::vector<float>& query, uint32_t k,
                    MetadataFilter filter, uint32_t ef) const {
-  std::shared_lock lock(pImpl_->mutex_);
-  if (pImpl_->pIndex_->size() == 0) return {};
-
-  const auto& metadata = pImpl_->metadata_;
-  HNSWIndex::IDFilter idFilter = [&metadata, &filter](InternalID id) -> bool {
-    auto it = metadata.find(id);
-    if (it != metadata.end()) return filter(it->second);
+  // O(1) snapshot via shared_ptr copy; COW ensures writers don't invalidate it.
+  std::shared_ptr<const Impl::MetadataMap> metadataSnap;
+  {
+    std::shared_lock lock(pImpl_->mutex_);
+    if (pImpl_->pIndex_->size() == 0) return {};
+    metadataSnap = pImpl_->metadata_;
+  }
+  // Lock released. HNSW search is thread-safe via internal locks.
+  HNSWIndex::IDFilter idFilter = [&metadataSnap, &filter](InternalID id) -> bool {
+    auto it = metadataSnap->find(id);
+    if (it != metadataSnap->end()) return filter(it->second);
     static const Metadata empty;
     return filter(empty);
   };
@@ -776,8 +938,8 @@ SearchResult Collection::query(const std::vector<float> &queryVec, uint32_t k,
     doc.id = ir.id;
     doc.score = ir.score;
 
-    auto metaIt = pImpl_->metadata_.find(ir.id);
-    if (metaIt != pImpl_->metadata_.end()) {
+    auto metaIt = pImpl_->metadata_->find(ir.id);
+    if (metaIt != pImpl_->metadata_->end()) {
       doc.metadata = utils::metadataToJson(metaIt->second);
     } else {
       doc.metadata = nlohmann::json::object();
@@ -844,6 +1006,12 @@ utils::Status Collection::remove(const VectorID& id) {
 }
 
 utils::Status Collection::save(const std::string &directoryPath) {
+  namespace fs = std::filesystem;
+  // Use phased save if saving to the configured persistence path
+  if (pImpl_->persistencePath_ && fs::path(directoryPath) == *pImpl_->persistencePath_) {
+    return pImpl_->savePhased();
+  }
+  // Fallback to locked save for ad-hoc save paths
   std::unique_lock lock(pImpl_->mutex_);
   return pImpl_->saveLocked(directoryPath);
 }
@@ -863,7 +1031,8 @@ utils::Result<Collection> Collection::load(const std::string &directoryPath) {
     .index = {
       .max_elements = hnswConfig.maxElements,
       .M = hnswConfig.M,
-      .ef_construction = hnswConfig.efConstruction
+      .ef_construction = hnswConfig.efConstruction,
+      .quantize = hnswConfig.quantize
     }
   };
 
@@ -876,12 +1045,12 @@ utils::Result<Collection> Collection::load(const std::string &directoryPath) {
       " entries but index has " + std::to_string(indexSize) + " vectors");
   }
 
-  auto implResult = Impl::create(collectionConfig, fs::path(directoryPath));
+  auto implResult = Impl::create(collectionConfig, fs::path(directoryPath), false);
   if (!implResult.ok()) return implResult.status();
   auto impl = std::move(implResult.value());
   impl->pIndex_ = std::move(index);
   impl->idSpace_ = std::move(idSpace);
-  impl->metadata_ = std::move(metadata);
+  impl->metadata_ = std::make_shared<Impl::MetadataMap>(std::move(metadata));
   impl->lastPersistedLsn_ = recovery.lastPersistedLsn;
   impl->builder_.restoreCounters(
     recovery.lastPersistedLsn + 1,
@@ -909,7 +1078,7 @@ utils::Result<Collection> Collection::load(const std::string &directoryPath) {
         impl->hnswConfig_,
         *impl->pIndex_,
         impl->idSpace_,
-        impl->metadata_,
+        *impl->metadata_,
         recoveredMeta
       );
       if (!saveStatus.ok()) return saveStatus;
@@ -930,6 +1099,7 @@ utils::Result<Collection> Collection::load(const std::string &directoryPath) {
     }
   }
 
+  impl->startCompaction();
   return Collection(std::move(impl));
 }
 
@@ -941,20 +1111,20 @@ Collection::Stats Collection::stats() const {
   std::shared_lock lock(pImpl_->mutex_);
   return Stats{
     .vectorCount = pImpl_->pIndex_->size(),
-    .metadataCount = pImpl_->metadata_.size(),
+    .metadataCount = pImpl_->metadata_->size(),
     .maxCapacity = pImpl_->pIndex_->capacity(),
     .dimensions = pImpl_->config_.dimensions,
   };
 }
 
 void Collection::printStats() const {
-  auto s = stats();
+  std::shared_lock lock(pImpl_->mutex_);
   nlohmann::json j = {
-    {"name", name()},
-    {"vectorCount", s.vectorCount},
-    {"metadataCount", s.metadataCount},
-    {"maxCapacity", s.maxCapacity},
-    {"dimensions", s.dimensions},
+    {"name", pImpl_->config_.name},
+    {"vectorCount", pImpl_->pIndex_->size()},
+    {"metadataCount", pImpl_->metadata_->size()},
+    {"maxCapacity", pImpl_->pIndex_->capacity()},
+    {"dimensions", pImpl_->config_.dimensions},
   };
   std::cout << j.dump(2) << "\n";
 }

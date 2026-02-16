@@ -3,6 +3,8 @@
 #include "internal/wal.h"
 #include "internal/filesync.h"
 #include <ctime>
+#include <fcntl.h>
+#include <unistd.h>
 
 namespace arrow::wal {
 
@@ -11,8 +13,33 @@ using utils::OkStatus;
 
 template <typename T> using Result = utils::Result<T>;
 
-WALWriter::WALWriter(BinaryWriter&& writer, std::filesystem::path path)
-    : writer_(std::move(writer)), path_(std::move(path)) {}
+WALWriter::WALWriter(BinaryWriter&& writer, std::filesystem::path path, int syncFd)
+    : writer_(std::move(writer)), path_(std::move(path)), syncFd_(syncFd) {}
+
+WALWriter::~WALWriter() {
+  if (syncFd_ >= 0) {
+    ::close(syncFd_);
+    syncFd_ = -1;
+  }
+}
+
+WALWriter::WALWriter(WALWriter&& other) noexcept
+    : writer_(std::move(other.writer_)),
+      path_(std::move(other.path_)),
+      syncFd_(other.syncFd_) {
+  other.syncFd_ = -1;
+}
+
+WALWriter& WALWriter::operator=(WALWriter&& other) noexcept {
+  if (this != &other) {
+    if (syncFd_ >= 0) ::close(syncFd_);
+    writer_ = std::move(other.writer_);
+    path_ = std::move(other.path_);
+    syncFd_ = other.syncFd_;
+    other.syncFd_ = -1;
+  }
+  return *this;
+}
 
 Result<WALWriter> WALWriter::open(const std::filesystem::path& walFilePath) {
   namespace fs = std::filesystem;
@@ -29,7 +56,7 @@ Result<WALWriter> WALWriter::open(const std::filesystem::path& walFilePath) {
   }
 
   // Check if file exists to determine if we need to write a header
-  bool needsHeader = !fs::exists(walFilePath);
+  bool needsHeader = !fs::exists(walFilePath) || fs::file_size(walFilePath) == 0;
 
   // Open in append mode (or truncate if new file)
   std::ios::openmode mode = std::ios::out | std::ios::binary |
@@ -61,7 +88,28 @@ Result<WALWriter> WALWriter::open(const std::filesystem::path& walFilePath) {
     }
   }
 
-  return WALWriter(std::move(writer), walFilePath);
+  // Open a cached fd for fsync — avoids open()/close() overhead on every sync.
+  // This second fd points to the same file; fsync on either fd flushes all dirty
+  // pages for the underlying inode.
+  int syncFd = ::open(walFilePath.c_str(), O_WRONLY);
+  if (syncFd == -1) {
+    return Status(StatusCode::kIoError, "Failed to open sync fd for WAL file");
+  }
+
+  return WALWriter(std::move(writer), walFilePath, syncFd);
+}
+
+Status WALWriter::syncInternal() {
+  if (syncFd_ >= 0) {
+    if (!utils::syncFd(syncFd_)) {
+      return Status(StatusCode::kIoError, "fsync failed");
+    }
+  } else {
+    if (!utils::syncFile(path_.string())) {
+      return Status(StatusCode::kIoError, "fsync failed");
+    }
+  }
+  return OkStatus();
 }
 
 Status WALWriter::append(const Entry& entry) {
@@ -74,12 +122,22 @@ Status WALWriter::append(const Entry& entry) {
     return writeStatus;
   }
 
-  // Flush and fsync after each entry for durability
   writer_.value().flush();
-  if (!utils::syncFile(path_.string())) {
-    return Status(StatusCode::kIoError, "fsync failed during append");
+  return syncInternal();
+}
+
+Status WALWriter::appendDeferred(const Entry& entry) {
+  if (!writer_.has_value()) {
+    return Status(StatusCode::kIoError, "WALWriter is not open");
   }
 
+  Status writeStatus = WriteEntry(entry, writer_.value());
+  if (!writeStatus.ok()) {
+    return writeStatus;
+  }
+
+  // Flush to OS page cache but don't fsync — caller will sync later
+  writer_.value().flush();
   return OkStatus();
 }
 
@@ -96,13 +154,9 @@ Status WALWriter::appendBatch(std::span<const Entry> entries) {
     }
   }
 
-  // Single flush and fsync for entire batch (more efficient)
+  // Single flush and fsync for entire batch
   writer_.value().flush();
-  if (!utils::syncFile(path_.string())) {
-    return Status(StatusCode::kIoError, "fsync failed during batch append");
-  }
-
-  return OkStatus();
+  return syncInternal();
 }
 
 Status WALWriter::sync() {
@@ -111,15 +165,15 @@ Status WALWriter::sync() {
   }
 
   writer_.value().flush();
-  if (!utils::syncFile(path_.string())) {
-    return Status(StatusCode::kIoError, "fsync failed");
-  }
-
-  return OkStatus();
+  return syncInternal();
 }
 
 void WALWriter::close() {
   writer_.reset();
+  if (syncFd_ >= 0) {
+    ::close(syncFd_);
+    syncFd_ = -1;
+  }
 }
 
 }  // namespace arrow::wal

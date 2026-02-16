@@ -220,8 +220,15 @@ class WAL {
   WAL(const WAL&) = delete;
   WAL& operator=(const WAL&) = delete;
 
-  /// Log a single entry (delegates to writer_.append()).
+  /// Log a single entry with immediate fsync (delegates to writer_.append()).
   [[nodiscard]] Status log(const Entry& entry);
+
+  /// Log a single entry without fsync (delegates to writer_.appendDeferred()).
+  /// Caller must call sync() later to ensure durability.
+  [[nodiscard]] Status logDeferred(const Entry& entry);
+
+  /// Sync all deferred WAL entries to disk.
+  [[nodiscard]] Status sync();
 
   /// Log multiple entries in batch with single fsync (delegates to writer_.appendBatch()).
   /// More efficient than calling log() multiple times (N-1 fewer fsyncs).

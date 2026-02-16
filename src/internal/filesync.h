@@ -32,6 +32,19 @@ static inline bool syncDir(const std::string &dirPath) {
 #endif
 }
 
+/// Fsync via an already-open file descriptor (avoids open/close overhead).
+static inline bool syncFd(int fd) {
+#ifdef _WIN32
+  return true;  // Not applicable on Windows
+#else
+#ifdef __APPLE__
+  return fcntl(fd, F_FULLFSYNC) == 0;
+#else
+  return fsync(fd) == 0;
+#endif
+#endif
+}
+
 static inline bool syncFile(const std::string &filePath) {
 #ifdef _WIN32
   HANDLE hFile = CreateFileA(filePath.c_str(), GENERIC_WRITE, FILE_SHARE_WRITE,

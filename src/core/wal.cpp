@@ -528,6 +528,20 @@ Status WAL::log(const Entry& entry) {
   return writer_->append(entry);
 }
 
+Status WAL::logDeferred(const Entry& entry) {
+  if (!writer_) {
+    return Status(StatusCode::kIoError, "WAL writer is not open");
+  }
+  return writer_->appendDeferred(entry);
+}
+
+Status WAL::sync() {
+  if (!writer_) {
+    return Status(StatusCode::kIoError, "WAL writer is not open");
+  }
+  return writer_->sync();
+}
+
 Status WAL::logBatch(std::span<const Entry> entries) {
   if (!writer_) {
     return Status(StatusCode::kIoError, "WAL writer is not open");
@@ -611,7 +625,12 @@ Result<RecoveryReport> WAL::recover() {
   Result<Header> headerResult = ParseHeader(reader);
   if (!headerResult.ok()) {
     // Corrupt header - truncate entire file
-    std::ofstream ofs(walFile, std::ios::binary | std::ios::trunc);
+    {
+      std::ofstream ofs(walFile, std::ios::binary | std::ios::trunc);
+      ofs.close();
+    }
+    utils::syncFile(walFile.string());
+    utils::syncDir(walFile.parent_path().string());
     report.discardedBytes = fileSize;
     report.truncationPerformed = true;
     // Reopen writer
@@ -652,6 +671,7 @@ Result<RecoveryReport> WAL::recover() {
     if (!utils::syncFile(walFile.string())) {
       return Status(StatusCode::kIoError, "Failed to fsync WAL after truncation");
     }
+    utils::syncDir(walFile.parent_path().string());
   }
 
   // Reopen writer in append mode
