@@ -152,6 +152,29 @@ TEST_F(IDSpaceTest, EmptyStringID) {
 	EXPECT_EQ(lookup.value(), 0);
 }
 
+TEST_F(IDSpaceTest, EmptyStringIDPersistence) {
+	IDSpace original;
+	original.assign("");
+	original.assign("normal");
+
+	std::string path = GetTestPath("empty_str_id_map.bin");
+	ASSERT_TRUE(original.save(path).ok());
+
+	auto loadResult = IDSpace::load(path);
+	ASSERT_TRUE(loadResult.ok());
+
+	IDSpace& loaded = loadResult.value();
+	EXPECT_EQ(loaded.size(), 2);
+
+	auto lookup = loaded.lookup("");
+	ASSERT_TRUE(lookup.ok()) << "Empty string VectorID lost on reload";
+	EXPECT_EQ(lookup.value(), 0);
+
+	auto lookup2 = loaded.lookup("normal");
+	ASSERT_TRUE(lookup2.ok());
+	EXPECT_EQ(lookup2.value(), 1);
+}
+
 TEST_F(IDSpaceTest, MaxLengthStringID) {
 	IDSpace idSpace;
 	std::string maxStr(127, 'x');
@@ -196,15 +219,19 @@ TEST_F(IDSpaceTest, LoadCorruptedFile) {
 
 	auto result = IDSpace::load(path);
 	EXPECT_FALSE(result.ok());
-	EXPECT_EQ(result.status().code(), utils::StatusCode::kCorruption);
+	// First byte 'c' (99) != kFormatVersion (2), so version mismatch
+	EXPECT_EQ(result.status().code(), utils::StatusCode::kVersionMismatch);
 }
 
 TEST_F(IDSpaceTest, LoadTruncatedFile) {
 	std::string path = GetTestPath("truncated_id_map.bin");
 	std::ofstream file(path, std::ios::binary);
+	// Write valid version header followed by truncated data
+	uint8_t version = 2;
+	file.write(reinterpret_cast<const char*>(&version), sizeof(version));
 	uint64_t count = 5;
 	file.write(reinterpret_cast<const char*>(&count), sizeof(count));
-	file.write("partial", 8);
+	file.write("partial", 7);
 	file.close();
 
 	auto result = IDSpace::load(path);

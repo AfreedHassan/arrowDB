@@ -17,8 +17,8 @@ class IDSpace {
 public:
 	IDSpace() = default;
 
-	IDSpace(const IDSpace&) = delete;
-	IDSpace& operator=(const IDSpace&) = delete;
+	IDSpace(const IDSpace&) = default;
+	IDSpace& operator=(const IDSpace&) = default;
 	IDSpace(IDSpace&&) noexcept = default;
 	IDSpace& operator=(IDSpace&&) noexcept = default;
 
@@ -34,6 +34,7 @@ public:
 
 private:
 	static constexpr size_t kMaxVectorIDSize = 127;
+	static constexpr uint8_t kFormatVersion = 2;
 
 	std::unordered_map<VectorID, InternalID> lookupMap;
 	std::vector<VectorID> resolveList;

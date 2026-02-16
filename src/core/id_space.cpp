@@ -67,11 +67,15 @@ utils::Status IDSpace::save(const std::filesystem::path& path) const {
 
 	BinaryWriter writer(std::make_unique<std::ofstream>(std::move(file)));
 
+	writer.write(kFormatVersion);
+
 	uint64_t count = resolveList.size();
 	writer.write(count);
 
-	for (const std::string& str : resolveList) {
-		writer.writeString(str);
+	for (size_t i = 0; i < resolveList.size(); ++i) {
+		uint8_t isTombstone = removedIds_.contains(static_cast<InternalID>(i)) ? 1 : 0;
+		writer.write(isTombstone);
+		writer.writeString(resolveList[i]);
 	}
 
 	writer.flush();
@@ -103,8 +107,16 @@ utils::Result<IDSpace> IDSpace::load(const std::filesystem::path& path) {
 	}
 
 	BinaryReader reader(std::make_unique<std::ifstream>(std::move(file)));
-
 	IDSpace idSpace;
+
+	uint8_t version;
+	if (!reader.read(version)) {
+		return utils::Status(utils::StatusCode::kCorruption, "Failed to read version");
+	}
+	if (version != kFormatVersion) {
+		return utils::Status(utils::StatusCode::kVersionMismatch,
+			"Unsupported IDSpace format version: " + std::to_string(version));
+	}
 
 	uint64_t count;
 	if (!reader.read(count)) {
@@ -112,31 +124,32 @@ utils::Result<IDSpace> IDSpace::load(const std::filesystem::path& path) {
 	}
 
 	// Sanity bound: prevent OOM from corrupt count values.
-	// 100M vectors is a generous upper bound for a single collection.
 	static constexpr uint64_t kMaxReasonableCount = 100'000'000;
 	if (count > kMaxReasonableCount) {
 		return utils::Status(utils::StatusCode::kCorruption,
-			"ID space count (" + std::to_string(count) + ") exceeds maximum (" +
-			std::to_string(kMaxReasonableCount) + ")");
+			"ID space count (" + std::to_string(count) + ") exceeds maximum");
 	}
 
 	for (uint64_t i = 0; i < count; ++i) {
 		try {
+			uint8_t tombstoneFlag;
+			if (!reader.read(tombstoneFlag)) {
+				return utils::Status(utils::StatusCode::kCorruption, "Failed to read tombstone flag");
+			}
+
 			std::string str;
 			reader.read(str);
 
 			if (str.size() > kMaxVectorIDSize) {
 				return utils::Status(utils::StatusCode::kCorruption, "String length exceeds maximum");
 			}
-
 			if (!reader.good()) {
 				return utils::Status(utils::StatusCode::kCorruption, "Failed to read string data");
 			}
 
 			InternalID id = idSpace.nextId_++;
-			if (str.empty()) {
-				// Tombstoned entry — preserve slot but mark as removed
-				idSpace.resolveList.push_back(std::string{});
+			if (tombstoneFlag) {
+				idSpace.resolveList.push_back(std::move(str));
 				idSpace.removedIds_.insert(id);
 			} else {
 				idSpace.lookupMap[str] = id;
