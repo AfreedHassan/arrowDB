@@ -62,8 +62,8 @@ namespace arrow {
 
 	/// Result of a single insert operation in a batch operation
 	struct InsertResult {
-		InternalID id;           ///< Vector ID that was attempted
-		utils::Status status;  ///< Success or error status
+		VectorID id;             ///< Vector ID that was attempted
+		utils::Status status;    ///< Success or error status
 	};
 
 	/// Aggregate result of batch insert operation

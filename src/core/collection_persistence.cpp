@@ -34,6 +34,7 @@ utils::json hnswConfigToJson(const HNSWConfig& config) {
   j["maxElements"] = config.maxElements;
   j["M"] = config.M;
   j["efConstruction"] = config.efConstruction;
+  if (config.quantize) j["quantize"] = true;
   return j;
 }
 
@@ -45,6 +46,8 @@ HNSWConfig jsonToHNSWConfig(const utils::json& j) {
     config.M = j["M"].get<uint32_t>();
   if (j.contains("efConstruction"))
     config.efConstruction = j["efConstruction"].get<uint32_t>();
+  if (j.contains("quantize"))
+    config.quantize = j["quantize"].get<bool>();
   return config;
 }
 
