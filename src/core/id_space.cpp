@@ -22,29 +22,6 @@ utils::Result<InternalID> IDSpace::assign(const std::string& vectorID) {
 	return id;
 }
 
-utils::Result<InternalID> IDSpace::reserve(const std::string& vectorID) const {
-	if (vectorID.size() > kMaxVectorIDSize) {
-		return utils::Status(utils::StatusCode::kInvalidArgument, "Vector ID exceeds maximum size");
-	}
-
-	auto it = lookupMap.find(vectorID);
-	if (it != lookupMap.end()) {
-		return it->second;
-	}
-
-	return nextId_;
-}
-
-utils::Status IDSpace::commit(const std::string& vectorID, InternalID id) {
-	if (lookupMap.contains(vectorID)) {
-		return utils::Status(utils::StatusCode::kAlreadyExists, "Vector ID already committed");
-	}
-
-	lookupMap[vectorID] = id;
-	resolveList.push_back(vectorID);
-	nextId_ = id + 1;
-	return utils::OkStatus();
-}
 
 utils::Result<InternalID> IDSpace::lookup(const std::string& vectorID) const {
 	auto it = lookupMap.find(vectorID);
@@ -157,8 +134,14 @@ utils::Result<IDSpace> IDSpace::load(const std::filesystem::path& path) {
 			}
 
 			InternalID id = idSpace.nextId_++;
-			idSpace.lookupMap[str] = id;
-			idSpace.resolveList.push_back(std::move(str));
+			if (str.empty()) {
+				// Tombstoned entry — preserve slot but mark as removed
+				idSpace.resolveList.push_back(std::string{});
+				idSpace.removedIds_.insert(id);
+			} else {
+				idSpace.lookupMap[str] = id;
+				idSpace.resolveList.push_back(std::move(str));
+			}
 		} catch (...) {
 			return utils::Status(utils::StatusCode::kCorruption, "Failed to read string data");
 		}
