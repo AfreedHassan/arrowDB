@@ -27,6 +27,7 @@ struct HNSWConfig {
     size_t maxElements = 1000000;   // Initial capacity
     size_t M = 64;                  // Max connections per node (optimized for 100K+ vectors)
     size_t efConstruction = 200;    // Construction beam width
+    bool quantize = false;          // Enable INT8 scalar quantization for search
 };
 
 /// HNSW index wrapper using custom HNSW implementation.
@@ -105,6 +106,16 @@ public:
 
     /// Get current max capacity.
     size_t capacity() const;
+
+    /// BFS reorder internal IDs for cache-friendly graph traversal.
+    /// Call after building the index. Improves search throughput by clustering
+    /// graph neighbors in contiguous memory.
+    void reorderBFS();
+
+    /// Switch to global scalar quantization with integer-domain distance kernels.
+    /// Computes a single scale/offset across all vectors and re-quantizes.
+    /// Call after building the index. Enables pure uint8 distance computation.
+    void computeGlobalSQ();
 };
 
 }  // namespace arrow

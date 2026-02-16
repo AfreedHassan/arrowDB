@@ -23,6 +23,7 @@ struct IndexConfig {
     size_t M = 64;                   ///< Max connections per node
     size_t ef_construction = 200;    ///< Construction beam width
     size_t ef_search = 200;          ///< Default search beam width
+    bool quantize = false;           ///< Enable INT8 scalar quantization for search
 };
 
 /// Configuration for creating a new collection.

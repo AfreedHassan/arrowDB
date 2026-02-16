@@ -10,6 +10,8 @@
 #include <random>
 #include <fstream>
 #include <iostream>
+#include <queue>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -17,6 +19,8 @@
 #include "visited_list_pool.h"
 #include "backend_registry.h"
 #include "impl_kernels.h"
+#include "scalar_quantizer.h"
+#include "impl_kernels_sq.h"
 
 namespace hnsw {
   using tableidx_t = uint32_t;
@@ -51,15 +55,12 @@ namespace hnsw {
       size_t kLabelOffset_{0};
       size_t kLvl0AdjListSize_{0}; // size_links_level0_
 
-
       double levelMult_{0.0};
       double invLevelMult_{0.0};
       std::atomic<int> maxLevel_{0};
 
-
       static constexpr tableidx_t INVALID_ID = std::numeric_limits<tableidx_t>::max();
       std::atomic<tableidx_t> entryPoint_{INVALID_ID};
-
 
       char *pElementsBlock_{nullptr};
       char **pAdjListsBlock_{nullptr};
@@ -70,9 +71,8 @@ namespace hnsw {
       void* distFuncParam_{nullptr};
       std::size_t dim_{0};
 
-      std::default_random_engine levelGen_;
       std::default_random_engine updateProbGen_;
-      std::mutex rngMutex_;  // Protects levelGen_ and updateProbGen_
+      std::mutex rngMutex_;  // Protects updateProbGen_
 
       std::unique_ptr<VisitedListPool> visitedListPool_{nullptr};
 
@@ -90,6 +90,20 @@ namespace hnsw {
       std::mutex deletedElementMutex_;
       std::unordered_set<tableidx_t> deletedElementSet_;
 
+      // Scalar quantization (SQ8)
+      bool quantizationEnabled_{false};
+      SQMode sqMode_{SQMode::PerVector};
+      uint8_t* pQuantizedBlock_{nullptr};     // dim_ bytes per vector, contiguous
+      SQVectorMeta* pQuantParams_{nullptr};   // {scale, offset} per vector
+      ScalarQuantizer quantizer_{0};
+      psq_distfunc_t sqDistFunc_{nullptr};
+      psq_batchdistfunc_t sqBatchDistFunc_{nullptr};
+
+      // Global SQ: one scale/offset for the whole dataset, enabling integer kernels
+      SQVectorMeta globalSQParams_{0.0f, 0.0f};
+      psq_int_distfunc_t sqIntDistFunc_{nullptr};
+      psq_int_batchdistfunc_t sqIntBatchDistFunc_{nullptr};
+
     public:
       // Type definitions - must be before method declarations that use them
       using DistIdxPair = std::pair<dist_t, tableidx_t>;
@@ -101,7 +115,6 @@ namespace hnsw {
       };
       using CandidateQueue = std::priority_queue<DistIdxPair, std::vector<DistIdxPair>, PairLess>;
 
-    public:
       explicit HierarchicalNSW(SpaceInterface<dist_t> *s) { }
 
       explicit HierarchicalNSW(
@@ -120,7 +133,9 @@ namespace hnsw {
         size_t M = 16,
         size_t ef_construction = 200,
         size_t randSeed = 42,
-        bool allowReuseDeleted = false)
+        bool allowReuseDeleted = false,
+        bool quantize = false,
+        SQDistType sqDistType = SQDistType::L2)
         : elementLevels_(maxElems),
             adjacencyMutexes_(maxElems),
             labelMutexes_(MAX_LABEL_OPERATION_LOCKS),
@@ -147,7 +162,6 @@ namespace hnsw {
         efConstruction_ = std::max(ef_construction, M_);
         efSearch_ = 200;
 
-        levelGen_.seed(randSeed);
         updateProbGen_.seed(randSeed + 1);
 
         kLvl0AdjListSize_ = maxM0_ * sizeof(tableidx_t) + sizeof(linklistsize_t);
@@ -164,7 +178,8 @@ namespace hnsw {
 
         elementCount_.store(0, std::memory_order_relaxed);
 
-        visitedListPool_ = std::unique_ptr<VisitedListPool>(new VisitedListPool(1, maxElements_));
+        visitedListPool_ = std::unique_ptr<VisitedListPool>(
+            new VisitedListPool(std::max(1u, std::thread::hardware_concurrency()), maxElements_));
 
         // initializations for special treatment of the first node
 
@@ -179,9 +194,16 @@ namespace hnsw {
         kAdjListSize_ = maxM_ * sizeof(tableidx_t) + sizeof(linklistsize_t);
         levelMult_ = 1 / log(1.0 * M_);
         invLevelMult_ = 1.0 / levelMult_;
+
+        // Scalar quantization setup
+        if (quantize) {
+            quantizationEnabled_ = true;
+            quantizer_ = ScalarQuantizer(dim_);
+            allocateQuantizedBlocks(maxElements_);
+            selectSQKernels(sqDistType);
+        }
     }
 
-      // Method implementations are at the end of the class
       size_t size() const noexcept { return elementCount_.load(std::memory_order_acquire); }
       size_t getDeletedCount() const noexcept { return deletedElementCount_.load(std::memory_order_acquire); }
 
@@ -216,9 +238,7 @@ namespace hnsw {
         write(output, efConstruction_);
         // END WRITE HEADER
 
-        // WRITE ELEMENTS BLOCK
         output.write(pElementsBlock_, elemCountSnap * kElementSize_);
-        // END WRITE ELEMENTS BLOCK
 
         // WRITE ADJACENCY LISTS
         for (size_t i = 0; i < elemCountSnap; i++) {
@@ -227,7 +247,15 @@ namespace hnsw {
             if (adjLSize)
                 output.write(pAdjListsBlock_[i], adjLSize);
         }
-        // END WRITE ADJACENCY LISTS
+        // WRITE QUANTIZATION DATA
+        uint8_t sqFlag = quantizationEnabled_ ? 1 : 0;
+        write(output, sqFlag);
+        if (quantizationEnabled_) {
+            output.write(reinterpret_cast<const char*>(pQuantizedBlock_),
+                elemCountSnap * dim_);
+            output.write(reinterpret_cast<const char*>(pQuantParams_),
+                elemCountSnap * sizeof(SQVectorMeta));
+        }
         output.close();
 
         if (output.fail())
@@ -266,7 +294,6 @@ namespace hnsw {
         read(input, hdr_M);
         read(input, hdr_levelMult);
         read(input, hdr_efConstruction);
-        // END HEADER REGION
 
         // Basic sanity checks BEFORE modifying state
         if (hdr_elementCount > hdr_maxElements) {
@@ -332,7 +359,8 @@ namespace hnsw {
         std::vector<std::shared_mutex>(maxElements_).swap(adjacencyMutexes_);
         std::vector<std::mutex>(MAX_LABEL_OPERATION_LOCKS).swap(labelMutexes_);
 
-        visitedListPool_.reset(new VisitedListPool(1, maxElements_));
+        visitedListPool_.reset(new VisitedListPool(
+            std::max(1u, std::thread::hardware_concurrency()), maxElements_));
 
         if (maxElements_ > SIZE_MAX / sizeof(void *))
           throw std::runtime_error("Element count too large: would overflow adjacency allocation size");
@@ -375,15 +403,24 @@ namespace hnsw {
           }
         }
 
-        /* MOVED INTO FOR LOOP ABOVE
-        for (size_t i = 0; i < elementCount_; i++) {
-          if (isMarkedDeleted(i)) {
-            deletedElementCount_.fetch_add(1, std::memory_order_relaxed);
-            if (allowReuseDeleted_)
-              deletedElementSet_.insert(i);
-          }
+        // READ QUANTIZATION DATA (backward compatible - absent in old indexes)
+        uint8_t sqFlag = 0;
+        if (input.peek() != EOF) {
+            read(input, sqFlag);
         }
-        */
+        if (sqFlag) {
+            quantizationEnabled_ = true;
+            quantizer_ = ScalarQuantizer(dim_);
+            allocateQuantizedBlocks(maxElements_);
+
+            input.read(reinterpret_cast<char*>(pQuantizedBlock_),
+                elemCount * dim_);
+            input.read(reinterpret_cast<char*>(pQuantParams_),
+                elemCount * sizeof(SQVectorMeta));
+
+            // SQ kernel selection requires knowing L2 vs IP - detect from space
+            // Default to L2; the wrapper will call selectSQKernels after load if needed
+        }
 
         input.close();
       }
@@ -422,6 +459,21 @@ namespace hnsw {
             throw std::runtime_error("Not enough memory: resizeIndex failed to allocate other layers");
         pAdjListsBlock_ = newPAdjListsBlock;
 
+        // Reallocate quantized blocks if enabled
+        if (quantizationEnabled_) {
+            uint8_t* newQBlock = static_cast<uint8_t*>(
+                realloc(pQuantizedBlock_, newMaxElems * dim_ + 16));
+            if (newQBlock == nullptr)
+                throw std::runtime_error("Not enough memory: resizeIndex failed to allocate quantized block");
+            pQuantizedBlock_ = newQBlock;
+
+            SQVectorMeta* newParams = static_cast<SQVectorMeta*>(
+                realloc(pQuantParams_, newMaxElems * sizeof(SQVectorMeta)));
+            if (newParams == nullptr)
+                throw std::runtime_error("Not enough memory: resizeIndex failed to allocate SQ params");
+            pQuantParams_ = newParams;
+        }
+
         maxElements_ = newMaxElems;
 
         // Update pool size — in-flight VisitedLists with old sizes will be
@@ -443,6 +495,72 @@ namespace hnsw {
         pAdjListsBlock_ = nullptr;
         elementCount_.store(0, std::memory_order_relaxed);
         visitedListPool_.reset(nullptr);
+        freeQuantizedBlocks();
+      }
+
+      // ============================================================
+      // Scalar Quantization helpers
+      // ============================================================
+
+      void allocateQuantizedBlocks(size_t maxElems) {
+          // Over-allocate by 16 bytes for safe NEON loads at buffer tail
+          pQuantizedBlock_ = static_cast<uint8_t*>(malloc(maxElems * dim_ + 16));
+          if (pQuantizedBlock_ == nullptr)
+              throw std::runtime_error("Not enough memory: failed to allocate quantized block");
+          pQuantParams_ = static_cast<SQVectorMeta*>(malloc(maxElems * sizeof(SQVectorMeta)));
+          if (pQuantParams_ == nullptr) {
+              free(pQuantizedBlock_);
+              pQuantizedBlock_ = nullptr;
+              throw std::runtime_error("Not enough memory: failed to allocate SQ params");
+          }
+      }
+
+      void freeQuantizedBlocks() {
+          free(pQuantizedBlock_);
+          pQuantizedBlock_ = nullptr;
+          free(pQuantParams_);
+          pQuantParams_ = nullptr;
+      }
+
+      void selectSQKernels(SQDistType distType) {
+#if defined(__aarch64__) || defined(_M_ARM64)
+          if (distType == SQDistType::L2) {
+              sqDistFunc_ = impl::sq_l2_neon;
+              sqBatchDistFunc_ = impl::sq_l2_batch_neon;
+          } else {
+              sqDistFunc_ = impl::sq_ip_neon;
+              sqBatchDistFunc_ = impl::sq_ip_batch_neon;
+          }
+#else
+          if (distType == SQDistType::L2) {
+              sqDistFunc_ = impl::sq_l2_scalar;
+              sqBatchDistFunc_ = impl::sq_l2_batch_scalar;
+          } else {
+              sqDistFunc_ = impl::sq_ip_scalar;
+              sqBatchDistFunc_ = impl::sq_ip_batch_scalar;
+          }
+#endif
+      }
+
+      void selectSQIntKernels() {
+#if defined(__aarch64__) || defined(_M_ARM64)
+          sqIntDistFunc_ = impl::sq_int_l2_neon;
+          sqIntBatchDistFunc_ = impl::sq_int_l2_batch_neon;
+#else
+          sqIntDistFunc_ = impl::sq_int_l2_scalar;
+          sqIntBatchDistFunc_ = impl::sq_int_l2_batch_scalar;
+#endif
+      }
+
+      inline uint8_t* getQuantizedByInternalId(tableidx_t id) const {
+          return pQuantizedBlock_ + id * dim_;
+      }
+
+      void quantizeVector(const void* input, tableidx_t id) {
+          const float* fInput = static_cast<const float*>(input);
+          uint8_t* output = getQuantizedByInternalId(id);
+          SQVectorMeta& meta = pQuantParams_[id];
+          quantizer_.quantize(fInput, output, meta);
       }
 
       /*
@@ -479,7 +597,6 @@ namespace hnsw {
           return a.first < b.first;
         };
 
-        
         // If we have more than M, reduce the set first.
         if (n > M) {
           // Heuristic: if M is very small compared to n, nth_element + sort M is best.
@@ -501,7 +618,7 @@ namespace hnsw {
         keptPtrs.reserve(std::min(M, candidates.size()));
         kept.reserve(std::min(M, candidates.size()));
         for (const DistIdxPair &cand : candidates) {
-            const dist_t* pCandData = reinterpret_cast<const dist_t*>(getDataByInternalId(cand.second));
+            const dist_t* pCandData = reinterpret_cast<const dist_t*>(getVectorByInternalId(cand.second));
 
             bool good = true;
             if (!keptPtrs.empty()) {
@@ -558,19 +675,15 @@ namespace hnsw {
         CandidateQueue candidateSet;   // max-heap via negated dist: work queue (smallest first)
 
         dist_t lowerBound;
-        dist_t minValidDist = std::numeric_limits<dist_t>::max(); // test
 
-        // Initialize with entry point
         if (!isMarkedDeleted(entryId)) {
             dist_t dist = distFunc_(query,
-                reinterpret_cast<const dist_t*>(getDataByInternalId(entryId)), dim_);
+                reinterpret_cast<const dist_t*>(getVectorByInternalId(entryId)), dim_);
             topCandidates.emplace(dist, entryId);
             lowerBound = dist;
             candidateSet.emplace(-dist, entryId);
-            minValidDist = dist; // test
         } else {
             lowerBound = std::numeric_limits<dist_t>::max();
-            minValidDist = lowerBound; // test
             candidateSet.emplace(-lowerBound, entryId);
         }
         visited[entryId] = tag;
@@ -608,14 +721,14 @@ namespace hnsw {
                     // Prefetch ahead for next iterations
                     if (j + 2 < numNeighbors) {
                         impl::prefetchL1(&visited[neighbors[j + 2]]);
-                        impl::prefetchL1(getDataByInternalId(neighbors[j + 2]));
+                        impl::prefetchL1(getVectorByInternalId(neighbors[j + 2]));
                     }
 
                     if (visited[nid] != tag) {
                         visited[nid] = tag;
                         unvisitedIds[unvisitedCount] = nid;
                         neighborPtrs[unvisitedCount] = reinterpret_cast<const dist_t*>(
-                            getDataByInternalId(nid));
+                            getVectorByInternalId(nid));
                         ++unvisitedCount;
                     }
                 }
@@ -637,7 +750,6 @@ namespace hnsw {
 
                     if (!isMarkedDeleted(neighborId)) {
                         topCandidates.emplace(dist, neighborId);
-                        minValidDist = std::min(minValidDist, dist); // test
                     }
 
                     // Prune to maintain ef size
@@ -692,7 +804,7 @@ namespace hnsw {
 
         if (!isMarkedDeleted(entryId)) {
           dist_t dist = distFunc_(query,
-              reinterpret_cast<const dist_t*>(getDataByInternalId(entryId)), dim_);
+              reinterpret_cast<const dist_t*>(getVectorByInternalId(entryId)), dim_);
           topCandidates.emplace(dist, entryId);
           lowerBound = dist;
           candidateSet.emplace(-dist, entryId);
@@ -734,14 +846,14 @@ namespace hnsw {
               tableidx_t nid = neighbors[j];
               if (j + 2 < numNeighbors) {
                 impl::prefetchL1(&visited[neighbors[j + 2]]);
-                impl::prefetchL1(getDataByInternalId(neighbors[j + 2]));
+                impl::prefetchL1(getVectorByInternalId(neighbors[j + 2]));
               }
 
               if (visited[nid] != tag) {
                 visited[nid] = tag;
                 unvisitedIds[unvisitedCount] = nid;
                 neighborPtrs[unvisitedCount] = reinterpret_cast<const dist_t*>(
-                    getDataByInternalId(nid));
+                    getVectorByInternalId(nid));
                 ++unvisitedCount;
               }
             }
@@ -767,12 +879,12 @@ namespace hnsw {
                 topCandidates.emplace(dist, neighborId);
                 if constexpr (UseController) {
                   controller->onCandidateFound(neighborId,
-                      getDataByInternalId(neighborId),
+                      getVectorByInternalId(neighborId),
                       dist);
                 }
               } else if constexpr (UseController) {
                 controller->onCandidateDiscarded(neighborId,
-                    getDataByInternalId(neighborId),
+                    getVectorByInternalId(neighborId),
                     dist);
               }
 
@@ -821,18 +933,61 @@ namespace hnsw {
 
         const dist_t* query = static_cast<const dist_t*>(data_point);
 
+        // Thread-local scratch buffers for batched distance computation
+        thread_local std::vector<const dist_t*> neighborPtrs;
+        thread_local std::vector<tableidx_t> unvisitedIds;
+        thread_local std::vector<dist_t> distances;
+
+        // SQ-specific thread-local buffers
+        thread_local std::vector<const uint8_t*> sqNeighborPtrs;
+        thread_local std::vector<float> sqScales;
+        thread_local std::vector<float> sqOffsets;
+
+        // Global SQ: integer distances buffer and pre-quantized query
+        thread_local std::vector<uint8_t> quantizedQuery;
+        thread_local std::vector<uint32_t> intDistances;
+        const bool useIntKernel = (quantizationEnabled_ && sqMode_ == SQMode::Global && sqIntBatchDistFunc_);
+
+        if (useIntKernel) {
+            quantizedQuery.resize(dim_);
+            quantizer_.quantizeWithParams(query, quantizedQuery.data(),
+                globalSQParams_.scale, globalSQParams_.offset);
+            intDistances.resize(maxM0_);
+        }
+
+        if (neighborPtrs.capacity() < maxM0_) {
+            neighborPtrs.reserve(maxM0_);
+            unvisitedIds.reserve(maxM0_);
+            distances.reserve(maxM0_);
+        }
+        if (quantizationEnabled_ && sqNeighborPtrs.capacity() < maxM0_) {
+            sqNeighborPtrs.reserve(maxM0_);
+            sqScales.reserve(maxM0_);
+            sqOffsets.reserve(maxM0_);
+        }
+
         CandidateQueue topCandidates;
         CandidateQueue candidateSet;
 
         dist_t lowerBound;
         if (bare_bone_search ||
             (!isMarkedDeleted(ep_id) && ((!isIdAllowed) || (*isIdAllowed)(getExternalLabel(ep_id))))) {
-            char* ep_data = getDataByInternalId(ep_id);
-            dist_t dist = distFunc_(query, reinterpret_cast<const dist_t*>(ep_data), dim_);
+            // Entry point distance uses SQ if enabled
+            dist_t dist;
+            if (useIntKernel) {
+                dist = static_cast<dist_t>(sqIntDistFunc_(
+                    quantizedQuery.data(), getQuantizedByInternalId(ep_id), dim_));
+            } else if (quantizationEnabled_) {
+                dist = sqDistFunc_(query, getQuantizedByInternalId(ep_id),
+                    pQuantParams_[ep_id].scale, pQuantParams_[ep_id].offset, dim_);
+            } else {
+                char* ep_data = getVectorByInternalId(ep_id);
+                dist = distFunc_(query, reinterpret_cast<const dist_t*>(ep_data), dim_);
+            }
             lowerBound = dist;
             topCandidates.emplace(dist, ep_id);
             if (!bare_bone_search && controller) {
-                controller->onCandidateFound(getExternalLabel(ep_id), ep_data, dist);
+                controller->onCandidateFound(getExternalLabel(ep_id), getVectorByInternalId(ep_id), dist);
             }
             candidateSet.emplace(-dist, ep_id);
         } else {
@@ -862,59 +1017,126 @@ namespace hnsw {
             candidateSet.pop();
 
             tableidx_t current_node_id = current_node_pair.second;
-            linklistsize_t *data = getAdjListL0(current_node_id);
-            size_t size = getListCount((linklistsize_t*)data);
+            linklistsize_t *adjList = getAdjListL0(current_node_id);
+            size_t numNeighbors = getListCount(adjList);
+            tableidx_t* neighbors = reinterpret_cast<tableidx_t*>(adjList + 1);
+
             if (collect_metrics) {
-                metricGraphHops++;
-                metricDistanceCalls+=size;
+                metricGraphHops.fetch_add(1, std::memory_order_relaxed);
+                metricDistanceCalls.fetch_add(numNeighbors, std::memory_order_relaxed);
             }
 
-            for (size_t j = 1; j <= size; j++) {
-                int candidate_id = *(data + j);
-                if (visited[candidate_id] != tag) {
-                    visited[candidate_id] = tag;
+            // Phase 1: Collect unvisited neighbors with prefetching
+            size_t unvisitedCount = 0;
+            unvisitedIds.resize(numNeighbors);
+            distances.resize(numNeighbors);
 
-                    char *currObj1 = (getDataByInternalId(candidate_id));
-                    dist_t dist = distFunc_(query, reinterpret_cast<const dist_t*>(currObj1), dim_);
+            if (quantizationEnabled_) {
+                sqNeighborPtrs.resize(numNeighbors);
+                if (!useIntKernel) {
+                    sqScales.resize(numNeighbors);
+                    sqOffsets.resize(numNeighbors);
+                }
 
-                    bool flagConsiderCandidate;
-                    if (!bare_bone_search && controller) {
-                        flagConsiderCandidate = controller->isWorthExploring(dist, lowerBound);
-                    } else {
-                        flagConsiderCandidate = topCandidates.size() < ef || lowerBound > dist;
+                // Prefetch ahead by 4 for better cache overlap
+                for (size_t j = 0; j < numNeighbors; ++j) {
+                    tableidx_t nid = neighbors[j];
+                    if (j + 4 < numNeighbors) {
+                        tableidx_t prefId = neighbors[j + 4];
+                        impl::prefetchL1(&visited[prefId]);
+                        impl::prefetchL1(getQuantizedByInternalId(prefId));
+                    }
+                    if (visited[nid] != tag) {
+                        visited[nid] = tag;
+                        unvisitedIds[unvisitedCount] = nid;
+                        sqNeighborPtrs[unvisitedCount] = getQuantizedByInternalId(nid);
+                        if (!useIntKernel) {
+                            sqScales[unvisitedCount] = pQuantParams_[nid].scale;
+                            sqOffsets[unvisitedCount] = pQuantParams_[nid].offset;
+                        }
+                        ++unvisitedCount;
+                    }
+                }
+            } else {
+                neighborPtrs.resize(numNeighbors);
+
+                for (size_t j = 0; j < numNeighbors; ++j) {
+                    tableidx_t nid = neighbors[j];
+                    if (j + 4 < numNeighbors) {
+                        impl::prefetchL1(&visited[neighbors[j + 4]]);
+                        impl::prefetchL1(getVectorByInternalId(neighbors[j + 4]));
+                    }
+                    if (visited[nid] != tag) {
+                        visited[nid] = tag;
+                        unvisitedIds[unvisitedCount] = nid;
+                        neighborPtrs[unvisitedCount] = reinterpret_cast<const dist_t*>(
+                            getVectorByInternalId(nid));
+                        ++unvisitedCount;
+                    }
+                }
+            }
+
+            if (unvisitedCount == 0) continue;
+
+            // Phase 2: Batch distance computation (SIMD-optimized)
+            if (useIntKernel) {
+                intDistances.resize(unvisitedCount);
+                sqIntBatchDistFunc_(quantizedQuery.data(), sqNeighborPtrs.data(),
+                    unvisitedCount, dim_, intDistances.data());
+                for (size_t j = 0; j < unvisitedCount; ++j) {
+                    distances[j] = static_cast<dist_t>(intDistances[j]);
+                }
+            } else if (quantizationEnabled_) {
+                sqBatchDistFunc_(query, sqNeighborPtrs.data(), sqScales.data(),
+                    sqOffsets.data(), unvisitedCount, dim_, distances.data());
+            } else {
+                batchDistFunc_(query, neighborPtrs.data(), unvisitedCount, dim_, distances.data());
+            }
+
+            // Phase 3: Process computed distances
+            for (size_t j = 0; j < unvisitedCount; ++j) {
+                tableidx_t candidate_id = unvisitedIds[j];
+                dist_t dist = distances[j];
+
+                bool flagConsiderCandidate;
+                if (!bare_bone_search && controller) {
+                    flagConsiderCandidate = controller->isWorthExploring(dist, lowerBound);
+                } else {
+                    flagConsiderCandidate = topCandidates.size() < ef || lowerBound > dist;
+                }
+
+                if (flagConsiderCandidate) {
+                    candidateSet.emplace(-dist, candidate_id);
+
+                    if (bare_bone_search ||
+                        (!isMarkedDeleted(candidate_id) && ((!isIdAllowed) || (*isIdAllowed)(getExternalLabel(candidate_id))))) {
+                        topCandidates.emplace(dist, candidate_id);
+                        if (!bare_bone_search && controller) {
+                            controller->onCandidateFound(getExternalLabel(candidate_id),
+                                getVectorByInternalId(candidate_id), dist);
+                        }
                     }
 
-                    if (flagConsiderCandidate) {
-                        candidateSet.emplace(-dist, candidate_id);
-
-                        if (bare_bone_search ||
-                            (!isMarkedDeleted(candidate_id) && ((!isIdAllowed) || (*isIdAllowed)(getExternalLabel(candidate_id))))) {
-                            topCandidates.emplace(dist, candidate_id);
-                            if (!bare_bone_search && controller) {
-                                controller->onCandidateFound(getExternalLabel(candidate_id), currObj1, dist);
-                            }
-                        }
-
-                        bool flag_remove_extra = false;
+                    bool flag_remove_extra = false;
+                    if (!bare_bone_search && controller) {
+                        flag_remove_extra = controller->requiresPruning();
+                    } else {
+                        flag_remove_extra = topCandidates.size() > ef;
+                    }
+                    while (flag_remove_extra) {
+                        tableidx_t id = topCandidates.top().second;
+                        topCandidates.pop();
                         if (!bare_bone_search && controller) {
+                            controller->onCandidateDiscarded(getExternalLabel(id),
+                                getVectorByInternalId(id), dist);
                             flag_remove_extra = controller->requiresPruning();
                         } else {
                             flag_remove_extra = topCandidates.size() > ef;
                         }
-                        while (flag_remove_extra) {
-                            tableidx_t id = topCandidates.top().second;
-                            topCandidates.pop();
-                            if (!bare_bone_search && controller) {
-                                controller->onCandidateDiscarded(getExternalLabel(id), getDataByInternalId(id), dist);
-                                flag_remove_extra = controller->requiresPruning();
-                            } else {
-                                flag_remove_extra = topCandidates.size() > ef;
-                            }
-                        }
-
-                        if (!topCandidates.empty())
-                            lowerBound = topCandidates.top().first;
                     }
+
+                    if (!topCandidates.empty())
+                        lowerBound = topCandidates.top().first;
                 }
             }
         }
@@ -926,6 +1148,211 @@ namespace hnsw {
       void setEF(size_t ef) { efSearch_ = ef; }
       size_t getEF() const noexcept { return efSearch_; }
       size_t getMaxElements() const noexcept { return maxElements_; }
+      bool isQuantizationEnabled() const noexcept { return quantizationEnabled_; }
+      SQMode getSQMode() const noexcept { return sqMode_; }
+
+      /// Compute global quantization params and re-quantize all vectors.
+      /// Call after index is fully built. Enables integer-domain kernels.
+      void computeGlobalSQ() {
+          if (!quantizationEnabled_) return;
+
+          const size_t count = elementCount_.load(std::memory_order_acquire);
+          if (count == 0) return;
+
+          // Scan all vectors for global min/max
+          float globalMin = std::numeric_limits<float>::max();
+          float globalMax = std::numeric_limits<float>::lowest();
+
+          for (size_t i = 0; i < count; ++i) {
+              const float* vec = reinterpret_cast<const float*>(getVectorByInternalId(i));
+              for (size_t d = 0; d < dim_; ++d) {
+                  globalMin = std::min(globalMin, vec[d]);
+                  globalMax = std::max(globalMax, vec[d]);
+              }
+          }
+
+          float range = globalMax - globalMin;
+          if (range < 1e-10f) range = 1e-10f;
+
+          globalSQParams_.scale = range / 255.0f;
+          globalSQParams_.offset = globalMin;
+
+          // Re-quantize all vectors with global params
+          for (size_t i = 0; i < count; ++i) {
+              const float* vec = reinterpret_cast<const float*>(getVectorByInternalId(i));
+              uint8_t* qvec = getQuantizedByInternalId(i);
+              quantizer_.quantizeWithParams(vec, qvec, globalSQParams_.scale, globalSQParams_.offset);
+              // Update per-vector params to global (for compatibility)
+              pQuantParams_[i] = globalSQParams_;
+          }
+
+          sqMode_ = SQMode::Global;
+          selectSQIntKernels();
+      }
+
+      /// Set SQ distance kernels after loading (when dist type wasn't known at load time).
+      void setSQDistType(SQDistType distType) {
+          if (quantizationEnabled_) {
+              selectSQKernels(distType);
+          }
+      }
+
+      /// BFS reorder: remap internal IDs so graph-adjacent nodes are memory-adjacent.
+      /// This improves cache locality during search. Call after building the index.
+      void reorderBFS() {
+          std::lock_guard<std::mutex> lock(globalMutex_);
+          const size_t count = elementCount_.load(std::memory_order_acquire);
+          if (count <= 1) return;
+
+          tableidx_t ep = entryPoint_.load(std::memory_order_acquire);
+          if (ep == INVALID_ID) return;
+
+          // Phase 1: BFS to determine new ID ordering
+          std::vector<tableidx_t> bfsOrder;
+          bfsOrder.reserve(count);
+          std::vector<bool> visited(maxElements_, false);
+
+          std::queue<tableidx_t> queue;
+          queue.push(ep);
+          visited[ep] = true;
+
+          while (!queue.empty() && bfsOrder.size() < count) {
+              tableidx_t cur = queue.front();
+              queue.pop();
+              bfsOrder.push_back(cur);
+
+              // Visit layer 0 neighbors
+              linklistsize_t* adjList = getAdjListL0(cur);
+              size_t numNeighbors = getListCount(adjList);
+              tableidx_t* neighbors = reinterpret_cast<tableidx_t*>(adjList + 1);
+
+              for (size_t i = 0; i < numNeighbors; ++i) {
+                  tableidx_t nid = neighbors[i];
+                  if (!visited[nid]) {
+                      visited[nid] = true;
+                      queue.push(nid);
+                  }
+              }
+          }
+
+          // Add any unreachable nodes (shouldn't happen in a connected graph)
+          for (size_t i = 0; i < count; ++i) {
+              if (!visited[i]) {
+                  bfsOrder.push_back(static_cast<tableidx_t>(i));
+              }
+          }
+
+          // Phase 2: Build old→new mapping
+          std::vector<tableidx_t> oldToNew(maxElements_, INVALID_ID);
+          for (size_t newId = 0; newId < bfsOrder.size(); ++newId) {
+              oldToNew[bfsOrder[newId]] = static_cast<tableidx_t>(newId);
+          }
+
+          // Phase 3: Reorder element data into a new buffer
+          char* newElements = (char*)malloc(maxElements_ * kElementSize_);
+          if (!newElements) throw std::runtime_error("BFS reorder: allocation failed");
+
+          char** newAdjLists = (char**)malloc(sizeof(void*) * maxElements_);
+          if (!newAdjLists) { free(newElements); throw std::runtime_error("BFS reorder: allocation failed"); }
+
+          std::vector<int> newLevels(maxElements_);
+
+          uint8_t* newQuantBlock = nullptr;
+          SQVectorMeta* newQuantParams = nullptr;
+          if (quantizationEnabled_) {
+              newQuantBlock = static_cast<uint8_t*>(malloc(maxElements_ * dim_ + 16));
+              newQuantParams = static_cast<SQVectorMeta*>(malloc(maxElements_ * sizeof(SQVectorMeta)));
+              if (!newQuantBlock || !newQuantParams) {
+                  free(newElements); free(newAdjLists);
+                  free(newQuantBlock); free(newQuantParams);
+                  throw std::runtime_error("BFS reorder: SQ allocation failed");
+              }
+          }
+
+          for (size_t newId = 0; newId < bfsOrder.size(); ++newId) {
+              tableidx_t oldId = bfsOrder[newId];
+
+              // Copy element block (adj list L0 + vector + label)
+              memcpy(newElements + newId * kElementSize_,
+                     pElementsBlock_ + oldId * kElementSize_,
+                     kElementSize_);
+
+              // Copy upper-layer adjacency lists
+              newAdjLists[newId] = pAdjListsBlock_[oldId];
+              newLevels[newId] = elementLevels_[oldId];
+
+              // Copy SQ data
+              if (quantizationEnabled_) {
+                  memcpy(newQuantBlock + newId * dim_,
+                         pQuantizedBlock_ + oldId * dim_, dim_);
+                  newQuantParams[newId] = pQuantParams_[oldId];
+              }
+          }
+
+          // Phase 4: Remap neighbor IDs in all adjacency lists
+          for (size_t newId = 0; newId < bfsOrder.size(); ++newId) {
+              // Layer 0
+              linklistsize_t* adjList = reinterpret_cast<linklistsize_t*>(
+                  newElements + newId * kElementSize_ + kLvl0AdjListOffset_);
+              size_t numNeighbors = *reinterpret_cast<unsigned short*>(adjList);
+              tableidx_t* neighbors = reinterpret_cast<tableidx_t*>(adjList + 1);
+              for (size_t j = 0; j < numNeighbors; ++j) {
+                  neighbors[j] = oldToNew[neighbors[j]];
+              }
+
+              // Upper layers
+              int level = newLevels[newId];
+              for (int lev = 1; lev <= level; ++lev) {
+                  linklistsize_t* upperAdj = reinterpret_cast<linklistsize_t*>(
+                      newAdjLists[newId] + (lev - 1) * kAdjListSize_);
+                  size_t upperCount = *reinterpret_cast<unsigned short*>(upperAdj);
+                  tableidx_t* upperNeighbors = reinterpret_cast<tableidx_t*>(upperAdj + 1);
+                  for (size_t j = 0; j < upperCount; ++j) {
+                      upperNeighbors[j] = oldToNew[upperNeighbors[j]];
+                  }
+              }
+          }
+
+          // Phase 5: Swap buffers and update mappings
+          free(pElementsBlock_);
+          pElementsBlock_ = newElements;
+
+          // Don't free pAdjListsBlock_ entries — they're the same allocations, just reordered
+          free(pAdjListsBlock_);
+          pAdjListsBlock_ = newAdjLists;
+
+          elementLevels_ = std::move(newLevels);
+
+          if (quantizationEnabled_) {
+              free(pQuantizedBlock_);
+              free(pQuantParams_);
+              pQuantizedBlock_ = newQuantBlock;
+              pQuantParams_ = newQuantParams;
+          }
+
+          // Update entry point
+          entryPoint_.store(oldToNew[ep], std::memory_order_release);
+
+          // Rebuild label lookup
+          {
+              std::lock_guard<std::mutex> llock(labelLookupMutex_);
+              labelLookup_.clear();
+              for (size_t newId = 0; newId < bfsOrder.size(); ++newId) {
+                  label_t label = getExternalLabel(static_cast<tableidx_t>(newId));
+                  labelLookup_[label] = static_cast<tableidx_t>(newId);
+              }
+          }
+
+          // Update deleted element set
+          if (!deletedElementSet_.empty()) {
+              std::lock_guard<std::mutex> dlock(deletedElementMutex_);
+              std::unordered_set<tableidx_t> newDeleted;
+              for (tableidx_t oldDel : deletedElementSet_) {
+                  newDeleted.insert(oldToNew[oldDel]);
+              }
+              deletedElementSet_ = std::move(newDeleted);
+          }
+      }
 
       size_t getConstructionEf(int layer) const noexcept {
         return efConstruction_;
@@ -952,7 +1379,6 @@ namespace hnsw {
           sizeof(label_t));
         return retLabel;
       }
-
 
       inline void setExternalLabel(tableidx_t internalId, label_t label) const {
         memcpy(
@@ -981,22 +1407,9 @@ namespace hnsw {
     }
 
     int getRandomLevel(double revSize) {
+        thread_local std::mt19937 tl_gen(std::random_device{}());
         std::uniform_real_distribution<double> distribution(0.0, 1.0);
-        std::lock_guard<std::mutex> lock(rngMutex_);
-        return static_cast<int>(-log(std::max(distribution(levelGen_), 1e-10)) * revSize
-        );
-    }
-
-    size_t getMaxElements() {
-        return maxElements_;
-    }
-
-    size_t getElementCount() {
-        return elementCount_.load(std::memory_order_acquire);
-    }
-
-    size_t getDeletedCount() {
-        return deletedElementCount_.load(std::memory_order_acquire);
+        return static_cast<int>(-log(std::max(distribution(tl_gen), 1e-10)) * revSize);
     }
 
       linklistsize_t *getAdjListL0(tableidx_t internalId) const {
@@ -1038,7 +1451,8 @@ namespace hnsw {
           }
         }
 
-        if (input.tellg() != totalFileSize)
+        // Allow trailing data (e.g. SQ quantization block appended after adjacency lists)
+        if (input.tellg() > totalFileSize)
           throw std::runtime_error("Index seems to be corrupted or unsupported");
 
         input.clear();
@@ -1140,9 +1554,9 @@ namespace hnsw {
                     setListCount(llOther, szLinkListOther + 1);
                 } else {
                     const dist_t* centerData = reinterpret_cast<const dist_t*>(
-                        getDataByInternalId(selectedNeighbors[idx]));
+                        getVectorByInternalId(selectedNeighbors[idx]));
                     const dist_t* curCData = reinterpret_cast<const dist_t*>(
-                        getDataByInternalId(curC));
+                        getVectorByInternalId(curC));
 
                     dist_t dMax = distFunc_(curCData, centerData, dim_);
 
@@ -1151,11 +1565,11 @@ namespace hnsw {
 
                     for (size_t j = 0; j < szLinkListOther; j++) {
                         if (j + 2 < szLinkListOther) {
-                            impl::prefetchL1(getDataByInternalId(data[j + 2]));
+                            impl::prefetchL1(getVectorByInternalId(data[j + 2]));
                         }
 
                         const dist_t* neighborData = reinterpret_cast<const dist_t*>(
-                            getDataByInternalId(data[j]));
+                            getVectorByInternalId(data[j]));
                         candidates.emplace(distFunc_(neighborData, centerData, dim_), data[j]);
                     }
 
@@ -1250,11 +1664,15 @@ namespace hnsw {
         int curLevel = getRandomLevel(levelMult_);
         elementLevels_[curC] = curLevel;
 
-        // Global lock for entry point update
-        std::unique_lock<std::mutex> tempLock(globalMutex_);
+        // Read maxLevel_ atomically first; only acquire globalMutex_ if this
+        // insert creates a new highest level (~0.2% of inserts).
         int maxLevelCopy = maxLevel_.load(std::memory_order_acquire);
-        if (curLevel <= maxLevelCopy)
-            tempLock.unlock();
+        std::unique_lock<std::mutex> tempLock(globalMutex_, std::defer_lock);
+        if (curLevel > maxLevelCopy) {
+            tempLock.lock();
+            // Re-read after acquiring lock — another thread may have raised it
+            maxLevelCopy = maxLevel_.load(std::memory_order_acquire);
+        }
 
         tableidx_t currObj = entryPoint_.load(std::memory_order_acquire);
         tableidx_t entryPointCopy = currObj;
@@ -1264,16 +1682,18 @@ namespace hnsw {
 
         // Copy label and vector data
         memcpy(getExternalLabeLPtr(curC), &label, sizeof(label_t));
-        memcpy(getDataByInternalId(curC), vectorData, kElemVecSize_);
+        memcpy(getVectorByInternalId(curC), vectorData, kElemVecSize_);
+
+        // Quantize if SQ enabled
+        if (quantizationEnabled_) {
+            quantizeVector(vectorData, curC);
+        }
 
         // Allocate higher level links
         if (curLevel > 0) {
-            // TODO: rethink whether to have curLevel or curLevel+1 here
-            //pAdjListsBlock_[curC] = static_cast<char*>(malloc(kAdjListSize_ * curLevel + 1)); 
-            pAdjListsBlock_[curC] = static_cast<char*>(malloc(kAdjListSize_ * curLevel)); 
+            pAdjListsBlock_[curC] = static_cast<char*>(malloc(kAdjListSize_ * curLevel));
             if (pAdjListsBlock_[curC] == nullptr)
                 throw std::runtime_error("Not enough memory: addPoint failed to allocate linklist");
-            //memset(pAdjListsBlock_[curC], 0, kAdjListSize_ * curLevel + 1);
             memset(pAdjListsBlock_[curC], 0, kAdjListSize_ * curLevel);
         }
 
@@ -1282,7 +1702,7 @@ namespace hnsw {
         if (currObj != INVALID_ID) {
             // Greedy search through upper levels
             if (curLevel < maxLevelCopy) {
-                dist_t curDist = distFunc_(vecData, reinterpret_cast<const dist_t*>(getDataByInternalId(currObj)), dim_);
+                dist_t curDist = distFunc_(vecData, reinterpret_cast<const dist_t*>(getVectorByInternalId(currObj)), dim_);
                 for (int level = maxLevelCopy; level > curLevel; level--) {
                     if (level > elementLevels_[currObj]) continue;
                     bool changed  = true;
@@ -1296,7 +1716,7 @@ namespace hnsw {
                         for (int i = 0; i < size; i++) {
                             tableidx_t cand = datal[i];
                             if (isMarkedDeleted(cand)) continue;
-                            dist_t d = distFunc_(vecData, reinterpret_cast<const dist_t*>(getDataByInternalId(cand)), dim_);
+                            dist_t d = distFunc_(vecData, reinterpret_cast<const dist_t*>(getVectorByInternalId(cand)), dim_);
                             if (d < curDist) {
                                 curDist = d;
                                 currObj = cand;
@@ -1315,7 +1735,7 @@ namespace hnsw {
 
                 if (epDeleted) {
                     topCandidates.emplace(
-                        distFunc_(vecData, reinterpret_cast<const dist_t*>(getDataByInternalId(entryPointCopy)), dim_),
+                        distFunc_(vecData, reinterpret_cast<const dist_t*>(getVectorByInternalId(entryPointCopy)), dim_),
                         entryPointCopy);
                     if (topCandidates.size() > efConstruction_)
                         topCandidates.pop();
@@ -1354,7 +1774,7 @@ namespace hnsw {
         if (currObj == INVALID_ID) return result;
 
         const dist_t* qData = static_cast<const dist_t*>(queryData);
-        dist_t curDist = distFunc_(qData, reinterpret_cast<const dist_t*>(getDataByInternalId(currObj)), dim_);
+        dist_t curDist = distFunc_(qData, reinterpret_cast<const dist_t*>(getVectorByInternalId(currObj)), dim_);
 
         // Greedy descent through upper layers
         for (int level = maxLevelSnap; level > 0; level--) {
@@ -1364,8 +1784,8 @@ namespace hnsw {
                 std::shared_lock<std::shared_mutex> lock(adjacencyMutexes_[currObj]);
                 linklistsize_t* data = getAdjList(currObj, level);
                 int size = getListCount(data);
-                metricGraphHops++;
-                metricDistanceCalls += size;
+                metricGraphHops.fetch_add(1, std::memory_order_relaxed);
+                metricDistanceCalls.fetch_add(size, std::memory_order_relaxed);
 
                 tableidx_t* datal = reinterpret_cast<tableidx_t*>(data + 1);
                 for (int i = 0; i < size; i++) {
@@ -1374,7 +1794,7 @@ namespace hnsw {
                     if (cand >= maxElements_)
                         throw std::runtime_error("cand error: neighbor ID out of bounds");
 
-                    dist_t d = distFunc_(qData, reinterpret_cast<const dist_t*>(getDataByInternalId(cand)), dim_);
+                    dist_t d = distFunc_(qData, reinterpret_cast<const dist_t*>(getVectorByInternalId(cand)), dim_);
                     if (d < curDist) {
                         curDist = d;
                         currObj = cand;
@@ -1394,9 +1814,22 @@ namespace hnsw {
             topCandidates = searchBaseLayerST<false>(currObj, queryData, std::max(ef, k), isIdAllowed);
         }
 
-        // Trim to k results
+        // Trim to k results (before refiner to minimize exact distance calls)
         while (topCandidates.size() > k) {
             topCandidates.pop();
+        }
+
+        // Refiner: recompute exact float32 distances only for top-k
+        if (quantizationEnabled_) {
+            CandidateQueue refined;
+            while (!topCandidates.empty()) {
+                auto [approxDist, id] = topCandidates.top();
+                topCandidates.pop();
+                dist_t exactDist = distFunc_(qData,
+                    reinterpret_cast<const dist_t*>(getVectorByInternalId(id)), dim_);
+                refined.emplace(exactDist, id);
+            }
+            topCandidates = std::move(refined);
         }
 
         // Convert to external labels
@@ -1418,7 +1851,7 @@ namespace hnsw {
         }
         tableidx_t internalId = search->second;
         lockTable.unlock();
-        return reinterpret_cast<const dist_t*>(getDataByInternalId(internalId));
+        return reinterpret_cast<const dist_t*>(getVectorByInternalId(internalId));
     }
 
     void markDelete(label_t label) {
@@ -1483,7 +1916,12 @@ namespace hnsw {
 
     void updatePoint(const void* dataPoint, tableidx_t internalId, float updateNeighborProbability) {
         // Update vector data
-        memcpy(getDataByInternalId(internalId), dataPoint, kElemVecSize_);
+        memcpy(getVectorByInternalId(internalId), dataPoint, kElemVecSize_);
+
+        // Re-quantize if SQ enabled
+        if (quantizationEnabled_) {
+            quantizeVector(dataPoint, internalId);
+        }
 
         int maxLevelCopy = maxLevel_.load(std::memory_order_acquire);
         tableidx_t entryPointCopy = entryPoint_.load(std::memory_order_acquire);
@@ -1529,8 +1967,8 @@ namespace hnsw {
                         continue;
 
                     dist_t distance = distFunc_(
-                        reinterpret_cast<const dist_t*>(getDataByInternalId(neigh)),
-                        reinterpret_cast<const dist_t*>(getDataByInternalId(cand)),
+                        reinterpret_cast<const dist_t*>(getVectorByInternalId(neigh)),
+                        reinterpret_cast<const dist_t*>(getVectorByInternalId(cand)),
                         dim_);
 
                     if (candidates.size() < elementsToKeep) {
@@ -1571,7 +2009,7 @@ namespace hnsw {
         const dist_t* dp = static_cast<const dist_t*>(dataPoint);
 
         if (dataPointLevel < maxLevel) {
-            dist_t curDist = distFunc_(dp, reinterpret_cast<const dist_t*>(getDataByInternalId(currObj)), dim_);
+            dist_t curDist = distFunc_(dp, reinterpret_cast<const dist_t*>(getVectorByInternalId(currObj)), dim_);
 
             for (int level = maxLevel; level > dataPointLevel; level--) {
                 bool changed = true;
@@ -1584,7 +2022,7 @@ namespace hnsw {
 
                     for (int i = 0; i < size; i++) {
                         tableidx_t cand = datal[i];
-                        dist_t d = distFunc_(dp, reinterpret_cast<const dist_t*>(getDataByInternalId(cand)), dim_);
+                        dist_t d = distFunc_(dp, reinterpret_cast<const dist_t*>(getVectorByInternalId(cand)), dim_);
                         if (d < curDist) {
                             curDist = d;
                             currObj = cand;
@@ -1614,7 +2052,7 @@ namespace hnsw {
                 if (epDeleted) {
                     const dist_t* dp = static_cast<const dist_t*>(dataPoint);
                     filteredCandidates.emplace(
-                        distFunc_(dp, reinterpret_cast<const dist_t*>(getDataByInternalId(entryPointInternalId)), dim_),
+                        distFunc_(dp, reinterpret_cast<const dist_t*>(getVectorByInternalId(entryPointInternalId)), dim_),
                         entryPointInternalId);
                     if (filteredCandidates.size() > efConstruction_)
                         filteredCandidates.pop();

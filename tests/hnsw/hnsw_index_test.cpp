@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <fstream>
 #include <stdexcept>
+#include <unordered_set>
 
 using namespace arrow;
 using arrow::testing::RandomVector;
@@ -357,5 +358,169 @@ TEST_F(HNSWIndexTest, SaveLargeIndex) {
     HNSWIndex loaded(dim, Space::Cosine);
     EXPECT_NO_THROW(loaded.loadIndex(path));
     EXPECT_EQ(loaded.size(), n);
+}
+
+// ============================================================================
+// Scalar Quantization (SQ8) Tests
+// ============================================================================
+
+TEST_F(HNSWIndexTest, SQ_InsertAndSearch) {
+    const size_t dim = 128;
+    HNSWConfig config;
+    config.maxElements = 1000;
+    config.M = 16;
+    config.efConstruction = 100;
+    config.quantize = true;
+
+    HNSWIndex index(dim, Space::L2, config);
+
+    std::mt19937 gen(42);
+    const size_t n = 500;
+    std::vector<std::vector<float>> vectors(n);
+    for (size_t i = 0; i < n; ++i) {
+        vectors[i] = RandomVector(dim, gen);
+        EXPECT_TRUE(index.insert(i, vectors[i]));
+    }
+    EXPECT_EQ(index.size(), n);
+
+    // Search should return results
+    auto results = index.search(vectors[0], 10, 200);
+    EXPECT_EQ(results.size(), 10);
+    // The closest result should be the query itself
+    EXPECT_EQ(results[0].id, 0);
+}
+
+TEST_F(HNSWIndexTest, SQ_RecallComparedToFloat32) {
+    const size_t dim = 128;
+    const size_t n = 1000;
+    const size_t k = 10;
+    const size_t ef = 200;
+
+    // Build float32 index
+    HNSWConfig configFloat;
+    configFloat.maxElements = n;
+    configFloat.M = 32;
+    configFloat.efConstruction = 200;
+    configFloat.quantize = false;
+    HNSWIndex floatIndex(dim, Space::L2, configFloat);
+
+    // Build SQ index
+    HNSWConfig configSQ = configFloat;
+    configSQ.quantize = true;
+    HNSWIndex sqIndex(dim, Space::L2, configSQ);
+
+    std::mt19937 genInsert(42);
+    std::vector<std::vector<float>> vectors(n);
+    for (size_t i = 0; i < n; ++i) {
+        vectors[i] = RandomVector(dim, genInsert);
+        floatIndex.insert(i, vectors[i]);
+        sqIndex.insert(i, vectors[i]);
+    }
+
+    // Compare recall: SQ should achieve >= 90% of float32's recall
+    size_t sqMatches = 0;
+    const size_t numQueries = 50;
+    std::mt19937 genQuery(10000);
+    for (size_t q = 0; q < numQueries; ++q) {
+        auto query = RandomVector(dim, genQuery);
+        auto floatResults = floatIndex.search(query, k, ef);
+        auto sqResults = sqIndex.search(query, k, ef);
+
+        // Count how many SQ results appear in float32 results
+        std::unordered_set<InternalID> floatSet;
+        for (const auto& r : floatResults) floatSet.insert(r.id);
+        for (const auto& r : sqResults) {
+            if (floatSet.count(r.id)) ++sqMatches;
+        }
+    }
+
+    double sqRecall = static_cast<double>(sqMatches) / (numQueries * k);
+    EXPECT_GE(sqRecall, 0.90) << "SQ recall (" << sqRecall
+        << ") should be >= 90% of float32 results";
+}
+
+TEST_F(HNSWIndexTest, SQ_InnerProductSpace) {
+    const size_t dim = 64;
+    HNSWConfig config;
+    config.maxElements = 500;
+    config.M = 16;
+    config.efConstruction = 100;
+    config.quantize = true;
+
+    HNSWIndex index(dim, Space::InnerProduct, config);
+
+    std::mt19937 gen(42);
+    const size_t n = 200;
+    for (size_t i = 0; i < n; ++i) {
+        auto vec = RandomVector(dim, gen);  // Already normalized by RandomVector
+        EXPECT_TRUE(index.insert(i, vec));
+    }
+
+    auto query = RandomVector(dim, gen);
+    auto results = index.search(query, 10, 200);
+    EXPECT_EQ(results.size(), 10);
+}
+
+TEST_F(HNSWIndexTest, SQ_PersistenceRoundTrip) {
+    const size_t dim = 64;
+    const size_t n = 200;
+    HNSWConfig config;
+    config.maxElements = 500;
+    config.M = 16;
+    config.efConstruction = 100;
+    config.quantize = true;
+
+    HNSWIndex index(dim, Space::L2, config);
+    std::mt19937 gen(42);
+    std::vector<std::vector<float>> vectors(n);
+    for (size_t i = 0; i < n; ++i) {
+        vectors[i] = RandomVector(dim, gen);
+        index.insert(i, vectors[i]);
+    }
+
+    // Save and reload
+    auto path = GetTestPath("sq_index.bin");
+    EXPECT_TRUE(index.saveIndex(path).ok());
+
+    HNSWIndex loaded(dim, Space::L2, config);
+    EXPECT_TRUE(loaded.loadIndex(path).ok());
+    EXPECT_EQ(loaded.size(), n);
+
+    // Search results should be similar
+    auto query = RandomVector(dim, gen);
+    auto origResults = index.search(query, 10, 200);
+    auto loadedResults = loaded.search(query, 10, 200);
+
+    EXPECT_EQ(origResults.size(), loadedResults.size());
+
+    // At least 8 of top 10 should match (allowing for minor differences)
+    std::unordered_set<InternalID> origSet;
+    for (const auto& r : origResults) origSet.insert(r.id);
+    size_t matches = 0;
+    for (const auto& r : loadedResults) {
+        if (origSet.count(r.id)) ++matches;
+    }
+    EXPECT_GE(matches, 8) << "Loaded SQ index should produce similar results";
+}
+
+TEST_F(HNSWIndexTest, SQ_AutoResize) {
+    const size_t dim = 32;
+    HNSWConfig config;
+    config.maxElements = 10;  // Small initial capacity
+    config.M = 8;
+    config.efConstruction = 50;
+    config.quantize = true;
+
+    HNSWIndex index(dim, Space::L2, config);
+
+    std::mt19937 gen(42);
+    // Insert more than initial capacity to trigger resize
+    for (size_t i = 0; i < 50; ++i) {
+        EXPECT_TRUE(index.insert(i, RandomVector(dim, gen)));
+    }
+    EXPECT_EQ(index.size(), 50);
+
+    auto results = index.search(RandomVector(dim, gen), 5, 50);
+    EXPECT_EQ(results.size(), 5);
 }
 

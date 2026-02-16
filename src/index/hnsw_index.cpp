@@ -5,6 +5,7 @@
 #include "index/hnsw/hnsw.cpp"
 #include "index/hnsw/space_ip.h"
 #include "index/hnsw/space_l2.h"
+#include "index/hnsw/scalar_quantizer.h"
 #include <algorithm>
 #include <iostream>
 #include <memory>
@@ -32,11 +33,18 @@ HNSWIndex::HNSWIndex(size_t dim, Space space,
       throw std::invalid_argument("Unsupported space type");
   }
 
+  auto sqDistType = (space == Space::L2)
+      ? hnsw::SQDistType::L2 : hnsw::SQDistType::IP;
+
   hnsw_ = std::make_unique<hnsw::HierarchicalNSW<float>>(
       space_.get(),
       config.maxElements,
       config.M,
-      config.efConstruction);
+      config.efConstruction,
+      42,           // randSeed
+      false,        // allowReuseDeleted
+      config.quantize,
+      sqDistType);
 }
 
 HNSWIndex::~HNSWIndex() = default;
@@ -148,6 +156,12 @@ utils::Status HNSWIndex::saveIndex(const std::string& path) const {
 utils::Status HNSWIndex::loadIndex(const std::string& path) {
   try {
     hnsw_->loadIndex(path, space_.get());
+    // Set SQ kernels if quantization was loaded from the index file
+    if (hnsw_->isQuantizationEnabled()) {
+        auto sqDistType = (spaceKind_ == Space::L2)
+            ? hnsw::SQDistType::L2 : hnsw::SQDistType::IP;
+        hnsw_->setSQDistType(sqDistType);
+    }
     return utils::OkStatus();
   } catch (const std::exception& e) {
     return utils::Status(utils::StatusCode::kCorruption,
@@ -185,6 +199,14 @@ const float* HNSWIndex::getVectorData(InternalID id) const {
 
 size_t HNSWIndex::capacity() const {
     return hnsw_->getMaxElements();
+}
+
+void HNSWIndex::reorderBFS() {
+    hnsw_->reorderBFS();
+}
+
+void HNSWIndex::computeGlobalSQ() {
+    hnsw_->computeGlobalSQ();
 }
 
 }  // namespace arrow
