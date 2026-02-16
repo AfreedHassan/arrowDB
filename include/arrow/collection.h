@@ -28,13 +28,17 @@ namespace arrow {
  */
 class Collection {
 public:
-    /// Constructs a Collection with the given configuration.
-    /// IndexConfig is embedded in CollectionConfig.
+    /// Creates an in-memory Collection with the given configuration.
     explicit Collection(const CollectionConfig& config);
 
-    /// Constructs a Collection with persistence path for durability.
-    Collection(const CollectionConfig& config,
-               const std::filesystem::path& persistencePath);
+    /// Creates a persistent Collection with file locking and WAL.
+    ///
+    /// @param config Collection configuration
+    /// @param persistencePath Directory for persistence data
+    /// @return The Collection, or error (e.g., file lock held by another process)
+    static utils::Result<Collection> create(
+        const CollectionConfig& config,
+        const std::filesystem::path& persistencePath);
 
     /// Destructor
     ~Collection();
@@ -208,7 +212,7 @@ private:
     class Impl;
     std::unique_ptr<Impl> pImpl_;
 
-    // Private constructor used by load()
+    // Private constructor used by load() and create()
     Collection(std::unique_ptr<Impl> impl);
 };
 

@@ -107,29 +107,30 @@ public:
         pIndex_(std::make_unique<HNSWIndex>(config.dimensions, config.space,
                                             hnswConfig_)) {}
 
-  Impl(const CollectionConfig &config,
-       const std::filesystem::path &persistencePath)
-      : config_{config.name, config.dimensions, config.space, DataType::Float32},
-        hnswConfig_{config.index.max_elements, config.index.M, config.index.ef_construction},
-        pIndex_(std::make_unique<HNSWIndex>(config.dimensions, config.space, hnswConfig_)),
-        persistencePath_(persistencePath) {
-    // Acquire exclusive file lock
-    auto lockResult = FileLock::acquire(persistencePath);
-    if (lockResult.ok()) {
-      fileLock_ = std::move(lockResult.value());
-    } else {
-      ARROW_LOG_ERROR("Collection", "Failed to acquire file lock: " +
-        lockResult.status().message());
-      throw std::runtime_error("Failed to acquire file lock on " +
-        persistencePath.string() + ": " + lockResult.status().message());
-    }
+  static utils::Result<std::unique_ptr<Impl>> create(
+      const CollectionConfig& config,
+      const std::filesystem::path& persistencePath) {
+    auto impl = std::make_unique<Impl>(config);
+    impl->persistencePath_ = persistencePath;
 
-    initializeWal();
-    auto markerStatus = writeDirtyShutdownMarker();
+    auto lockResult = FileLock::acquire(persistencePath);
+    if (!lockResult.ok()) {
+      ARROW_LOG_ERROR("Collection", "Failed to acquire file lock: " +
+          lockResult.status().message());
+      return utils::Status(utils::StatusCode::kIoError,
+          "Failed to acquire file lock on " + persistencePath.string() +
+          ": " + lockResult.status().message());
+    }
+    impl->fileLock_ = std::move(lockResult.value());
+
+    impl->initializeWal();
+    auto markerStatus = impl->writeDirtyShutdownMarker();
     if (!markerStatus.ok()) {
       ARROW_LOG_WARN("Collection", "Failed to write dirty shutdown marker: " +
-        markerStatus.message());
+          markerStatus.message());
     }
+
+    return impl;
   }
 
   void initializeWal() {
@@ -316,8 +317,7 @@ public:
       if (!metaStatus.ok()) return metaStatus;
     }
 
-    auto internalIDResult = idSpace_.reserve(id);
-
+    auto internalIDResult = idSpace_.assign(id);
     if (!internalIDResult.ok()) {
       return internalIDResult.status();
     }
@@ -325,22 +325,25 @@ public:
     InternalID internalID = internalIDResult.value();
 
     if (!pIndex_->insert(internalID, vec)) {
+      idSpace_.remove(id);
       return utils::Status(utils::StatusCode::kInternal, "Insert failed");
     }
 
-    idSpace_.commit(id, internalID);
-
-    // Log to WAL after successful index insert
+    // Log to WAL after successful index insert.
+    // WAL failures are logged but not propagated — the insert already
+    // succeeded in-memory and is immediately searchable. The only risk
+    // is losing this entry on crash (it won't be replayed from WAL).
     if (pWal_) {
       auto entryResult = builder_.buildInsert(id, config_.dimensions, vec);
       if (!entryResult.ok()) {
-        ARROW_LOG_ERROR("Collection", "WAL entry build failed for " + id + ": " + entryResult.status().message());
-        return entryResult.status();
-      }
-      wal::Status status = pWal_->log(entryResult.value());
-      if (!status.ok()) {
-        ARROW_LOG_ERROR("Collection", "WAL log failed for " + id + ": " + status.message());
-        return status;
+        ARROW_LOG_ERROR("Collection", "WAL entry build failed for " + id +
+            ": " + entryResult.status().message());
+      } else {
+        wal::Status walStatus = pWal_->log(entryResult.value());
+        if (!walStatus.ok()) {
+          ARROW_LOG_ERROR("Collection", "WAL log failed for " + id +
+              ": " + walStatus.message());
+        }
       }
     }
 
@@ -438,12 +441,16 @@ public:
   void compactionLoop(std::stop_token st) {
     std::unique_lock lock(mutex_);
     while (!st.stop_requested()) {
-      // implicit atomic release of lock
       cv_.wait(lock, [&] {
           return opsSinceLastSave_ >= kCompactionOpsThreshold || st.stop_requested();
           });
       if (st.stop_requested()) break;
-      saveLocked(persistencePath_->string());
+      auto status = saveLocked(persistencePath_->string());
+      if (!status.ok()) {
+        ARROW_LOG_ERROR("Collection", "Background compaction save failed: " +
+            status.message());
+        // Don't reset opsSinceLastSave_ — next cycle will retry
+      }
     }
   }
 
@@ -505,9 +512,15 @@ public:
 Collection::Collection(const CollectionConfig &config)
     : pImpl_(std::make_unique<Impl>(config)) {}
 
-Collection::Collection(const CollectionConfig &config,
-                       const std::filesystem::path &persistencePath)
-    : pImpl_(std::make_unique<Impl>(config, persistencePath)) {}
+utils::Result<Collection> Collection::create(
+    const CollectionConfig& config,
+    const std::filesystem::path& persistencePath) {
+  auto result = Impl::create(config, persistencePath);
+  if (!result.ok()) {
+    return result.status();
+  }
+  return Collection(std::move(result.value()));
+}
 
 Collection::Collection(std::unique_ptr<Impl> impl) : pImpl_(std::move(impl)) {}
 
@@ -623,7 +636,7 @@ utils::Result<BatchInsertResult> Collection::insertBatch(
 
     const auto &[vectorID, vec] = batch[i];
 
-    auto internalIDResult = pImpl_->idSpace_.reserve(vectorID);
+    auto internalIDResult = pImpl_->idSpace_.assign(vectorID);
     if (!internalIDResult.ok()) {
       result.results[i].id = 0;
       result.results[i].status = internalIDResult.status();
@@ -633,7 +646,6 @@ utils::Result<BatchInsertResult> Collection::insertBatch(
     InternalID internalID = internalIDResult.value();
 
     if (pImpl_->pIndex_->insert(internalID, vec)) {
-      pImpl_->idSpace_.commit(vectorID, internalID);
       result.results[i].id = internalID;
       result.results[i].status = utils::OkStatus();
       result.successCount++;
@@ -654,6 +666,7 @@ utils::Result<BatchInsertResult> Collection::insertBatch(
         successfulWalEntries.push_back(std::move(entryResult.value()));
       }
     } else {
+      pImpl_->idSpace_.remove(vectorID);
       result.results[i].id = internalID;
       result.results[i].status = utils::Status(utils::StatusCode::kInternal,
                                              "HNSW insert failed");
@@ -863,7 +876,9 @@ utils::Result<Collection> Collection::load(const std::string &directoryPath) {
       " entries but index has " + std::to_string(indexSize) + " vectors");
   }
 
-  auto impl = std::make_unique<Impl>(collectionConfig, fs::path(directoryPath));
+  auto implResult = Impl::create(collectionConfig, fs::path(directoryPath));
+  if (!implResult.ok()) return implResult.status();
+  auto impl = std::move(implResult.value());
   impl->pIndex_ = std::move(index);
   impl->idSpace_ = std::move(idSpace);
   impl->metadata_ = std::move(metadata);

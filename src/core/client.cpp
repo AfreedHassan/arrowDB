@@ -52,7 +52,11 @@ public:
         if (collectionPath.empty()) {
             collection = std::make_unique<Collection>(effectiveConfig);
         } else {
-            collection = std::make_unique<Collection>(effectiveConfig, collectionPath);
+            auto result = Collection::create(effectiveConfig, collectionPath);
+            if (!result.ok()) {
+                return result.status();
+            }
+            collection = std::make_unique<Collection>(std::move(result.value()));
         }
 
         Collection* ptr = collection.get();
