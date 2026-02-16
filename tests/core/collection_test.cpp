@@ -390,7 +390,9 @@ TEST_F(CollectionWalTest, WalLoggingEnabledWithPersistencePath) {
   auto config = GetTestConfig();
   std::string persistencePath = GetTestPath("wal_enabled");
   {
-    Collection collection(config, persistencePath);
+    auto createResult = Collection::create(config, persistencePath);
+    ASSERT_TRUE(createResult.ok()) << createResult.status().message();
+    Collection collection = std::move(createResult.value());
 
     std::vector<float> vec = RandomVector(128, gen);
     auto status = collection.insert(uuidv4(1), vec);
@@ -431,7 +433,9 @@ TEST_F(CollectionWalTest, WalNotCreatedWithoutPersistencePath) {
 TEST_F(CollectionWalTest, WalLogOnInsert) {
   auto config = GetTestConfig();
   std::string persistencePath = GetTestPath("insert_wal");
-  Collection collection(config, persistencePath);
+  auto createResult = Collection::create(config, persistencePath);
+  ASSERT_TRUE(createResult.ok()) << createResult.status().message();
+  Collection collection = std::move(createResult.value());
 
   const size_t numInserts = 10;
   for (size_t i = 0; i < numInserts; ++i) {
@@ -462,7 +466,9 @@ TEST_F(CollectionWalTest, WalLogOnInsert) {
 TEST_F(CollectionWalTest, WalLogOnDelete) {
   auto config = GetTestConfig();
   std::string persistencePath = GetTestPath("delete_wal");
-  Collection collection(config, persistencePath);
+  auto createResult = Collection::create(config, persistencePath);
+  ASSERT_TRUE(createResult.ok()) << createResult.status().message();
+  Collection collection = std::move(createResult.value());
 
   const size_t numInserts = 5;
   for (size_t i = 0; i < numInserts; ++i) {
@@ -501,7 +507,9 @@ TEST_F(CollectionWalTest, WalLogOnDelete) {
 TEST_F(CollectionWalTest, CheckpointTruncatesWalAfterSave) {
   auto config = GetTestConfig();
   std::string persistencePath = GetTestPath("checkpoint_wal");
-  Collection collection(config, persistencePath);
+  auto createResult = Collection::create(config, persistencePath);
+  ASSERT_TRUE(createResult.ok()) << createResult.status().message();
+  Collection collection = std::move(createResult.value());
 
   const size_t numInserts = 10;
   for (size_t i = 0; i < numInserts; ++i) {
@@ -538,7 +546,9 @@ TEST_F(CollectionWalTest, CrashRecoveryReplaysWal) {
 
   // Phase 1: Create collection, insert 10 vectors, save (clean shutdown)
   {
-    Collection collection(config, persistencePath);
+    auto createResult = Collection::create(config, persistencePath);
+    ASSERT_TRUE(createResult.ok()) << createResult.status().message();
+    Collection collection = std::move(createResult.value());
 
     for (size_t i = 0; i < 10; ++i) {
       std::vector<float> vec = RandomVector(128, gen);
@@ -581,7 +591,9 @@ TEST_F(CollectionWalTest, LoadWithoutCrashDoesNotReplayWal) {
   std::string persistencePath = GetTestPath("no_crash");
 
   {
-    Collection collection(config, persistencePath);
+    auto createResult = Collection::create(config, persistencePath);
+    ASSERT_TRUE(createResult.ok()) << createResult.status().message();
+    Collection collection = std::move(createResult.value());
 
     for (size_t i = 0; i < 5; ++i) {
       std::vector<float> vec = RandomVector(128, gen);
@@ -607,7 +619,9 @@ TEST_F(CollectionWalTest, WalReplayPreservesMetadata) {
 
   // Phase 1: Create collection with 10 vectors + metadata, save
   {
-    Collection collection(config, persistencePath);
+    auto createResult = Collection::create(config, persistencePath);
+    ASSERT_TRUE(createResult.ok()) << createResult.status().message();
+    Collection collection = std::move(createResult.value());
 
     for (size_t i = 0; i < 10; ++i) {
       std::vector<float> vec = RandomVector(128, gen);
@@ -657,7 +671,9 @@ TEST_F(CollectionWalTest, DeleteReplayMarksVectorAsDeleted) {
 
   // Phase 1: Create collection with 10 vectors, save
   {
-    Collection collection(config, persistencePath);
+    auto createResult = Collection::create(config, persistencePath);
+    ASSERT_TRUE(createResult.ok()) << createResult.status().message();
+    Collection collection = std::move(createResult.value());
 
     for (size_t i = 0; i < 10; ++i) {
       std::vector<float> vec = RandomVector(128, gen);
@@ -708,7 +724,9 @@ TEST_F(CollectionWalTest, ContinuityAcrossRestarts) {
 
   // Phase 1: Create, insert 5 vectors, save
   {
-    Collection collection(config, persistencePath);
+    auto createResult = Collection::create(config, persistencePath);
+    ASSERT_TRUE(createResult.ok()) << createResult.status().message();
+    Collection collection = std::move(createResult.value());
 
     for (size_t i = 0; i < 5; ++i) {
       std::vector<float> vec = RandomVector(128, gen);
@@ -755,7 +773,9 @@ TEST_F(CollectionWalTest, EmptyWalDoesNotCauseRecovery) {
   std::string persistencePath = GetTestPath("empty_wal");
 
   {
-    Collection collection(config, persistencePath);
+    auto createResult = Collection::create(config, persistencePath);
+    ASSERT_TRUE(createResult.ok()) << createResult.status().message();
+    Collection collection = std::move(createResult.value());
 
     for (size_t i = 0; i < 5; ++i) {
       std::vector<float> vec = RandomVector(128, gen);
@@ -780,7 +800,9 @@ TEST_F(CollectionWalTest, RecoveryMetadataIsPersisted) {
   std::string persistencePath = GetTestPath("recovery_meta");
 
   {
-    Collection collection(config, persistencePath);
+    auto createResult = Collection::create(config, persistencePath);
+    ASSERT_TRUE(createResult.ok()) << createResult.status().message();
+    Collection collection = std::move(createResult.value());
 
     for (size_t i = 0; i < 10; ++i) {
       std::vector<float> vec = RandomVector(128, gen);
@@ -942,7 +964,9 @@ TEST_F(CollectionBatchTest, InsertBatchWithPersistence) {
 
   // Insert batch with WAL
   {
-    Collection collection(config, persistencePath);
+    auto createResult = Collection::create(config, persistencePath);
+    ASSERT_TRUE(createResult.ok()) << createResult.status().message();
+    Collection collection = std::move(createResult.value());
 
     std::vector<std::pair<VectorID, std::vector<float>>> batch;
     std::mt19937 gen(42);

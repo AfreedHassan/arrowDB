@@ -1023,7 +1023,9 @@ TEST_F(WALTest, IdempotentReplay) {
     // Create collection, insert data, and save (this also creates the WAL)
     {
         CollectionConfig config{.name = "test", .dimensions = 3, .space = Space::Cosine};
-        Collection col(config, colPath);
+        auto createResult = Collection::create(config, colPath);
+        ASSERT_TRUE(createResult.ok()) << createResult.status().message();
+        Collection col = std::move(createResult.value());
 
         EXPECT_TRUE(col.insert("1", {1.0f, 2.0f, 3.0f}).ok());
         EXPECT_TRUE(col.insert("2", {4.0f, 5.0f, 6.0f}).ok());
