@@ -49,10 +49,10 @@ struct SharedState {
     config.name = "bench_384d_100k";
     config.dimensions = kDim;
     config.space = arrow::Space::L2;
-    config.index.max_elements = kN;
-    config.index.M = 16;
-    config.index.ef_construction = 200;
-    config.index.quantize = true;
+    config.index_config.max_elements = kN;
+    config.index_config.quantization = arrow::Quantization::INT8;
+    config.index_config.hnsw_params.M = 16;
+    config.index_config.hnsw_params.ef_construction = 200;
 
     auto result = client->getOrCreateCollection(config.name, config);
     if (!result.ok()) {

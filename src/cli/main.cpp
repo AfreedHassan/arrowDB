@@ -457,7 +457,7 @@ int main(int argc, char *argv[]) {
       std::cout << "No results found\n";
     } else {
       IndexSearchResult &result = sr[0];
-      auto metaResult = collection.getMetadata(std::to_string(result.id));
+      auto metaResult = collection.getMetadata(result.id);
       std::string text = metaResult.ok() ? std::get<std::string>(metaResult.value()["text"]) : "(no metadata)";
       std::cout << "Retrieved: " << text << "\n";
     }
