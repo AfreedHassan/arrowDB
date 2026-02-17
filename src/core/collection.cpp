@@ -4,6 +4,7 @@
 #include "arrow/utils/utils.h"
 #include "embedder/embedder.h"
 #include "internal/hnsw_index.h"
+#include <nlohmann/json.hpp>
 #include "internal/wal.h"
 #include "internal/id_space.h"
 #include "internal/collection_persistence.h"
@@ -108,8 +109,9 @@ public:
   explicit Impl(const CollectionConfig &config)
       : config_{config.name, config.dimensions, config.space,
                 DataType::Float32},
-        hnswConfig_{config.index.max_elements, config.index.M,
-                    config.index.ef_construction, config.index.quantize},
+        hnswConfig_{config.index_config.max_elements, config.index_config.hnsw_params.M,
+                    config.index_config.hnsw_params.ef_construction,
+                    config.index_config.quantization != Quantization::None},
         pIndex_(std::make_unique<HNSWIndex>(config.dimensions, config.space,
                                             hnswConfig_)) {}
 
@@ -264,13 +266,13 @@ public:
     return utils::OkStatus();
   }
 
-  static std::vector<std::vector<IndexSearchResult>>
+  static std::vector<std::vector<HNSWSearchResult>>
   parallelSearch(const HNSWIndex *index,
                  const std::vector<std::vector<float>> &queries, uint32_t k,
                  uint32_t ef) {
 
     const size_t numQueries = queries.size();
-    std::vector<std::vector<IndexSearchResult>> results(numQueries);
+    std::vector<std::vector<HNSWSearchResult>> results(numQueries);
 
     const size_t hwConcurrency = std::thread::hardware_concurrency();
     const size_t numThreads =
@@ -892,7 +894,15 @@ std::vector<IndexSearchResult>
 Collection::search(const std::vector<float> &query, uint32_t k,
                    uint32_t ef) const {
   std::shared_lock lock(pImpl_->mutex_);
-  return pImpl_->pIndex_->search(query, k, ef);
+  auto internal = pImpl_->pIndex_->search(query, k, ef);
+  std::vector<IndexSearchResult> results;
+  results.reserve(internal.size());
+  for (const auto &r : internal) {
+    auto vid = pImpl_->idSpace_.resolve(r.id);
+    if (vid.ok())
+      results.push_back({std::string(vid.value()), r.score});
+  }
+  return results;
 }
 
 std::vector<IndexSearchResult>
@@ -912,7 +922,15 @@ Collection::search(const std::vector<float>& query, uint32_t k,
     static const Metadata empty;
     return filter(empty);
   };
-  return pImpl_->pIndex_->search(query, k, idFilter, ef);
+  auto internal = pImpl_->pIndex_->search(query, k, idFilter, ef);
+  std::vector<IndexSearchResult> results;
+  results.reserve(internal.size());
+  for (const auto &r : internal) {
+    auto vid = pImpl_->idSpace_.resolve(r.id);
+    if (vid.ok())
+      results.push_back({std::string(vid.value()), r.score});
+  }
+  return results;
 }
 
 SearchResult
@@ -934,15 +952,16 @@ SearchResult Collection::query(const std::vector<float> &queryVec, uint32_t k,
   result.hits.reserve(indexResults.size());
 
   for (const auto &ir : indexResults) {
+    auto vid = pImpl_->idSpace_.resolve(ir.id);
+    if (!vid.ok()) continue;
+
     ScoredDocument doc;
-    doc.id = ir.id;
+    doc.id = std::string(vid.value());
     doc.score = ir.score;
 
     auto metaIt = pImpl_->metadata_->find(ir.id);
     if (metaIt != pImpl_->metadata_->end()) {
-      doc.metadata = utils::metadataToJson(metaIt->second);
-    } else {
-      doc.metadata = nlohmann::json::object();
+      doc.metadata = metaIt->second;
     }
     result.hits.push_back(std::move(doc));
   }
@@ -962,7 +981,17 @@ Collection::searchBatch(const std::vector<std::vector<float>> &queries,
     }
   }
 
-  return Impl::parallelSearch(pImpl_->pIndex_.get(), queries, k, ef);
+  auto internalBatch = Impl::parallelSearch(pImpl_->pIndex_.get(), queries, k, ef);
+  std::vector<std::vector<IndexSearchResult>> mapped(internalBatch.size());
+  for (size_t i = 0; i < internalBatch.size(); ++i) {
+    mapped[i].reserve(internalBatch[i].size());
+    for (const auto &r : internalBatch[i]) {
+      auto vid = pImpl_->idSpace_.resolve(r.id);
+      if (vid.ok())
+        mapped[i].push_back({std::string(vid.value()), r.score});
+    }
+  }
+  return mapped;
 }
 
 utils::Result<std::vector<float>> Collection::get(const VectorID& id) const {
@@ -1005,6 +1034,23 @@ utils::Status Collection::remove(const VectorID& id) {
   return pImpl_->removeLocked(id);
 }
 
+utils::Status Collection::optimize() {
+  std::unique_lock lock(pImpl_->mutex_);
+  if (!pImpl_->hnswConfig_.quantize) {
+    return utils::OkStatus();  // No-op when quantization is disabled
+  }
+  if (pImpl_->pIndex_->isGlobalSQ()) {
+    return utils::OkStatus();  // Already optimized
+  }
+  if (pImpl_->pIndex_->size() == 0) {
+    return utils::OkStatus();  // Nothing to optimize
+  }
+  ARROW_LOG_INFO("Collection", "Optimizing index: computing global SQ + BFS reorder");
+  pImpl_->pIndex_->computeGlobalSQ();
+  pImpl_->pIndex_->reorderBFS();
+  return utils::OkStatus();
+}
+
 utils::Status Collection::save(const std::string &directoryPath) {
   namespace fs = std::filesystem;
   // Use phased save if saving to the configured persistence path
@@ -1028,11 +1074,15 @@ utils::Result<Collection> Collection::load(const std::string &directoryPath) {
     .name = config.name,
     .dimensions = config.dimensions,
     .space = config.space,
-    .index = {
+    .index_config = {
+      .index_type = IndexType::HNSW,
       .max_elements = hnswConfig.maxElements,
-      .M = hnswConfig.M,
-      .ef_construction = hnswConfig.efConstruction,
-      .quantize = hnswConfig.quantize
+      .quantization = hnswConfig.quantize ? Quantization::INT8 : Quantization::None,
+      .hnsw_params = {
+        .M = hnswConfig.M,
+        .ef_construction = hnswConfig.efConstruction,
+        .ef_search = 200,  // Not persisted; use default
+      }
     }
   };
 
@@ -1097,6 +1147,15 @@ utils::Result<Collection> Collection::load(const std::string &directoryPath) {
       utils::Status replayStatus = impl->replayWal(recovery.lastPersistedLsn);
       if (!replayStatus.ok()) return replayStatus;
     }
+  }
+
+  // Auto-optimize: if quantization is enabled and not already globally optimized,
+  // apply global SQ + BFS reorder for best search performance.
+  if (impl->hnswConfig_.quantize && impl->pIndex_->size() > 0
+      && !impl->pIndex_->isGlobalSQ()) {
+    ARROW_LOG_INFO("Collection", "Auto-optimizing index on load: global SQ + BFS reorder");
+    impl->pIndex_->computeGlobalSQ();
+    impl->pIndex_->reorderBFS();
   }
 
   impl->startCompaction();
