@@ -2,7 +2,6 @@
 #define TYPES_H
 
 #include <cstdint>
-#include <functional>
 #include <string>
 #include <variant>
 #include <unordered_map>
@@ -43,10 +42,10 @@ namespace arrow {
 	using MetadataValue = std::variant<int64_t, double, std::string, bool>;
 	using Metadata = std::unordered_map<std::string, MetadataValue>;
 
-	/// Predicate for filtering search results by metadata.
-	using MetadataFilter = std::function<bool(const Metadata&)>;
+	// Forward declaration — full definition in arrow/filter.h.
+	class MetadataFilter;
 
-	// ─── Schema ───────────────────────────────────────────────
+	// ─── Metadata Schema ─────────────────────────────────────
 
 	/// Supported metadata field types for schema validation.
 	enum class FieldType : uint8_t {
@@ -63,13 +62,15 @@ namespace arrow {
 		bool required = false;
 	};
 
+  constexpr bool kRequiredField = true;
+
 	/// Schema for validating metadata on insert/update.
 	/// An empty schema (no fields) disables validation (backward compat).
-	struct Schema {
+	struct MetadataSchema {
 		std::vector<FieldDef> fields;
 
 		/// Builder: add a field definition and return *this for chaining.
-		Schema& field(std::string name, FieldType type, bool required = false) {
+		MetadataSchema& field(std::string name, FieldType type, bool required = false) {
 			fields.push_back({std::move(name), type, required});
 			return *this;
 		}

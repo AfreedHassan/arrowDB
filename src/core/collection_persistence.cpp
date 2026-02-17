@@ -28,7 +28,7 @@ FieldType jsonToFieldType(const utils::json& j) {
   return FieldType::String; // fallback
 }
 
-utils::json schemaToJson(const Schema& schema) {
+utils::json schemaToJson(const MetadataSchema& schema) {
   utils::json arr = utils::json::array();
   for (const auto& f : schema.fields) {
     utils::json fj = utils::json::object();
@@ -40,8 +40,8 @@ utils::json schemaToJson(const Schema& schema) {
   return arr;
 }
 
-Schema jsonToSchema(const utils::json& j) {
-  Schema schema;
+MetadataSchema jsonToSchema(const utils::json& j) {
+  MetadataSchema schema;
   if (!j.is_array()) return schema;
   for (const auto& fj : j) {
     FieldDef fd;
