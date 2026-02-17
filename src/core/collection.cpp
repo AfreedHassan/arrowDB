@@ -53,7 +53,7 @@ static utils::Status validateMetadata(const Metadata& meta) {
 }
 
 /// Validate metadata against schema. Empty schema = no validation.
-static utils::Status validateMetadataSchema(const Schema& schema, const Metadata& meta) {
+static utils::Status validateMetadataSchema(const MetadataSchema& schema, const Metadata& meta) {
   if (schema.empty()) return utils::OkStatus();
 
   for (const auto& field : schema.fields) {
@@ -974,7 +974,7 @@ Collection::search(const std::vector<float> &query, uint32_t k,
 
 std::vector<IndexSearchResult>
 Collection::search(const std::vector<float>& query, uint32_t k,
-                   MetadataFilter filter, uint32_t ef) const {
+                   const MetadataFilter& filter, uint32_t ef) const {
   // O(1) snapshot via shared_ptr copy; COW ensures writers don't invalidate it.
   std::shared_ptr<const Impl::MetadataMap> metadataSnap;
   {
@@ -1033,6 +1033,44 @@ SearchResult Collection::query(const std::vector<float> &queryVec, uint32_t k,
     result.hits.push_back(std::move(doc));
   }
 
+  return result;
+}
+
+SearchResult Collection::query(const std::vector<float>& queryVec, uint32_t k,
+                               const MetadataFilter& filter, uint32_t ef) const {
+  // Snapshot metadata, then search with filter applied during graph traversal.
+  std::shared_ptr<const Impl::MetadataMap> metadataSnap;
+  {
+    std::shared_lock lock(pImpl_->mutex_);
+    if (pImpl_->pIndex_->size() == 0) return {};
+    metadataSnap = pImpl_->metadata_;
+  }
+
+  HNSWIndex::IDFilter idFilter = [&metadataSnap, &filter](InternalID id) -> bool {
+    auto it = metadataSnap->find(id);
+    if (it != metadataSnap->end()) return filter(it->second);
+    static const Metadata empty;
+    return filter(empty);
+  };
+
+  auto indexResults = pImpl_->pIndex_->search(queryVec, k, idFilter, ef);
+
+  SearchResult result;
+  result.hits.reserve(indexResults.size());
+  for (const auto& ir : indexResults) {
+    auto vid = pImpl_->idSpace_.resolve(ir.id);
+    if (!vid.ok()) continue;
+
+    ScoredDocument doc;
+    doc.id = std::string(vid.value());
+    doc.score = ir.score;
+
+    auto metaIt = metadataSnap->find(ir.id);
+    if (metaIt != metadataSnap->end()) {
+      doc.metadata = metaIt->second;
+    }
+    result.hits.push_back(std::move(doc));
+  }
   return result;
 }
 

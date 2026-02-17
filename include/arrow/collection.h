@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 
+#include "arrow/filter.h"
 #include "arrow/options.h"
 #include "arrow/types.h"
 #include "arrow/utils/result.h"
@@ -135,6 +136,12 @@ public:
                        uint32_t k,
                        uint32_t ef = 200) const;
 
+    /// Query with metadata filter (returns SearchResult with metadata).
+    SearchResult query(const std::vector<float>& query,
+                       uint32_t k,
+                       const MetadataFilter& filter,
+                       uint32_t ef = 200) const;
+
     /// Search for k nearest neighbors for multiple queries in parallel.
     ///
     /// @param queries Vector of query vectors
@@ -155,7 +162,7 @@ public:
     /// @return Vector of search results passing the filter
     std::vector<IndexSearchResult> search(const std::vector<float>& query,
                                           uint32_t k,
-                                          MetadataFilter filter,
+                                          const MetadataFilter& filter,
                                           uint32_t ef = 200) const;
 
     /// Retrieve a vector by ID.
