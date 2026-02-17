@@ -1,7 +1,7 @@
 // Copyright 2025 ArrowDB
-#include "internal/wal_writer.h"
-#include "internal/wal.h"
-#include "internal/filesync.h"
+#include "wal/wal_writer.h"
+#include "wal/wal.h"
+#include "utils/filesync.h"
 #include <ctime>
 #include <fcntl.h>
 #include <unistd.h>

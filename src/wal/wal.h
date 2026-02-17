@@ -11,8 +11,8 @@
 #include <vector>
 
 #include "arrow/types.h"
-#include "arrow/utils/utils.h"
-#include "internal/binary.h"
+#include "utils/json_utils.h"
+#include "wal/binary.h"
 #include "arrow/utils/result.h"
 
 namespace arrow {
