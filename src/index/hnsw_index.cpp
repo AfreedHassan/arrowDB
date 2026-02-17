@@ -67,19 +67,21 @@ bool HNSWIndex::insert(InternalID id, const std::vector<float>& vec) {
   return true;
 }
 
-std::vector<IndexSearchResult> HNSWIndex::search(
+std::vector<HNSWSearchResult> HNSWIndex::search(
     const std::vector<float>& query,
     size_t k,
     size_t ef) const {
   if (query.size() != dim_) {
-    throw std::invalid_argument("Query dimension mismatch");
+    std::cerr << "Query dimension mismatch: expected " << dim_
+              << ", got " << query.size() << "\n";
+    return {};
   }
 
   using QueueItem = std::pair<float, hnsw::label_t>;  // (distance, label)
   std::priority_queue<QueueItem> resultsQueue =
       hnsw_->searchKnn(query.data(), k, nullptr, ef);
 
-  std::vector<IndexSearchResult> results;
+  std::vector<HNSWSearchResult> results;
   results.reserve(resultsQueue.size());
 
   // For InnerProduct/Cosine, hnswlib returns negative similarity (1 - cosine)
@@ -114,13 +116,15 @@ private:
 
 }  // namespace
 
-std::vector<IndexSearchResult> HNSWIndex::search(
+std::vector<HNSWSearchResult> HNSWIndex::search(
     const std::vector<float>& query,
     size_t k,
     const IDFilter& filter,
     size_t ef) const {
   if (query.size() != dim_) {
-    throw std::invalid_argument("Query dimension mismatch");
+    std::cerr << "Query dimension mismatch: expected " << dim_
+              << ", got " << query.size() << "\n";
+    return {};
   }
 
   IDFilterAdapter adapter(filter);
@@ -128,7 +132,7 @@ std::vector<IndexSearchResult> HNSWIndex::search(
   std::priority_queue<QueueItem> resultsQueue =
       hnsw_->searchKnn(query.data(), k, &adapter, ef);
 
-  std::vector<IndexSearchResult> results;
+  std::vector<HNSWSearchResult> results;
   results.reserve(resultsQueue.size());
 
   int8_t distToScoreConverter = (spaceKind_ == Space::L2) ? 1 : -1;
@@ -161,6 +165,10 @@ utils::Status HNSWIndex::loadIndex(const std::string& path) {
         auto sqDistType = (spaceKind_ == Space::L2)
             ? hnsw::SQDistType::L2 : hnsw::SQDistType::IP;
         hnsw_->setSQDistType(sqDistType);
+        // For global SQ, also select integer-domain kernels
+        if (hnsw_->isGlobalSQ()) {
+            hnsw_->selectSQIntKernels();
+        }
     }
     return utils::OkStatus();
   } catch (const std::exception& e) {
@@ -207,6 +215,10 @@ void HNSWIndex::reorderBFS() {
 
 void HNSWIndex::computeGlobalSQ() {
     hnsw_->computeGlobalSQ();
+}
+
+bool HNSWIndex::isGlobalSQ() const {
+    return hnsw_->isGlobalSQ();
 }
 
 }  // namespace arrow

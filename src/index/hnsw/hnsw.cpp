@@ -248,7 +248,11 @@ namespace hnsw {
                 output.write(pAdjListsBlock_[i], adjLSize);
         }
         // WRITE QUANTIZATION DATA
-        uint8_t sqFlag = quantizationEnabled_ ? 1 : 0;
+        // sqFlag: 0 = none, 1 = per-vector SQ, 2 = global SQ (already optimized)
+        uint8_t sqFlag = 0;
+        if (quantizationEnabled_) {
+            sqFlag = (sqMode_ == SQMode::Global) ? 2 : 1;
+        }
         write(output, sqFlag);
         if (quantizationEnabled_) {
             output.write(reinterpret_cast<const char*>(pQuantizedBlock_),
@@ -404,6 +408,7 @@ namespace hnsw {
         }
 
         // READ QUANTIZATION DATA (backward compatible - absent in old indexes)
+        // sqFlag: 0 = none, 1 = per-vector SQ, 2 = global SQ (already optimized)
         uint8_t sqFlag = 0;
         if (input.peek() != EOF) {
             read(input, sqFlag);
@@ -418,6 +423,15 @@ namespace hnsw {
             input.read(reinterpret_cast<char*>(pQuantParams_),
                 elemCount * sizeof(SQVectorMeta));
 
+            if (sqFlag == 2) {
+                // Global SQ: restore mode and global params from first vector's params
+                // (all per-vector params are identical after computeGlobalSQ)
+                sqMode_ = SQMode::Global;
+                if (elemCount > 0) {
+                    globalSQParams_ = pQuantParams_[0];
+                }
+                // Int kernels will be selected after load by the wrapper
+            }
             // SQ kernel selection requires knowing L2 vs IP - detect from space
             // Default to L2; the wrapper will call selectSQKernels after load if needed
         }
@@ -1150,6 +1164,7 @@ namespace hnsw {
       size_t getMaxElements() const noexcept { return maxElements_; }
       bool isQuantizationEnabled() const noexcept { return quantizationEnabled_; }
       SQMode getSQMode() const noexcept { return sqMode_; }
+      bool isGlobalSQ() const noexcept { return quantizationEnabled_ && sqMode_ == SQMode::Global; }
 
       /// Compute global quantization params and re-quantize all vectors.
       /// Call after index is fully built. Enables integer-domain kernels.
