@@ -1,7 +1,8 @@
-#ifndef ARROW_UTILS_H
-#define ARROW_UTILS_H
+#ifndef ARROW_JSON_UTILS_H
+#define ARROW_JSON_UTILS_H
 
 #include "arrow/types.h"
+#include "core/types_internal.h"
 #include <nlohmann/json.hpp>
 #include <fstream>
 #include <string>
@@ -9,27 +10,20 @@
 #include <iostream>
 #include <format>
 
-
-
 /**
  * @brief Stream output operator for std::vector.
- * @tparam T The element type of the vector.
- * @param os The output stream.
- * @param vec The vector to output.
- * @return Reference to the output stream.
  */
 template <typename T>
 std::ostream& operator<<(std::ostream& os, const std::vector<T>& vec) {
 	os << std::format("{}", vec) << '\n';
 	return os;
 }
+
 namespace arrow::utils {
 using json = nlohmann::json;
 
 /**
  * @brief Convert MetadataValue to JSON value.
- * 
- * Handles all variant types: int64_t, double, std::string, bool
  */
 inline json metadataValueToJson(const MetadataValue& value) {
     return std::visit([](auto&& arg) -> json {
@@ -48,8 +42,6 @@ inline json metadataValueToJson(const MetadataValue& value) {
 
 /**
  * @brief Convert JSON value to MetadataValue.
- * 
- * @throws std::runtime_error if JSON type is not supported
  */
 inline MetadataValue jsonToMetadataValue(const json& j) {
     if (j.is_number_integer()) {
@@ -67,14 +59,6 @@ inline MetadataValue jsonToMetadataValue(const json& j) {
 
 /**
  * @brief Convert Metadata map to JSON object.
- * 
- * Example output:
- * {
- *   "category": "image",
- *   "score": 0.95,
- *   "tags": "dog",
- *   "active": true
- * }
  */
 inline json metadataToJson(const Metadata& metadata) {
     json j = json::object();
@@ -91,7 +75,7 @@ inline Metadata jsonToMetadata(const json& j) {
     if (!j.is_object()) {
         throw std::runtime_error("Expected JSON object for Metadata");
     }
-    
+
     Metadata metadata;
     for (const auto& [key, value] : j.items()) {
         metadata[key] = jsonToMetadataValue(value);
@@ -159,26 +143,6 @@ inline DataType jsonToDataType(const json& j) {
     }
 }
 
-/**
- * @brief Export a map of VectorID -> Metadata to JSON file.
- * 
- * Format:
- * {
- *   "1": {
- *     "category": "image",
- *     "score": 0.95,
- *     "active": true
- *   },
- *   "2": {
- *     "category": "text",
- *     "author": "John Doe"
- *   }
- * }
- * 
- * @param metadataMap Map of vector IDs to their metadata
- * @param filepath Path to output JSON file
- * @throws std::runtime_error if file cannot be written
- */
 /// Export metadata to JSON file.
 /// @return true on success, false on I/O error.
 inline bool exportMetadataToJson(
@@ -187,7 +151,6 @@ inline bool exportMetadataToJson(
 ) {
     json j = json::object();
     for (const auto& [id, metadata] : metadataMap) {
-        // Convert VectorID to string for JSON key
         j[std::to_string(id)] = metadataToJson(metadata);
     }
 
@@ -195,17 +158,13 @@ inline bool exportMetadataToJson(
     if (!file.is_open()) {
         return false;
     }
-    file << j.dump(2);  // Pretty print with 2-space indent
+    file << j.dump(2);
     file.close();
     return !file.fail();
 }
 
 /**
  * @brief Import metadata from JSON file.
- * 
- * @param filepath Path to input JSON file
- * @return Map of VectorID -> Metadata
- * @throws std::runtime_error if file cannot be read or parsed
  */
 inline std::unordered_map<InternalID, Metadata> importMetadataFromJson(
     const std::string& filepath
@@ -214,24 +173,23 @@ inline std::unordered_map<InternalID, Metadata> importMetadataFromJson(
     if (!file.is_open()) {
         throw std::runtime_error("Failed to open file for reading: " + filepath);
     }
-    
+
     json j;
     file >> j;
     file.close();
-    
+
     if (!j.is_object()) {
         throw std::runtime_error("Expected JSON object in metadata file");
     }
-    
+
     std::unordered_map<InternalID, Metadata> metadataMap;
     for (const auto& [key, value] : j.items()) {
-        InternalID id = std::stoull(key);  // Convert string key to VectorID
+        InternalID id = std::stoull(key);
         metadataMap[id] = jsonToMetadata(value);
     }
-    
+
     return metadataMap;
 }
 } // namespace arrow::utils
 
-
-#endif // ARROWDB_H
+#endif // ARROW_JSON_UTILS_H
