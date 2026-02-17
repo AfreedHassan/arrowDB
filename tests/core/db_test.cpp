@@ -174,7 +174,7 @@ TEST_F(ArrowDBTest, InsertAndSearchWithQuery) {
   for (const auto& hit : searchResult.hits) {
     EXPECT_TRUE(hit.metadata.contains("category"));
     EXPECT_TRUE(hit.metadata.contains("index"));
-    EXPECT_EQ(hit.metadata["category"], "test");
+    EXPECT_EQ(std::get<std::string>(hit.metadata.at("category")), "test");
   }
 }
 

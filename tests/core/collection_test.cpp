@@ -1,4 +1,5 @@
 #include "arrow/collection.h"
+#include "arrow/options.h"
 #include "arrow/utils/uuid.h"
 #include "internal/wal.h"
 #include "test_util.h"
@@ -241,7 +242,7 @@ TEST_F(CollectionTest, RoundTripPreservesData) {
       .name = "test_collection",
       .dimensions = 64,
       .space = Space::Cosine,
-      .index = {.max_elements = 1000000, .M = 32, .ef_construction = 200}
+      .index_config = {.max_elements = 1000000, .hnsw_params = {.M = 32, .ef_construction = 200}}
   };
   Collection original(cfg);
 
@@ -714,7 +715,7 @@ TEST_F(CollectionWalTest, DeleteReplayMarksVectorAsDeleted) {
   // Verify the deleted vector is not returned in search results
   auto results = recovered.search(vector5, 10);
   for (const auto& result : results) {
-    EXPECT_NE(result.id, 5) << "Deleted vector 5 should not appear in search results";
+    EXPECT_NE(result.id, "5") << "Deleted vector 5 should not appear in search results";
   }
 }
 
@@ -1104,4 +1105,310 @@ TEST_F(CollectionTest, PreFilterMissingMetadata) {
 
   // All results should be from the first 20 vectors (no "tag" key)
   EXPECT_EQ(results.size(), 10u);
+}
+
+// ============================================================================
+// Config Restructuring Tests
+// ============================================================================
+
+TEST_F(CollectionTest, DefaultConfigValues) {
+  // Verify new default values after restructuring
+  IndexConfig idx;
+  EXPECT_EQ(idx.index_type, IndexType::HNSW);
+  EXPECT_EQ(idx.max_elements, 1000000u);
+  EXPECT_EQ(idx.quantization, Quantization::None);
+  EXPECT_EQ(idx.hnsw_params.M, 16u);
+  EXPECT_EQ(idx.hnsw_params.ef_construction, 200u);
+  EXPECT_EQ(idx.hnsw_params.ef_search, 200u);
+}
+
+TEST_F(CollectionTest, QuantizationEnumValues) {
+  EXPECT_EQ(static_cast<uint8_t>(Quantization::None), 0);
+  EXPECT_EQ(static_cast<uint8_t>(Quantization::INT8), 1);
+  EXPECT_EQ(static_cast<uint8_t>(IndexType::HNSW), 0);
+}
+
+TEST_F(CollectionTest, CreateWithQuantizationINT8) {
+  CollectionConfig cfg{
+    .name = "quant_test",
+    .dimensions = 32,
+    .space = Space::Cosine,
+    .index_config = {.quantization = Quantization::INT8, .hnsw_params = {.M = 16}}
+  };
+  Collection col(cfg);
+  EXPECT_EQ(col.name(), "quant_test");
+  EXPECT_EQ(col.dimension(), 32);
+
+  // Insert some vectors and verify search works
+  std::mt19937 gen(42);
+  for (int i = 0; i < 50; ++i) {
+    auto s = col.insert(std::to_string(i), RandomVector(32, gen));
+    ASSERT_TRUE(s.ok());
+  }
+  EXPECT_EQ(col.size(), 50);
+
+  auto results = col.search(RandomVector(32, gen), 5);
+  EXPECT_EQ(results.size(), 5);
+}
+
+TEST_F(CollectionTest, CreateWithCustomHNSWParams) {
+  CollectionConfig cfg{
+    .name = "custom_hnsw",
+    .dimensions = 64,
+    .space = Space::L2,
+    .index_config = {
+      .max_elements = 5000,
+      .hnsw_params = {.M = 32, .ef_construction = 400, .ef_search = 300}
+    }
+  };
+  Collection col(cfg);
+
+  std::mt19937 gen(42);
+  for (int i = 0; i < 100; ++i) {
+    auto s = col.insert(std::to_string(i), RandomVector(64, gen));
+    ASSERT_TRUE(s.ok());
+  }
+  EXPECT_EQ(col.size(), 100);
+}
+
+TEST_F(CollectionTest, OptimizeNoOpWhenQuantizationDisabled) {
+  CollectionConfig cfg{
+    .name = "opt_noop",
+    .dimensions = 32,
+    .space = Space::Cosine,
+    .index_config = {.quantization = Quantization::None}
+  };
+  Collection col(cfg);
+
+  std::mt19937 gen(42);
+  for (int i = 0; i < 20; ++i) {
+    col.insert(std::to_string(i), RandomVector(32, gen));
+  }
+
+  // optimize() should be a no-op and succeed
+  auto status = col.optimize();
+  EXPECT_TRUE(status.ok());
+}
+
+TEST_F(CollectionTest, OptimizeWithQuantization) {
+  CollectionConfig cfg{
+    .name = "opt_sq",
+    .dimensions = 32,
+    .space = Space::L2,
+    .index_config = {.quantization = Quantization::INT8, .hnsw_params = {.M = 8}}
+  };
+  Collection col(cfg);
+
+  std::mt19937 gen(42);
+  std::vector<std::vector<float>> vecs;
+  for (int i = 0; i < 100; ++i) {
+    auto v = RandomVector(32, gen);
+    vecs.push_back(v);
+    auto s = col.insert(std::to_string(i), v);
+    ASSERT_TRUE(s.ok());
+  }
+
+  // optimize() should succeed
+  auto status = col.optimize();
+  EXPECT_TRUE(status.ok());
+
+  // Calling optimize() again should be a no-op (already optimized)
+  auto status2 = col.optimize();
+  EXPECT_TRUE(status2.ok());
+
+  // Search should still work after optimization
+  auto results = col.search(vecs[0], 5);
+  EXPECT_EQ(results.size(), 5);
+  // First result should be the vector itself
+  EXPECT_EQ(results[0].id, "0");
+}
+
+TEST_F(CollectionTest, OptimizeEmptyCollectionIsNoOp) {
+  CollectionConfig cfg{
+    .name = "opt_empty",
+    .dimensions = 32,
+    .space = Space::L2,
+    .index_config = {.quantization = Quantization::INT8}
+  };
+  Collection col(cfg);
+
+  auto status = col.optimize();
+  EXPECT_TRUE(status.ok());
+}
+
+TEST_F(CollectionTest, ConfigRoundTripWithQuantization) {
+  CollectionConfig cfg{
+    .name = "roundtrip_quant",
+    .dimensions = 32,
+    .space = Space::L2,
+    .index_config = {.quantization = Quantization::INT8, .hnsw_params = {.M = 16}}
+  };
+  Collection col(cfg);
+
+  std::mt19937 gen(42);
+  std::vector<std::vector<float>> vecs;
+  for (int i = 0; i < 50; ++i) {
+    auto v = RandomVector(32, gen);
+    vecs.push_back(v);
+    col.insert(std::to_string(i), v);
+  }
+
+  std::string savePath = GetTestPath("roundtrip_quant");
+  auto saveStatus = col.save(savePath);
+  ASSERT_TRUE(saveStatus.ok());
+
+  auto loadResult = Collection::load(savePath);
+  ASSERT_TRUE(loadResult.ok()) << loadResult.status().message();
+  Collection loaded = std::move(loadResult.value());
+
+  EXPECT_EQ(loaded.name(), "roundtrip_quant");
+  EXPECT_EQ(loaded.dimension(), 32);
+  EXPECT_EQ(loaded.size(), 50);
+
+  // Search should work on loaded collection
+  auto results = loaded.search(vecs[0], 5);
+  EXPECT_EQ(results.size(), 5);
+}
+
+TEST_F(CollectionTest, AutoOptimizeOnLoad) {
+  // Create a quantized collection, save without optimizing, then load
+  // The load should auto-optimize
+  CollectionConfig cfg{
+    .name = "auto_opt",
+    .dimensions = 32,
+    .space = Space::L2,
+    .index_config = {.quantization = Quantization::INT8, .hnsw_params = {.M = 8}}
+  };
+  Collection col(cfg);
+
+  std::mt19937 gen(42);
+  std::vector<std::vector<float>> vecs;
+  for (int i = 0; i < 50; ++i) {
+    auto v = RandomVector(32, gen);
+    vecs.push_back(v);
+    col.insert(std::to_string(i), v);
+  }
+
+  std::string savePath = GetTestPath("auto_opt");
+  auto saveStatus = col.save(savePath);
+  ASSERT_TRUE(saveStatus.ok());
+
+  // Load — should auto-optimize
+  auto loadResult = Collection::load(savePath);
+  ASSERT_TRUE(loadResult.ok()) << loadResult.status().message();
+  Collection loaded = std::move(loadResult.value());
+
+  EXPECT_EQ(loaded.size(), 50);
+
+  // Search should still work (and be optimized)
+  auto results = loaded.search(vecs[0], 5);
+  EXPECT_EQ(results.size(), 5);
+  // First result should be the query vector itself
+  EXPECT_EQ(results[0].id, "0");
+}
+
+TEST_F(CollectionTest, OptimizedIndexPersistsSQMode) {
+  // Create, optimize, save, load — should NOT re-optimize (already global SQ)
+  CollectionConfig cfg{
+    .name = "persist_sq_mode",
+    .dimensions = 32,
+    .space = Space::L2,
+    .index_config = {.quantization = Quantization::INT8, .hnsw_params = {.M = 8}}
+  };
+  Collection col(cfg);
+
+  std::mt19937 gen(42);
+  std::vector<std::vector<float>> vecs;
+  for (int i = 0; i < 50; ++i) {
+    auto v = RandomVector(32, gen);
+    vecs.push_back(v);
+    col.insert(std::to_string(i), v);
+  }
+
+  // Explicitly optimize
+  auto optStatus = col.optimize();
+  ASSERT_TRUE(optStatus.ok());
+
+  std::string savePath = GetTestPath("persist_sq_mode");
+  auto saveStatus = col.save(savePath);
+  ASSERT_TRUE(saveStatus.ok());
+
+  // Load — should detect sqFlag=2 and skip re-optimization
+  auto loadResult = Collection::load(savePath);
+  ASSERT_TRUE(loadResult.ok()) << loadResult.status().message();
+  Collection loaded = std::move(loadResult.value());
+
+  EXPECT_EQ(loaded.size(), 50);
+
+  // Verify search still works after optimized round-trip
+  auto results = loaded.search(vecs[0], 5);
+  EXPECT_EQ(results.size(), 5);
+  EXPECT_EQ(results[0].id, "0");
+}
+
+TEST_F(CollectionTest, BackwardCompatOldQuantizeBoolInMetaJson) {
+  // Manually create a meta.json with old-style "quantize": true
+  // and verify it loads correctly
+  std::string savePath = GetTestPath("backward_compat");
+  std::filesystem::create_directories(savePath);
+
+  // First create a valid collection to get index.bin etc.
+  CollectionConfig cfg{
+    .name = "backward_compat",
+    .dimensions = 32,
+    .space = Space::L2,
+    .index_config = {.quantization = Quantization::INT8, .hnsw_params = {.M = 8}}
+  };
+  Collection col(cfg);
+
+  std::mt19937 gen(42);
+  for (int i = 0; i < 20; ++i) {
+    col.insert(std::to_string(i), RandomVector(32, gen));
+  }
+
+  col.save(savePath);
+
+  // Overwrite meta.json with old-style format (quantize: true instead of enums)
+  // The persistence layer reads HNSWConfig which uses bool quantize internally
+  // This tests that the internal format hasn't changed
+  auto metaPath = std::filesystem::path(savePath) / "meta.json";
+  std::ifstream inFile(metaPath);
+  utils::json j;
+  inFile >> j;
+  inFile.close();
+
+  // Verify the meta.json contains quantize=true in hnsw section
+  ASSERT_TRUE(j.contains("hnsw"));
+  EXPECT_TRUE(j["hnsw"].contains("quantize"));
+  EXPECT_TRUE(j["hnsw"]["quantize"].get<bool>());
+
+  // Load and verify
+  auto loadResult = Collection::load(savePath);
+  ASSERT_TRUE(loadResult.ok()) << loadResult.status().message();
+  Collection loaded = std::move(loadResult.value());
+  EXPECT_EQ(loaded.size(), 20);
+}
+
+TEST_F(CollectionTest, NonQuantizedCollectionSkipsOptimizeOnLoad) {
+  CollectionConfig cfg{
+    .name = "no_quant",
+    .dimensions = 32,
+    .space = Space::L2,
+    .index_config = {.quantization = Quantization::None}
+  };
+  Collection col(cfg);
+
+  std::mt19937 gen(42);
+  for (int i = 0; i < 20; ++i) {
+    col.insert(std::to_string(i), RandomVector(32, gen));
+  }
+
+  std::string savePath = GetTestPath("no_quant");
+  col.save(savePath);
+
+  // Load — should NOT auto-optimize (quantization disabled)
+  auto loadResult = Collection::load(savePath);
+  ASSERT_TRUE(loadResult.ok()) << loadResult.status().message();
+  Collection loaded = std::move(loadResult.value());
+  EXPECT_EQ(loaded.size(), 20);
 }

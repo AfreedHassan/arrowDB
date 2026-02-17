@@ -97,7 +97,7 @@ TEST_F(HNSWIndexTest, RecallAt10) {
     
     for (size_t q = 0; q < num_queries; ++q) {
         std::vector<float> query = RandomVector(dim, gen);
-        std::vector<IndexSearchResult> results = index.search(query, k, 100);
+        std::vector<HNSWSearchResult> results = index.search(query, k, 100);
         
         // Verify we got k results
         EXPECT_EQ(results.size(), k);
@@ -106,9 +106,10 @@ TEST_F(HNSWIndexTest, RecallAt10) {
 
 TEST_F(HNSWIndexTest, DimensionMismatch) {
     HNSWIndex index(3, Space::Cosine);
-    
+
     EXPECT_EQ(index.insert(1, {1.0f, 0.0f}), false);
-    EXPECT_THROW(index.search({1.0f, 0.0f}, 1), std::invalid_argument);
+    auto results = index.search({1.0f, 0.0f}, 1);
+    EXPECT_TRUE(results.empty());
 }
 
 // ============================================================================

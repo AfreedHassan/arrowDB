@@ -142,20 +142,21 @@ double CalculateSIFTRecall(
     if (groundTruthFull.size() != results.size()) {
         throw std::runtime_error("Ground truth and results size mismatch");
     }
-    
+
     if (groundTruthFull.empty()) {
         return 0.0;
     }
-    
+
     double totalRecall = 0.0;
     for (size_t q = 0; q < groundTruthFull.size(); ++q) {
         const auto& gt = groundTruthFull[q];
         const auto& res = results[q];
-        
-        std::unordered_set<InternalID> gtSet;
+
+        // Convert ground truth InternalIDs to VectorID strings for comparison
+        std::unordered_set<std::string> gtSet;
         size_t kActual = std::min(k, gt.size());
         for (size_t i = 0; i < kActual; ++i) {
-            gtSet.insert(gt[i]);
+            gtSet.insert(std::to_string(gt[i]));
         }
         size_t found = 0;
         size_t resK = std::min(k, res.size());
@@ -164,10 +165,10 @@ double CalculateSIFTRecall(
                 found++;
             }
         }
-        
+
         totalRecall += static_cast<double>(found) / kActual;
     }
-    
+
     return totalRecall / groundTruthFull.size();
 }
 
@@ -213,7 +214,7 @@ TEST(SIFTTest, DISABLED_SIFT1M_Recall) {
         .name = "sift1m",
         .dimensions = 128,
         .space = Space::L2,
-        .index = {.max_elements = vectors.size(), .M = 64, .ef_construction = 200}
+        .index_config = {.max_elements = vectors.size(), .hnsw_params = {.M = 64, .ef_construction = 200}}
     };
 
     Collection collection(collectionCfg);
@@ -237,7 +238,7 @@ TEST(SIFTTest, DISABLED_SIFT1M_Recall) {
         std::cout << "Running searches..." << std::endl;
         start = std::chrono::high_resolution_clock::now();
         
-        std::vector<std::vector<IndexSearchResult>> results;
+        std::vector<std::vector<arrow::IndexSearchResult>> results;
         results.reserve(queries.size());
         
         // For L2 distance with 1M vectors, use EF=400 for >90% recall@100
@@ -278,7 +279,7 @@ TEST(SIFTTest, DISABLED_SIFT_Performance) {
             .name = "sift_bench",
             .dimensions = 128,
             .space = Space::L2,
-            .index = {.max_elements = vectors.size(), .M = 64, .ef_construction = 200}
+            .index_config = {.max_elements = vectors.size(), .hnsw_params = {.M = 64, .ef_construction = 200}}
         };
 
         Collection collection(cfg);
