@@ -1,13 +1,57 @@
-#include "internal/collection_persistence.h"
-#include "internal/filesync.h"
-#include "arrow/utils/utils.h"
+#include "core/collection_persistence.h"
+#include "utils/filesync.h"
+#include "utils/json_utils.h"
 #include <fstream>
 
 namespace arrow {
 
-static constexpr int kSchemaVersion = 2;
+static constexpr int kSchemaVersion = 3;
 
 namespace {
+
+utils::json fieldTypeToJson(FieldType ft) {
+  switch (ft) {
+    case FieldType::Int64:  return "Int64";
+    case FieldType::Double: return "Double";
+    case FieldType::String: return "String";
+    case FieldType::Bool:   return "Bool";
+  }
+  return "String"; // unreachable
+}
+
+FieldType jsonToFieldType(const utils::json& j) {
+  std::string s = j.get<std::string>();
+  if (s == "Int64")  return FieldType::Int64;
+  if (s == "Double") return FieldType::Double;
+  if (s == "String") return FieldType::String;
+  if (s == "Bool")   return FieldType::Bool;
+  return FieldType::String; // fallback
+}
+
+utils::json schemaToJson(const Schema& schema) {
+  utils::json arr = utils::json::array();
+  for (const auto& f : schema.fields) {
+    utils::json fj = utils::json::object();
+    fj["name"] = f.name;
+    fj["type"] = fieldTypeToJson(f.type);
+    if (f.required) fj["required"] = true;
+    arr.push_back(fj);
+  }
+  return arr;
+}
+
+Schema jsonToSchema(const utils::json& j) {
+  Schema schema;
+  if (!j.is_array()) return schema;
+  for (const auto& fj : j) {
+    FieldDef fd;
+    fd.name = fj["name"].get<std::string>();
+    fd.type = jsonToFieldType(fj["type"]);
+    fd.required = fj.value("required", false);
+    schema.fields.push_back(std::move(fd));
+  }
+  return schema;
+}
 
 utils::json internalConfigToJson(const InternalConfig& config) {
   utils::json j = utils::json::object();
@@ -17,6 +61,9 @@ utils::json internalConfigToJson(const InternalConfig& config) {
   j["dtype"] = utils::dataTypeToJson(config.dtype);
   j["idxType"] = "HNSW";
   j["schemaVersion"] = kSchemaVersion;
+  if (!config.schema.empty()) {
+    j["schema"] = schemaToJson(config.schema);
+  }
   return j;
 }
 
@@ -26,6 +73,9 @@ InternalConfig jsonToInternalConfig(const utils::json& j) {
   config.dimensions = j["dimensions"].get<uint32_t>();
   config.space = utils::jsonToSpace(j["space"]);
   config.dtype = utils::jsonToDataType(j["dtype"]);
+  if (j.contains("schema")) {
+    config.schema = jsonToSchema(j["schema"]);
+  }
   return config;
 }
 
