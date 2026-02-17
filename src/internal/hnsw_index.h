@@ -15,6 +15,12 @@ namespace hnsw {
 
 namespace arrow {
 
+/// Internal search result from HNSW index (uses InternalID, not exposed publicly).
+struct HNSWSearchResult {
+    InternalID id;    ///< Internal vector identifier
+    float score;      ///< Similarity score
+};
+
 /// Configuration for HNSW index construction.
 /// 
 /// Default values optimized for 100K+ vectors based on benchmark results:
@@ -25,7 +31,7 @@ namespace arrow {
 /// For very large datasets (1M+), consider M=64 with efConstruction=400.
 struct HNSWConfig {
     size_t maxElements = 1000000;   // Initial capacity
-    size_t M = 64;                  // Max connections per node (optimized for 100K+ vectors)
+    size_t M = 16;                  // Max connections per node (matches public HNSWParams default)
     size_t efConstruction = 200;    // Construction beam width
     bool quantize = false;          // Enable INT8 scalar quantization for search
 };
@@ -53,11 +59,10 @@ public:
     
     /// Search for k nearest neighbors.
     /// @param ef Search beam width (higher = better recall, slower)
-    ///            Default 200 provides ~91% recall@10 for 100K vectors with M=64
-    std::vector<IndexSearchResult> search(
+    std::vector<HNSWSearchResult> search(
         const std::vector<float>& query,
         size_t k,
-        size_t ef = 200  // Optimized for 100K+ vectors (benchmark-optimized)
+        size_t ef = 200
     ) const;
 
     /// Filter predicate: returns true if the vector with the given ID should
@@ -65,7 +70,7 @@ public:
     using IDFilter = std::function<bool(InternalID)>;
 
     /// Search for k nearest neighbors, only considering vectors accepted by filter.
-    std::vector<IndexSearchResult> search(
+    std::vector<HNSWSearchResult> search(
         const std::vector<float>& query,
         size_t k,
         const IDFilter& filter,
@@ -116,6 +121,9 @@ public:
     /// Computes a single scale/offset across all vectors and re-quantizes.
     /// Call after building the index. Enables pure uint8 distance computation.
     void computeGlobalSQ();
+
+    /// Check if the index is using global scalar quantization.
+    bool isGlobalSQ() const;
 };
 
 }  // namespace arrow
