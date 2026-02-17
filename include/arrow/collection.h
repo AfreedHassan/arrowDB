@@ -21,10 +21,10 @@ namespace arrow {
  * dimension, distance space, and data type. It serves as the primary
  * interface for vector database operations.
  *
- * Default HNSW parameters are optimized for large datasets (100K+ vectors):
- * - M=64: Provides 91-92% recall@10 for 100K vectors
+ * Default HNSW parameters are optimized for ≤100K vectors:
+ * - M=16: Optimal for ≤100K vectors (benchmarked)
  * - efConstruction=200: Balanced build time and quality
- * - Default EF search=200: Provides ~91% recall@10 for 100K vectors
+ * - Default EF search=200: Provides ~91% recall@10
  */
 class Collection {
 public:
@@ -175,6 +175,12 @@ public:
     /// @param id Vector identifier to remove
     /// @return Status indicating success or failure
     utils::Status remove(const VectorID& id);
+
+    /// Apply post-build optimizations for best search performance.
+    /// When quantization is enabled, switches to global quantization with
+    /// integer-domain distance kernels. Also reorders the graph for cache locality.
+    /// No-op if already optimized or quantization is disabled.
+    utils::Status optimize();
 
     /// Save the collection to disk.
     ///
