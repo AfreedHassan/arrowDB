@@ -1,4 +1,5 @@
 #include "arrow/collection.h"
+#include "arrow/filter.h"
 #include "arrow/options.h"
 #include "arrow/utils/uuid.h"
 #include "wal/wal.h"
@@ -1428,7 +1429,7 @@ TEST_F(CollectionTest, EmptySchemaAcceptsAnything) {
 }
 
 TEST_F(CollectionTest, RequiredFieldPresent) {
-  Schema schema;
+  MetadataSchema schema;
   schema.field("category", FieldType::String, true);
 
   CollectionConfig cfg{
@@ -1443,7 +1444,7 @@ TEST_F(CollectionTest, RequiredFieldPresent) {
 }
 
 TEST_F(CollectionTest, RequiredFieldMissing) {
-  Schema schema;
+  MetadataSchema schema;
   schema.field("category", FieldType::String, true);
 
   CollectionConfig cfg{
@@ -1458,7 +1459,7 @@ TEST_F(CollectionTest, RequiredFieldMissing) {
 }
 
 TEST_F(CollectionTest, WrongFieldType) {
-  Schema schema;
+  MetadataSchema schema;
   schema.field("count", FieldType::Int64, false);
 
   CollectionConfig cfg{
@@ -1474,7 +1475,7 @@ TEST_F(CollectionTest, WrongFieldType) {
 }
 
 TEST_F(CollectionTest, OptionalFieldMissing) {
-  Schema schema;
+  MetadataSchema schema;
   schema.field("label", FieldType::String, false);
 
   CollectionConfig cfg{
@@ -1488,7 +1489,7 @@ TEST_F(CollectionTest, OptionalFieldMissing) {
 }
 
 TEST_F(CollectionTest, ExtraFieldsAllowed) {
-  Schema schema;
+  MetadataSchema schema;
   schema.field("category", FieldType::String, true);
 
   CollectionConfig cfg{
@@ -1503,7 +1504,7 @@ TEST_F(CollectionTest, ExtraFieldsAllowed) {
 }
 
 TEST_F(CollectionTest, SchemaValidationOnUpdate) {
-  Schema schema;
+  MetadataSchema schema;
   schema.field("score", FieldType::Double, true);
 
   CollectionConfig cfg{
@@ -1524,7 +1525,7 @@ TEST_F(CollectionTest, SchemaValidationOnUpdate) {
 }
 
 TEST_F(CollectionTest, SchemaValidationOnSetMetadata) {
-  Schema schema;
+  MetadataSchema schema;
   schema.field("tag", FieldType::String, true);
 
   CollectionConfig cfg{
@@ -1545,7 +1546,7 @@ TEST_F(CollectionTest, SchemaValidationOnSetMetadata) {
 }
 
 TEST_F(CollectionTest, SchemaPersistsAcrossReload) {
-  Schema schema;
+  MetadataSchema schema;
   schema.field("label", FieldType::String, true)
         .field("score", FieldType::Double, false);
 
@@ -1650,7 +1651,7 @@ TEST_F(CollectionTest, InsertBatchDocuments) {
 }
 
 TEST_F(CollectionTest, InsertBatchDocumentsSchemaValidation) {
-  Schema schema;
+  MetadataSchema schema;
   schema.field("tag", FieldType::String, true);
 
   CollectionConfig cfg{
@@ -1700,4 +1701,292 @@ TEST_F(CollectionTest, OldBatchAPIStillWorks) {
   ASSERT_TRUE(result.ok());
   EXPECT_EQ(result.value().successCount, 5);
   EXPECT_EQ(col.size(), 5);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Filter DSL Tests
+// ═══════════════════════════════════════════════════════════════
+
+TEST(FilterTest, EqString) {
+  Metadata meta{{"category", std::string("tech")}};
+  EXPECT_TRUE(MetadataFilter::Eq("category", std::string("tech"))(meta));
+  EXPECT_FALSE(MetadataFilter::Eq("category", std::string("science"))(meta));
+}
+
+TEST(FilterTest, EqInt64) {
+  Metadata meta{{"year", int64_t(2024)}};
+  EXPECT_TRUE(MetadataFilter::Eq("year", int64_t(2024))(meta));
+  EXPECT_FALSE(MetadataFilter::Eq("year", int64_t(2023))(meta));
+}
+
+TEST(FilterTest, EqDouble) {
+  Metadata meta{{"score", 0.95}};
+  EXPECT_TRUE(MetadataFilter::Eq("score", 0.95)(meta));
+  EXPECT_FALSE(MetadataFilter::Eq("score", 0.5)(meta));
+}
+
+TEST(FilterTest, EqBool) {
+  Metadata meta{{"active", true}};
+  EXPECT_TRUE(MetadataFilter::Eq("active", true)(meta));
+  EXPECT_FALSE(MetadataFilter::Eq("active", false)(meta));
+}
+
+TEST(FilterTest, Neq) {
+  Metadata meta{{"category", std::string("tech")}};
+  EXPECT_FALSE(MetadataFilter::Neq("category", std::string("tech"))(meta));
+  EXPECT_TRUE(MetadataFilter::Neq("category", std::string("science"))(meta));
+}
+
+TEST(FilterTest, GtInt) {
+  Metadata meta{{"year", int64_t(2024)}};
+  EXPECT_TRUE(MetadataFilter::Gt("year", int64_t(2020))(meta));
+  EXPECT_FALSE(MetadataFilter::Gt("year", int64_t(2024))(meta));
+  EXPECT_FALSE(MetadataFilter::Gt("year", int64_t(2025))(meta));
+}
+
+TEST(FilterTest, GteInt) {
+  Metadata meta{{"year", int64_t(2024)}};
+  EXPECT_TRUE(MetadataFilter::Gte("year", int64_t(2024))(meta));
+  EXPECT_TRUE(MetadataFilter::Gte("year", int64_t(2020))(meta));
+  EXPECT_FALSE(MetadataFilter::Gte("year", int64_t(2025))(meta));
+}
+
+TEST(FilterTest, LtDouble) {
+  Metadata meta{{"score", 0.3}};
+  EXPECT_TRUE(MetadataFilter::Lt("score", 0.5)(meta));
+  EXPECT_FALSE(MetadataFilter::Lt("score", 0.3)(meta));
+  EXPECT_FALSE(MetadataFilter::Lt("score", 0.1)(meta));
+}
+
+TEST(FilterTest, LteDouble) {
+  Metadata meta{{"score", 0.5}};
+  EXPECT_TRUE(MetadataFilter::Lte("score", 0.5)(meta));
+  EXPECT_TRUE(MetadataFilter::Lte("score", 0.9)(meta));
+  EXPECT_FALSE(MetadataFilter::Lte("score", 0.3)(meta));
+}
+
+TEST(FilterTest, CrossTypeNumeric) {
+  // int64_t field compared against double threshold
+  Metadata meta{{"year", int64_t(2024)}};
+  EXPECT_TRUE(MetadataFilter::Gt("year", 2020.0)(meta));
+  EXPECT_FALSE(MetadataFilter::Gt("year", 2024.0)(meta));
+
+  // double field compared against int64_t threshold
+  Metadata meta2{{"score", 2024.0}};
+  EXPECT_TRUE(MetadataFilter::Gt("score", int64_t(2020))(meta2));
+}
+
+TEST(FilterTest, InValues) {
+  Metadata meta{{"tag", std::string("b")}};
+  auto f = MetadataFilter::In("tag", {MetadataValue(std::string("a")),
+                               MetadataValue(std::string("b")),
+                               MetadataValue(std::string("c"))});
+  EXPECT_TRUE(f(meta));
+
+  Metadata meta2{{"tag", std::string("d")}};
+  EXPECT_FALSE(f(meta2));
+}
+
+TEST(FilterTest, And) {
+  Metadata meta{{"category", std::string("tech")}, {"year", int64_t(2024)}};
+  auto f = MetadataFilter::And(MetadataFilter::Eq("category", std::string("tech")),
+                       MetadataFilter::Gt("year", int64_t(2020)));
+  EXPECT_TRUE(f(meta));
+
+  Metadata meta2{{"category", std::string("tech")}, {"year", int64_t(2019)}};
+  EXPECT_FALSE(f(meta2));
+}
+
+TEST(FilterTest, Or) {
+  auto f = MetadataFilter::Or(MetadataFilter::Eq("category", std::string("tech")),
+                      MetadataFilter::Eq("category", std::string("sci")));
+  EXPECT_TRUE(f(Metadata{{"category", std::string("tech")}}));
+  EXPECT_TRUE(f(Metadata{{"category", std::string("sci")}}));
+  EXPECT_FALSE(f(Metadata{{"category", std::string("art")}}));
+}
+
+TEST(FilterTest, Not) {
+  auto f = MetadataFilter::Not(MetadataFilter::Eq("category", std::string("tech")));
+  EXPECT_FALSE(f(Metadata{{"category", std::string("tech")}}));
+  EXPECT_TRUE(f(Metadata{{"category", std::string("sci")}}));
+}
+
+TEST(FilterTest, NestedLogic) {
+  // And(Or(cat==tech, cat==sci), Not(active==false))
+  auto f = MetadataFilter::And(
+      MetadataFilter::Or(MetadataFilter::Eq("category", std::string("tech")),
+                 MetadataFilter::Eq("category", std::string("sci"))),
+      MetadataFilter::Not(MetadataFilter::Eq("active", false)));
+
+  EXPECT_TRUE(f(Metadata{{"category", std::string("tech")}, {"active", true}}));
+  EXPECT_FALSE(f(Metadata{{"category", std::string("tech")}, {"active", false}}));
+  EXPECT_FALSE(f(Metadata{{"category", std::string("art")}, {"active", true}}));
+}
+
+TEST(FilterTest, MissingField) {
+  Metadata meta{{"other", std::string("value")}};
+  EXPECT_FALSE(MetadataFilter::Eq("nonexistent", std::string("x"))(meta));
+  EXPECT_FALSE(MetadataFilter::Gt("nonexistent", int64_t(0))(meta));
+  EXPECT_FALSE(MetadataFilter::In("nonexistent", {MetadataValue(std::string("a"))})(meta));
+}
+
+TEST(FilterTest, VariadicAnd) {
+  auto f = MetadataFilter::And({
+      MetadataFilter::Eq("a", int64_t(1)),
+      MetadataFilter::Eq("b", int64_t(2)),
+      MetadataFilter::Eq("c", int64_t(3))
+  });
+  EXPECT_TRUE(f(Metadata{{"a", int64_t(1)}, {"b", int64_t(2)}, {"c", int64_t(3)}}));
+  EXPECT_FALSE(f(Metadata{{"a", int64_t(1)}, {"b", int64_t(2)}, {"c", int64_t(99)}}));
+}
+
+TEST(FilterTest, EmptyMetadata) {
+  Metadata empty;
+  EXPECT_FALSE(MetadataFilter::Eq("field", std::string("x"))(empty));
+  EXPECT_FALSE(MetadataFilter::Gt("field", int64_t(0))(empty));
+  EXPECT_FALSE(MetadataFilter::Neq("field", std::string("x"))(empty));
+}
+
+TEST(FilterTest, WhereStringLength) {
+  auto f = MetadataFilter::Where<std::string>("name", [](const std::string& s) {
+    return s.size() > 5;
+  });
+  EXPECT_TRUE(f(Metadata{{"name", std::string("longname")}}));
+  EXPECT_FALSE(f(Metadata{{"name", std::string("hi")}}));
+}
+
+TEST(FilterTest, WhereInt64Range) {
+  auto f = MetadataFilter::Where<int64_t>("year", [](int64_t y) {
+    return y > 2020 && y < 2025;
+  });
+  EXPECT_TRUE(f(Metadata{{"year", int64_t(2023)}}));
+  EXPECT_FALSE(f(Metadata{{"year", int64_t(2019)}}));
+  EXPECT_FALSE(f(Metadata{{"year", int64_t(2025)}}));
+}
+
+TEST(FilterTest, WhereDouble) {
+  auto f = MetadataFilter::Where<double>("score", [](double d) { return d > 0.5; });
+  EXPECT_TRUE(f(Metadata{{"score", 0.9}}));
+  EXPECT_FALSE(f(Metadata{{"score", 0.3}}));
+}
+
+TEST(FilterTest, WhereBool) {
+  auto f = MetadataFilter::Where<bool>("active", [](bool b) { return b; });
+  EXPECT_TRUE(f(Metadata{{"active", true}}));
+  EXPECT_FALSE(f(Metadata{{"active", false}}));
+}
+
+TEST(FilterTest, WhereMissingField) {
+  auto f = MetadataFilter::Where<std::string>("name", [](const std::string&) { return true; });
+  EXPECT_FALSE(f(Metadata{}));
+  EXPECT_FALSE(f(Metadata{{"other", std::string("x")}}));
+}
+
+TEST(FilterTest, WhereWrongType) {
+  // Field exists but holds int64, predicate expects string → false
+  auto f = MetadataFilter::Where<std::string>("val", [](const std::string&) { return true; });
+  EXPECT_FALSE(f(Metadata{{"val", int64_t(42)}}));
+}
+
+TEST(FilterTest, WhereComposedWithDSL) {
+  auto f = MetadataFilter::And(
+      MetadataFilter::Where<std::string>("name", [](const std::string& s) { return s.size() > 3; }),
+      MetadataFilter::Eq("category", std::string("tech"))
+  );
+  EXPECT_TRUE(f(Metadata{{"name", std::string("longname")}, {"category", std::string("tech")}}));
+  EXPECT_FALSE(f(Metadata{{"name", std::string("hi")}, {"category", std::string("tech")}}));
+  EXPECT_FALSE(f(Metadata{{"name", std::string("longname")}, {"category", std::string("art")}}));
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Filter + Collection Integration Tests
+// ═══════════════════════════════════════════════════════════════
+
+TEST_F(CollectionTest, SearchWithFilter) {
+  CollectionConfig cfg{.name = "filter_search", .dimensions = 4, .space = Space::L2};
+  Collection col(cfg);
+
+  std::mt19937 gen(42);
+  for (int i = 0; i < 50; ++i) {
+    std::string category = (i % 2 == 0) ? "even" : "odd";
+    Metadata meta{{"category", category}, {"index", int64_t(i)}};
+    col.insert(std::to_string(i), RandomVector(4, gen), std::move(meta));
+  }
+
+  auto queryVec = RandomVector(4, gen);
+  auto results = col.search(queryVec, 10, MetadataFilter::Eq("category", std::string("even")));
+  EXPECT_GT(results.size(), 0u);
+  // Verify all results have even category by checking metadata
+  for (const auto& r : results) {
+    auto meta = col.getMetadata(r.id);
+    ASSERT_TRUE(meta.ok());
+    auto it = meta.value().find("category");
+    ASSERT_NE(it, meta.value().end());
+    EXPECT_EQ(std::get<std::string>(it->second), "even");
+  }
+}
+
+TEST_F(CollectionTest, QueryWithFilter) {
+  CollectionConfig cfg{.name = "filter_query", .dimensions = 4, .space = Space::L2};
+  Collection col(cfg);
+
+  std::mt19937 gen(42);
+  for (int i = 0; i < 50; ++i) {
+    Metadata meta{{"score", double(i) / 50.0}};
+    col.insert(std::to_string(i), RandomVector(4, gen), std::move(meta));
+  }
+
+  auto queryVec = RandomVector(4, gen);
+  auto result = col.query(queryVec, 10, MetadataFilter::Gte("score", 0.5));
+  EXPECT_GT(result.hits.size(), 0u);
+  for (const auto& hit : result.hits) {
+    auto it = hit.metadata.find("score");
+    ASSERT_NE(it, hit.metadata.end());
+    EXPECT_GE(std::get<double>(it->second), 0.5);
+  }
+}
+
+TEST_F(CollectionTest, QueryWithMetadataFilter) {
+  CollectionConfig cfg{.name = "mf_query", .dimensions = 4, .space = Space::L2};
+  Collection col(cfg);
+
+  std::mt19937 gen(42);
+  for (int i = 0; i < 30; ++i) {
+    Metadata meta{{"val", int64_t(i)}};
+    col.insert(std::to_string(i), RandomVector(4, gen), std::move(meta));
+  }
+
+  auto queryVec = RandomVector(4, gen);
+  MetadataFilter mf = [](const Metadata& m) {
+    auto it = m.find("val");
+    return it != m.end() && std::get<int64_t>(it->second) >= 20;
+  };
+  auto result = col.query(queryVec, 10, mf);
+  EXPECT_GT(result.hits.size(), 0u);
+  for (const auto& hit : result.hits) {
+    auto it = hit.metadata.find("val");
+    ASSERT_NE(it, hit.metadata.end());
+    EXPECT_GE(std::get<int64_t>(it->second), 20);
+  }
+}
+
+TEST_F(CollectionTest, FilterImplicitConversion) {
+  CollectionConfig cfg{.name = "implicit", .dimensions = 4, .space = Space::L2};
+  Collection col(cfg);
+
+  std::mt19937 gen(42);
+  for (int i = 0; i < 20; ++i) {
+    Metadata meta{{"x", int64_t(i)}};
+    col.insert(std::to_string(i), RandomVector(4, gen), std::move(meta));
+  }
+
+  auto queryVec = RandomVector(4, gen);
+  // DSL factory returns MetadataFilter directly
+  MetadataFilter mf = MetadataFilter::Gte("x", int64_t(10));
+  auto results = col.search(queryVec, 5, mf);
+  for (const auto& r : results) {
+    auto meta = col.getMetadata(r.id);
+    ASSERT_TRUE(meta.ok());
+    EXPECT_GE(std::get<int64_t>(meta.value().at("x")), 10);
+  }
 }
