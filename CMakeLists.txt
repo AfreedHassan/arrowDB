@@ -83,8 +83,8 @@ set(ARROW_EMBEDDING_MODEL_DIR ${CMAKE_SOURCE_DIR}/embed/models)
 add_library(arrow STATIC
     src/core/collection.cpp
     src/core/client.cpp
-    src/core/wal.cpp
-    src/core/wal_writer.cpp
+    src/wal/wal.cpp
+    src/wal/wal_writer.cpp
     src/core/collection_persistence.cpp
     src/core/id_space.cpp
     src/index/hnsw_index.cpp

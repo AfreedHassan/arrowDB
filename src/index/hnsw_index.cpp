@@ -1,5 +1,5 @@
 // Copyright 2025 ArrowDB
-#include "internal/hnsw_index.h"
+#include "index/hnsw_index.h"
 #include "arrow/utils/status.h"
 
 #include "index/hnsw/hnsw.cpp"

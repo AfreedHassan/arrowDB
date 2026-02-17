@@ -1,6 +1,6 @@
-#include "internal/id_space.h"
-#include "internal/binary.h"
-#include "internal/filesync.h"
+#include "core/id_space.h"
+#include "wal/binary.h"
+#include "utils/filesync.h"
 #include <fstream>
 
 namespace arrow {
