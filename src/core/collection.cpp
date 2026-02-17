@@ -1,15 +1,15 @@
 // Copyright 2025 ArrowDB
 #include "arrow/collection.h"
 #include "arrow/utils/uuid.h"
-#include "arrow/utils/utils.h"
+#include "utils/json_utils.h"
 #include "embedder/embedder.h"
-#include "internal/hnsw_index.h"
+#include "index/hnsw_index.h"
 #include <nlohmann/json.hpp>
-#include "internal/wal.h"
-#include "internal/id_space.h"
-#include "internal/collection_persistence.h"
-#include "internal/file_lock.h"
-#include "internal/log.h"
+#include "wal/wal.h"
+#include "core/id_space.h"
+#include "core/collection_persistence.h"
+#include "utils/file_lock.h"
+#include "utils/log.h"
 
 #include <cmath>
 #include <condition_variable>
@@ -48,6 +48,36 @@ static utils::Status validateMetadata(const Metadata& meta) {
       return utils::Status(utils::StatusCode::kInvalidArgument, "Metadata key too long");
     if (auto* s = std::get_if<std::string>(&val); s && s->size() > kMaxMetadataValueSize)
       return utils::Status(utils::StatusCode::kInvalidArgument, "Metadata string value too large");
+  }
+  return utils::OkStatus();
+}
+
+/// Validate metadata against schema. Empty schema = no validation.
+static utils::Status validateMetadataSchema(const Schema& schema, const Metadata& meta) {
+  if (schema.empty()) return utils::OkStatus();
+
+  for (const auto& field : schema.fields) {
+    auto it = meta.find(field.name);
+    if (it == meta.end()) {
+      if (field.required) {
+        return utils::Status(utils::StatusCode::kInvalidArgument,
+            "Required field missing: " + field.name);
+      }
+      continue;
+    }
+    // Check type matches
+    const auto& val = it->second;
+    bool typeOk = false;
+    switch (field.type) {
+      case FieldType::Int64:  typeOk = std::holds_alternative<int64_t>(val); break;
+      case FieldType::Double: typeOk = std::holds_alternative<double>(val);  break;
+      case FieldType::String: typeOk = std::holds_alternative<std::string>(val); break;
+      case FieldType::Bool:   typeOk = std::holds_alternative<bool>(val);    break;
+    }
+    if (!typeOk) {
+      return utils::Status(utils::StatusCode::kInvalidArgument,
+          "Field '" + field.name + "' has wrong type");
+    }
   }
   return utils::OkStatus();
 }
@@ -108,7 +138,7 @@ public:
 
   explicit Impl(const CollectionConfig &config)
       : config_{config.name, config.dimensions, config.space,
-                DataType::Float32},
+                DataType::Float32, config.schema},
         hnswConfig_{config.index_config.max_elements, config.index_config.hnsw_params.M,
                     config.index_config.hnsw_params.ef_construction,
                     config.index_config.quantization != Quantization::None},
@@ -334,6 +364,9 @@ public:
       if (!metaStatus.ok()) return metaStatus;
     }
 
+    auto schemaStatus = validateMetadataSchema(config_.schema, metadata);
+    if (!schemaStatus.ok()) return schemaStatus;
+
     auto internalIDResult = idSpace_.assign(id);
     if (!internalIDResult.ok()) {
       return internalIDResult.status();
@@ -390,6 +423,9 @@ public:
       auto metaStatus = validateMetadata(metadata);
       if (!metaStatus.ok()) return metaStatus;
     }
+
+    auto schemaStatus = validateMetadataSchema(config_.schema, metadata);
+    if (!schemaStatus.ok()) return schemaStatus;
 
     InternalID internalID = idResult.value();
 
@@ -748,82 +784,100 @@ utils::Status Collection::insert(const std::vector<std::string> &text) {
   return utils::OkStatus();
 }
 
-utils::Result<BatchInsertResult> Collection::insertBatch(
-    const std::vector<std::pair<VectorID, std::vector<float>>>& batch) {
+utils::Result<VectorID> Collection::insert(Document doc) {
+  if (doc.id.empty()) doc.id = arrow::uuid::uuidv4();
+  auto status = insert(doc.id, doc.embedding, std::move(doc.metadata));
+  if (!status.ok()) return status;
+  return doc.id;
+}
+
+utils::Result<BatchInsertResult> Collection::insertBatch(std::vector<Document> docs) {
   std::unique_lock lock(pImpl_->mutex_);
 
-  if (batch.size() > kMaxBatchSize) {
+  if (docs.size() > kMaxBatchSize) {
     return utils::Status(utils::StatusCode::kInvalidArgument,
       "Batch size exceeds maximum of " + std::to_string(kMaxBatchSize));
   }
 
   BatchInsertResult result;
-  result.results.resize(batch.size());
+  result.results.resize(docs.size());
   result.successCount = 0;
   result.failureCount = 0;
 
-  // Phase 1: Validate all entries first, before any mutations
-  for (size_t i = 0; i < batch.size(); ++i) {
-    const auto &[vectorID, vec] = batch[i];
+  // Phase 1: Validate all entries
+  for (size_t i = 0; i < docs.size(); ++i) {
+    auto& doc = docs[i];
+    if (doc.id.empty()) doc.id = arrow::uuid::uuidv4();
 
-    if (vec.size() != pImpl_->config_.dimensions) {
-      result.results[i].id = vectorID;
+    result.results[i].id = doc.id;
+
+    if (doc.embedding.size() != pImpl_->config_.dimensions) {
       result.results[i].status = utils::Status(utils::StatusCode::kDimensionMismatch,
                                          "Vector dimension mismatch");
       result.failureCount++;
       continue;
     }
 
-    auto vecStatus = validateVector(vec);
+    auto vecStatus = validateVector(doc.embedding);
     if (!vecStatus.ok()) {
-      result.results[i].id = vectorID;
       result.results[i].status = vecStatus;
       result.failureCount++;
       continue;
     }
 
-    // Mark as pre-validated (OkStatus with id=0 means ready to insert)
+    if (!doc.metadata.empty()) {
+      auto metaStatus = validateMetadata(doc.metadata);
+      if (!metaStatus.ok()) {
+        result.results[i].status = metaStatus;
+        result.failureCount++;
+        continue;
+      }
+    }
+
+    auto schemaStatus = validateMetadataSchema(pImpl_->config_.schema, doc.metadata);
+    if (!schemaStatus.ok()) {
+      result.results[i].status = schemaStatus;
+      result.failureCount++;
+      continue;
+    }
+
     result.results[i].status = utils::OkStatus();
   }
 
-  // Phase 2: Insert validated entries into index, build WAL entries, assign metadata
+  // Phase 2: Insert validated entries
   std::vector<wal::Entry> successfulWalEntries;
-  successfulWalEntries.reserve(batch.size());
+  successfulWalEntries.reserve(docs.size());
 
-  // Track successful inserts so we can assign metadata after WAL succeeds
   struct PendingInsert {
     size_t batchIdx;
     InternalID internalID;
   };
   std::vector<PendingInsert> pendingInserts;
-  pendingInserts.reserve(batch.size());
+  pendingInserts.reserve(docs.size());
 
-  for (size_t i = 0; i < batch.size(); ++i) {
-    if (!result.results[i].status.ok()) continue;  // Skip pre-validation failures
+  for (size_t i = 0; i < docs.size(); ++i) {
+    if (!result.results[i].status.ok()) continue;
 
-    const auto &[vectorID, vec] = batch[i];
+    const auto& doc = docs[i];
 
-    auto internalIDResult = pImpl_->idSpace_.assign(vectorID);
+    auto internalIDResult = pImpl_->idSpace_.assign(doc.id);
     if (!internalIDResult.ok()) {
-      result.results[i].id = vectorID;
       result.results[i].status = internalIDResult.status();
       result.failureCount++;
       continue;
     }
     InternalID internalID = internalIDResult.value();
 
-    if (pImpl_->pIndex_->insert(internalID, vec)) {
-      result.results[i].id = vectorID;
+    if (pImpl_->pIndex_->insert(internalID, doc.embedding)) {
       result.results[i].status = utils::OkStatus();
       result.successCount++;
 
       pendingInserts.push_back({i, internalID});
 
-      // Build WAL entry for successful inserts
       if (pImpl_->pWal_) {
-        auto entryResult = pImpl_->builder_.buildInsert(vectorID, pImpl_->config_.dimensions, vec);
+        auto entryResult = pImpl_->builder_.buildInsert(doc.id, pImpl_->config_.dimensions, doc.embedding);
         if (!entryResult.ok()) {
-          ARROW_LOG_ERROR("Collection", "WAL entry build failed for batch insert " + vectorID + ": " + entryResult.status().message());
+          ARROW_LOG_ERROR("Collection", "WAL entry build failed for batch insert " + doc.id + ": " + entryResult.status().message());
           result.results[i].status = entryResult.status();
           result.failureCount++;
           result.successCount--;
@@ -833,31 +887,31 @@ utils::Result<BatchInsertResult> Collection::insertBatch(
         successfulWalEntries.push_back(std::move(entryResult.value()));
       }
     } else {
-      pImpl_->idSpace_.remove(vectorID);
-      result.results[i].id = vectorID;
+      pImpl_->idSpace_.remove(doc.id);
       result.results[i].status = utils::Status(utils::StatusCode::kInternal,
                                              "HNSW insert failed");
       result.failureCount++;
     }
   }
 
-  // Phase 3: Log WAL batch (single fsync)
+  // Phase 3: WAL batch fsync
   if (pImpl_->pWal_ && !successfulWalEntries.empty()) {
     utils::Status walStatus = pImpl_->pWal_->logBatch(successfulWalEntries);
     if (!walStatus.ok()) {
       ARROW_LOG_ERROR("Collection", "WAL batch log failed: " + walStatus.message()
           + " (" + std::to_string(result.successCount) + " vectors inserted but not durable)");
-      // Vectors are in the index and searchable. WAL failure means they
-      // won't survive a crash, but that matches insertLocked() behavior.
     }
   }
 
-  // Metadata assigned only after WAL batch succeeds
+  // Phase 4: Assign metadata from docs
   for (const auto& pending : pendingInserts) {
     if (result.results[pending.batchIdx].status.ok()) {
-      // batch entries don't carry metadata in current API, but ensure
-      // an empty metadata entry exists so getMetadata() is consistent
-      pImpl_->mutableMetadata()[pending.internalID];
+      const auto& docMeta = docs[pending.batchIdx].metadata;
+      if (!docMeta.empty()) {
+        pImpl_->mutableMetadata()[pending.internalID] = docMeta;
+      } else {
+        pImpl_->mutableMetadata()[pending.internalID];
+      }
     }
   }
   pImpl_->opsSinceLastSave_ += result.successCount;
@@ -865,10 +919,23 @@ utils::Result<BatchInsertResult> Collection::insertBatch(
   return result;
 }
 
+utils::Result<BatchInsertResult> Collection::insertBatch(
+    const std::vector<std::pair<VectorID, std::vector<float>>>& batch) {
+  std::vector<Document> docs;
+  docs.reserve(batch.size());
+  for (const auto& [id, vec] : batch) {
+    docs.push_back({id, vec, {}});
+  }
+  return insertBatch(std::move(docs));
+}
+
 utils::Status Collection::setMetadata(const VectorID& id, const Metadata& metadata) {
   std::unique_lock lock(pImpl_->mutex_);
   auto metaStatus = validateMetadata(metadata);
   if (!metaStatus.ok()) return metaStatus;
+
+  auto schemaStatus = validateMetadataSchema(pImpl_->config_.schema, metadata);
+  if (!schemaStatus.ok()) return schemaStatus;
 
   auto internalIDResult = pImpl_->idSpace_.lookup(id);
   if (!internalIDResult.ok()) {
@@ -1083,7 +1150,8 @@ utils::Result<Collection> Collection::load(const std::string &directoryPath) {
         .ef_construction = hnswConfig.efConstruction,
         .ef_search = 200,  // Not persisted; use default
       }
-    }
+    },
+    .schema = config.schema
   };
 
   // Consistency check: IDSpace and index must agree on element count
