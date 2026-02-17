@@ -11,19 +11,24 @@
 
 namespace arrow {
 
-/// Configuration for the HNSW index.
+/// HNSW-specific index parameters.
 ///
-/// Default values optimized for 100K+ vectors based on benchmark results:
-/// - M=64: Provides 91-92% recall@10 for 100K vectors
+/// Default values tuned from benchmarks on ≤100K vectors:
+/// - M=16: Optimal for ≤100K vectors (M=64 wastes memory for this range)
 /// - ef_construction=200: Balanced build time and quality
-///
-/// For smaller datasets (<10K), M=32 may be sufficient and uses less memory.
+/// - ef_search=200: Provides ~91% recall@10
+struct HNSWParams {
+    size_t M = 16;                  ///< Max connections per node
+    size_t ef_construction = 200;   ///< Construction beam width
+    size_t ef_search = 200;         ///< Default search beam width
+};
+
+/// Index configuration.
 struct IndexConfig {
+    IndexType index_type = IndexType::HNSW;
     size_t max_elements = 1000000;   ///< Initial capacity
-    size_t M = 64;                   ///< Max connections per node
-    size_t ef_construction = 200;    ///< Construction beam width
-    size_t ef_search = 200;          ///< Default search beam width
-    bool quantize = false;           ///< Enable INT8 scalar quantization for search
+    Quantization quantization = Quantization::None;
+    HNSWParams hnsw_params;          ///< Active when index_type == HNSW
 };
 
 /// Configuration for creating a new collection.
@@ -31,7 +36,7 @@ struct CollectionConfig {
     std::string name;                              ///< Collection name
     uint32_t dimensions = 0;                       ///< Vector dimension
     Space space = Space::Cosine;                   ///< Index space
-    IndexConfig index;                             ///< Index configuration
+    IndexConfig index_config;                      ///< Index configuration
 };
 
 /// Client options for initializing ArrowDB.

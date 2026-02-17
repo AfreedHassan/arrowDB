@@ -3,7 +3,7 @@
 
 #include <cstdint>
 #include <functional>
-#include <nlohmann/json.hpp>
+#include <string>
 #include <variant>
 #include <unordered_map>
 #include <expected>
@@ -13,7 +13,6 @@
 namespace arrow {
   using VectorID = std::string;
 	using InternalID = uint64_t;
-	using Timestamp = uint64_t;
 
 	/**
 	 * @brief Index spaces for vector similarity computation.
@@ -35,30 +34,26 @@ namespace arrow {
 	/**
 	 * @brief Index types for vector search.
 	 */
-	enum class IndexType {
-		HNSW ///< Hierarchical Navigable Small World graph index
+	enum class IndexType : uint8_t {
+		HNSW = 0 ///< Hierarchical Navigable Small World graph index
+		// Future: IVF = 1, Flat = 2
 	};
+
+	/**
+	 * @brief Vector quantization strategy.
+	 */
+	enum class Quantization : uint8_t {
+		None = 0,    ///< Full float32 precision
+		INT8 = 1     ///< 8-bit scalar quantization (~4x less memory in search)
+		// Future: INT4 = 2, FP16 = 3
+	};
+
 	// Metadata value types
 	using MetadataValue = std::variant<int64_t, double, std::string, bool>;
 	using Metadata = std::unordered_map<std::string, MetadataValue>;
 
 	/// Predicate for filtering search results by metadata.
 	using MetadataFilter = std::function<bool(const Metadata&)>;
-
-	// Error handling
-	enum class ErrorCode { 
-		DimensionMismatch, NotFound, DuplicateID, StorageError 
-	};
-
-	namespace utils {
-	using json = nlohmann::json;
-	}
-
-	struct ArrowRecord {
-		InternalID id;										///< Unique identifier for the record
-		std::vector<float> embedding;		///< The vector embedding
-	//Metadata metadata;							///< Metadata (not yet implemented)
-	};
 
 	/// Result of a single insert operation in a batch operation
 	struct InsertResult {
@@ -75,9 +70,9 @@ namespace arrow {
 
 	/// A document with its similarity score and metadata from a search result
 	struct ScoredDocument {
-		InternalID id;                        ///< Document/vector identifier
+		VectorID id;                        ///< Document/vector identifier
 		float score;                        ///< Similarity score (higher = more similar)
-		nlohmann::json metadata;            ///< Associated metadata
+		Metadata metadata;                  ///< Associated metadata
 	};
 
 	/// Result of a search operation
@@ -89,7 +84,7 @@ namespace arrow {
 
 	/// Result from index search (id + score only, no metadata)
 	struct IndexSearchResult {
-		InternalID id;    ///< Vector identifier
+		VectorID id;    ///< Vector identifier
 		float score;    ///< Similarity score
 	};
 }

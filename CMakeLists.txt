@@ -99,8 +99,7 @@ target_include_directories(arrow
 )
 
 target_link_libraries(arrow
-    PUBLIC nlohmann_json::nlohmann_json
-    PRIVATE hnswlib ${ARROW_EMBED_LIB}
+    PRIVATE nlohmann_json::nlohmann_json hnswlib ${ARROW_EMBED_LIB}
 )
 
 target_compile_definitions(arrow PRIVATE
@@ -167,6 +166,7 @@ target_include_directories(tests PRIVATE
 target_link_libraries(tests PRIVATE
     arrow
     hnswlib
+    nlohmann_json::nlohmann_json
     GTest::gtest
     GTest::gtest_main
 )

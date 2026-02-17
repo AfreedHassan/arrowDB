@@ -2,11 +2,14 @@
 #define ARROW_UTILS_H
 
 #include "arrow/types.h"
+#include <nlohmann/json.hpp>
 #include <fstream>
 #include <string>
 #include <unordered_map>
 #include <iostream>
 #include <format>
+
+
 
 /**
  * @brief Stream output operator for std::vector.
@@ -21,6 +24,8 @@ std::ostream& operator<<(std::ostream& os, const std::vector<T>& vec) {
 	return os;
 }
 namespace arrow::utils {
+using json = nlohmann::json;
+
 /**
  * @brief Convert MetadataValue to JSON value.
  * 
