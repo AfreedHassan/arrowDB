@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "internal/id_space.h"
+#include "core/id_space.h"
 #include <filesystem>
 #include <fstream>
 #include <string>

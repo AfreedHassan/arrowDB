@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "internal/hnsw_index.h"
+#include "index/hnsw_index.h"
 #include "test_util.h"
 #include <filesystem>
 #include <fstream>

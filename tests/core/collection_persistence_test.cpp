@@ -1,6 +1,6 @@
 #include "arrow/collection.h"
-#include "internal/collection_persistence.h"
-#include "internal/wal.h"
+#include "core/collection_persistence.h"
+#include "wal/wal.h"
 #include "test_util.h"
 #include <filesystem>
 #include <fstream>

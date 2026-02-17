@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "arrow/utils/utils.h"
+#include "utils/json_utils.h"
 #include "arrow/types.h"
 #include <unordered_map>
 #include <filesystem>

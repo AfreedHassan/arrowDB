@@ -1,7 +1,7 @@
 #include "arrow/collection.h"
 #include "arrow/options.h"
 #include "arrow/utils/uuid.h"
-#include "internal/wal.h"
+#include "wal/wal.h"
 #include "test_util.h"
 #include <chrono>
 #include <filesystem>
@@ -1411,4 +1411,293 @@ TEST_F(CollectionTest, NonQuantizedCollectionSkipsOptimizeOnLoad) {
   ASSERT_TRUE(loadResult.ok()) << loadResult.status().message();
   Collection loaded = std::move(loadResult.value());
   EXPECT_EQ(loaded.size(), 20);
+}
+
+// ============================================================================
+// Schema Validation Tests
+// ============================================================================
+
+TEST_F(CollectionTest, EmptySchemaAcceptsAnything) {
+  CollectionConfig cfg{.name = "schema_empty", .dimensions = 4, .space = Space::Cosine};
+  Collection col(cfg);
+
+  std::mt19937 gen(42);
+  Metadata meta{{"foo", std::string("bar")}, {"num", int64_t(42)}};
+  auto s = col.insert("v1", RandomVector(4, gen), meta);
+  EXPECT_TRUE(s.ok());
+}
+
+TEST_F(CollectionTest, RequiredFieldPresent) {
+  Schema schema;
+  schema.field("category", FieldType::String, true);
+
+  CollectionConfig cfg{
+    .name = "schema_req", .dimensions = 4, .space = Space::Cosine, .schema = schema
+  };
+  Collection col(cfg);
+
+  std::mt19937 gen(42);
+  Metadata meta{{"category", std::string("image")}};
+  auto s = col.insert("v1", RandomVector(4, gen), meta);
+  EXPECT_TRUE(s.ok()) << s.message();
+}
+
+TEST_F(CollectionTest, RequiredFieldMissing) {
+  Schema schema;
+  schema.field("category", FieldType::String, true);
+
+  CollectionConfig cfg{
+    .name = "schema_miss", .dimensions = 4, .space = Space::Cosine, .schema = schema
+  };
+  Collection col(cfg);
+
+  std::mt19937 gen(42);
+  auto s = col.insert("v1", RandomVector(4, gen), {});
+  EXPECT_FALSE(s.ok());
+  EXPECT_EQ(s.code(), utils::StatusCode::kInvalidArgument);
+}
+
+TEST_F(CollectionTest, WrongFieldType) {
+  Schema schema;
+  schema.field("count", FieldType::Int64, false);
+
+  CollectionConfig cfg{
+    .name = "schema_type", .dimensions = 4, .space = Space::Cosine, .schema = schema
+  };
+  Collection col(cfg);
+
+  std::mt19937 gen(42);
+  Metadata meta{{"count", std::string("not_a_number")}};
+  auto s = col.insert("v1", RandomVector(4, gen), meta);
+  EXPECT_FALSE(s.ok());
+  EXPECT_EQ(s.code(), utils::StatusCode::kInvalidArgument);
+}
+
+TEST_F(CollectionTest, OptionalFieldMissing) {
+  Schema schema;
+  schema.field("label", FieldType::String, false);
+
+  CollectionConfig cfg{
+    .name = "schema_opt", .dimensions = 4, .space = Space::Cosine, .schema = schema
+  };
+  Collection col(cfg);
+
+  std::mt19937 gen(42);
+  auto s = col.insert("v1", RandomVector(4, gen), {});
+  EXPECT_TRUE(s.ok());
+}
+
+TEST_F(CollectionTest, ExtraFieldsAllowed) {
+  Schema schema;
+  schema.field("category", FieldType::String, true);
+
+  CollectionConfig cfg{
+    .name = "schema_extra", .dimensions = 4, .space = Space::Cosine, .schema = schema
+  };
+  Collection col(cfg);
+
+  std::mt19937 gen(42);
+  Metadata meta{{"category", std::string("img")}, {"undeclared", int64_t(99)}};
+  auto s = col.insert("v1", RandomVector(4, gen), meta);
+  EXPECT_TRUE(s.ok());
+}
+
+TEST_F(CollectionTest, SchemaValidationOnUpdate) {
+  Schema schema;
+  schema.field("score", FieldType::Double, true);
+
+  CollectionConfig cfg{
+    .name = "schema_update", .dimensions = 4, .space = Space::Cosine, .schema = schema
+  };
+  Collection col(cfg);
+
+  std::mt19937 gen(42);
+  auto vec = RandomVector(4, gen);
+  Metadata good{{"score", double(0.5)}};
+  auto s = col.insert("v1", vec, good);
+  ASSERT_TRUE(s.ok());
+
+  // Update with missing required field → error
+  auto s2 = col.update("v1", vec, {});
+  EXPECT_FALSE(s2.ok());
+  EXPECT_EQ(s2.code(), utils::StatusCode::kInvalidArgument);
+}
+
+TEST_F(CollectionTest, SchemaValidationOnSetMetadata) {
+  Schema schema;
+  schema.field("tag", FieldType::String, true);
+
+  CollectionConfig cfg{
+    .name = "schema_setmeta", .dimensions = 4, .space = Space::Cosine, .schema = schema
+  };
+  Collection col(cfg);
+
+  std::mt19937 gen(42);
+  Metadata good{{"tag", std::string("a")}};
+  auto s = col.insert("v1", RandomVector(4, gen), good);
+  ASSERT_TRUE(s.ok());
+
+  // setMetadata with wrong type → error
+  Metadata bad{{"tag", int64_t(123)}};
+  auto s2 = col.setMetadata("v1", bad);
+  EXPECT_FALSE(s2.ok());
+  EXPECT_EQ(s2.code(), utils::StatusCode::kInvalidArgument);
+}
+
+TEST_F(CollectionTest, SchemaPersistsAcrossReload) {
+  Schema schema;
+  schema.field("label", FieldType::String, true)
+        .field("score", FieldType::Double, false);
+
+  CollectionConfig cfg{
+    .name = "schema_persist", .dimensions = 4, .space = Space::Cosine, .schema = schema
+  };
+
+  std::string savePath = GetTestPath("schema_persist");
+  {
+    Collection col(cfg);
+    std::mt19937 gen(42);
+    Metadata meta{{"label", std::string("cat")}};
+    auto s = col.insert("v1", RandomVector(4, gen), meta);
+    ASSERT_TRUE(s.ok());
+    auto saveStatus = col.save(savePath);
+    ASSERT_TRUE(saveStatus.ok());
+  }
+
+  // Load and verify schema enforcement
+  auto loadResult = Collection::load(savePath);
+  ASSERT_TRUE(loadResult.ok()) << loadResult.status().message();
+  Collection loaded = std::move(loadResult.value());
+
+  std::mt19937 gen2(99);
+  // Missing required "label" field → error
+  auto s = loaded.insert("v2", RandomVector(4, gen2), {});
+  EXPECT_FALSE(s.ok());
+  EXPECT_EQ(s.code(), utils::StatusCode::kInvalidArgument);
+
+  // Valid insert
+  Metadata good{{"label", std::string("dog")}};
+  auto s2 = loaded.insert("v3", RandomVector(4, gen2), good);
+  EXPECT_TRUE(s2.ok());
+}
+
+// ============================================================================
+// Document Tests
+// ============================================================================
+
+TEST_F(CollectionTest, InsertDocument) {
+  CollectionConfig cfg{.name = "doc_test", .dimensions = 4, .space = Space::Cosine};
+  Collection col(cfg);
+
+  std::mt19937 gen(42);
+  Document doc{
+    .id = "doc1",
+    .embedding = RandomVector(4, gen),
+    .metadata = {{"key", std::string("value")}}
+  };
+
+  auto result = col.insert(doc);
+  ASSERT_TRUE(result.ok());
+  EXPECT_EQ(result.value(), "doc1");
+  EXPECT_EQ(col.size(), 1);
+
+  auto meta = col.getMetadata("doc1");
+  ASSERT_TRUE(meta.ok());
+  EXPECT_EQ(std::get<std::string>(meta.value().at("key")), "value");
+}
+
+TEST_F(CollectionTest, InsertDocumentAutoID) {
+  CollectionConfig cfg{.name = "doc_auto", .dimensions = 4, .space = Space::Cosine};
+  Collection col(cfg);
+
+  std::mt19937 gen(42);
+  Document doc{
+    .id = "",  // empty → auto-generate
+    .embedding = RandomVector(4, gen),
+    .metadata = {}
+  };
+
+  auto result = col.insert(doc);
+  ASSERT_TRUE(result.ok());
+  EXPECT_FALSE(result.value().empty());
+  EXPECT_EQ(col.size(), 1);
+}
+
+TEST_F(CollectionTest, InsertBatchDocuments) {
+  CollectionConfig cfg{.name = "doc_batch", .dimensions = 4, .space = Space::Cosine};
+  Collection col(cfg);
+
+  std::mt19937 gen(42);
+  std::vector<Document> docs;
+  for (int i = 0; i < 10; ++i) {
+    docs.push_back({
+      .id = "d" + std::to_string(i),
+      .embedding = RandomVector(4, gen),
+      .metadata = {{"idx", int64_t(i)}}
+    });
+  }
+
+  auto result = col.insertBatch(std::move(docs));
+  ASSERT_TRUE(result.ok());
+  EXPECT_EQ(result.value().successCount, 10);
+  EXPECT_EQ(result.value().failureCount, 0);
+  EXPECT_EQ(col.size(), 10);
+
+  // Verify metadata was stored
+  auto meta = col.getMetadata("d5");
+  ASSERT_TRUE(meta.ok());
+  EXPECT_EQ(std::get<int64_t>(meta.value().at("idx")), 5);
+}
+
+TEST_F(CollectionTest, InsertBatchDocumentsSchemaValidation) {
+  Schema schema;
+  schema.field("tag", FieldType::String, true);
+
+  CollectionConfig cfg{
+    .name = "doc_batch_schema", .dimensions = 4, .space = Space::Cosine, .schema = schema
+  };
+  Collection col(cfg);
+
+  std::mt19937 gen(42);
+  std::vector<Document> docs;
+  // doc 0: valid
+  docs.push_back({
+    .id = "d0",
+    .embedding = RandomVector(4, gen),
+    .metadata = {{"tag", std::string("ok")}}
+  });
+  // doc 1: missing required field → fail
+  docs.push_back({
+    .id = "d1",
+    .embedding = RandomVector(4, gen),
+    .metadata = {}
+  });
+  // doc 2: valid
+  docs.push_back({
+    .id = "d2",
+    .embedding = RandomVector(4, gen),
+    .metadata = {{"tag", std::string("also ok")}}
+  });
+
+  auto result = col.insertBatch(std::move(docs));
+  ASSERT_TRUE(result.ok());
+  EXPECT_EQ(result.value().successCount, 2);
+  EXPECT_EQ(result.value().failureCount, 1);
+  EXPECT_FALSE(result.value().results[1].status.ok());
+}
+
+TEST_F(CollectionTest, OldBatchAPIStillWorks) {
+  CollectionConfig cfg{.name = "old_batch", .dimensions = 4, .space = Space::Cosine};
+  Collection col(cfg);
+
+  std::mt19937 gen(42);
+  std::vector<std::pair<VectorID, std::vector<float>>> batch;
+  for (int i = 0; i < 5; ++i) {
+    batch.push_back({std::to_string(i), RandomVector(4, gen)});
+  }
+
+  auto result = col.insertBatch(batch);
+  ASSERT_TRUE(result.ok());
+  EXPECT_EQ(result.value().successCount, 5);
+  EXPECT_EQ(col.size(), 5);
 }

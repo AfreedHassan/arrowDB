@@ -8,7 +8,7 @@
 #include <vector>
 #include <random>
 
-#include "internal/hnsw_index.h"
+#include "index/hnsw_index.h"
 #include "index/hnsw/hnsw.cpp"
 #include "index/hnsw/space_ip.h"
 

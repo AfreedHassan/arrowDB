@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
-#include "internal/wal.h"
-#include "internal/binary.h"
+#include "wal/wal.h"
+#include "wal/binary.h"
 #include "arrow/utils/status.h"
 #include "arrow/collection.h"
 #include "test_util.h"

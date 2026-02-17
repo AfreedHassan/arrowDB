@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 #include "arrow/collection.h"
-#include "internal/hnsw_index.h"
+#include "index/hnsw_index.h"
 #include <chrono>
 #include <iostream>
 #include <vector>
