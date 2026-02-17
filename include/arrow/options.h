@@ -37,6 +37,7 @@ struct CollectionConfig {
     uint32_t dimensions = 0;                       ///< Vector dimension
     Space space = Space::Cosine;                   ///< Index space
     IndexConfig index_config;                      ///< Index configuration
+    Schema schema;                                 ///< Metadata schema (empty = no validation)
 };
 
 /// Client options for initializing ArrowDB.

@@ -12,7 +12,6 @@
 
 namespace arrow {
   using VectorID = std::string;
-	using InternalID = uint64_t;
 
 	/**
 	 * @brief Index spaces for vector similarity computation.
@@ -21,14 +20,6 @@ namespace arrow {
 		Cosine,      ///< Cosine similarity (dot product of normalized vectors)
 		L2,          ///< L2 (Euclidean) distance
 		InnerProduct ///< Inner product (dot product)
-	};
-
-	/**
-	 * @brief Data types for vector storage.
-	 */
-	enum class DataType {
-		Int32,  ///< 32-bit signed integer
-		Float32 ///< 32-bit floating point
 	};
 
 	/**
@@ -54,6 +45,47 @@ namespace arrow {
 
 	/// Predicate for filtering search results by metadata.
 	using MetadataFilter = std::function<bool(const Metadata&)>;
+
+	// ─── Schema ───────────────────────────────────────────────
+
+	/// Supported metadata field types for schema validation.
+	enum class FieldType : uint8_t {
+		Int64,
+		Double,
+		String,
+		Bool
+	};
+
+	/// Definition of a single schema field.
+	struct FieldDef {
+		std::string name;
+		FieldType type;
+		bool required = false;
+	};
+
+	/// Schema for validating metadata on insert/update.
+	/// An empty schema (no fields) disables validation (backward compat).
+	struct Schema {
+		std::vector<FieldDef> fields;
+
+		/// Builder: add a field definition and return *this for chaining.
+		Schema& field(std::string name, FieldType type, bool required = false) {
+			fields.push_back({std::move(name), type, required});
+			return *this;
+		}
+
+		bool empty() const noexcept { return fields.empty(); }
+	};
+
+	// ─── Document ─────────────────────────────────────────────
+
+	/// A document combining vector ID, embedding, and metadata.
+	/// If `id` is empty, a UUID will be auto-generated on insert.
+	struct Document {
+		VectorID id;
+		std::vector<float> embedding;
+		Metadata metadata;
+	};
 
 	/// Result of a single insert operation in a batch operation
 	struct InsertResult {
