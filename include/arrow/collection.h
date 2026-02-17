@@ -79,6 +79,18 @@ public:
 
     utils::Status insert(const std::vector<std::string>& data);
 
+    /// Insert a document (vector + metadata + optional ID).
+    ///
+    /// @param doc Document with embedding, metadata, and optional ID
+    /// @return The VectorID (generated if doc.id was empty), or error
+    utils::Result<VectorID> insert(Document doc);
+
+    /// Insert a batch of documents with partial success semantics.
+    ///
+    /// @param docs Vector of documents to insert
+    /// @return Result containing BatchInsertResult with per-vector status
+    utils::Result<BatchInsertResult> insertBatch(std::vector<Document> docs);
+
     /// Insert a batch of vectors with partial success semantics.
     ///
     /// @param batch Vector of (id, vector) pairs to insert
