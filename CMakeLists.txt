@@ -198,6 +198,7 @@ add_test(NAME MetadataIntegrationTests COMMAND tests --gtest_filter=MetadataInte
 add_test(NAME BinaryTests COMMAND tests --gtest_filter=BinaryTest.*)
 add_test(NAME ArrowDBTests COMMAND tests --gtest_filter=ArrowDBTest.*)
 add_test(NAME IDSpaceTests COMMAND tests --gtest_filter=IDSpaceTest.*)
+add_test(NAME RoaringBitmapTests COMMAND tests --gtest_filter=RoaringBitmapTest.*)
 
 # Grouped test suites
 add_test(NAME AllHNSWTests COMMAND tests --gtest_filter=HNSWIndexTest.*:IPDistanceTest.*:L2DistanceTest.*:BatchDistanceTest.*:VectorStorageTest.*)
