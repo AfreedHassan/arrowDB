@@ -636,36 +636,11 @@ inline bool bitmap_equal(const uint64_t* __restrict__ a, const uint64_t* __restr
 // ═══════════════════════════════════════════════════════════════════════════
 // Extract set bit positions from bitmap into uint16_t array.
 // Returns count of values written.
-// Optimized: processes one byte at a time using a precomputed lookup table
-// that maps each byte value to the positions of its set bits.
-// ~2-4x faster than scalar ctz loop for dense bitmaps.
+//
+// Uses direct ctz (count-trailing-zeros) + clear-lowest-set-bit loop.
+// On ARM64: RBIT+CLZ is single-cycle; on x86-64: TZCNT is single-cycle.
+// Processes 4 words at a time and skips runs of zero words quickly.
 // ═══════════════════════════════════════════════════════════════════════════
-
-namespace detail {
-
-// Lookup table: for each byte value 0-255, stores the positions of set bits.
-// bitpos_table[v] contains the bit positions (0-7) of set bits in v.
-// bitpos_count[v] contains the count of set bits (== popcount(v)).
-struct BitExtractTables {
-    uint8_t positions[256][8];
-    uint8_t counts[256];
-
-    constexpr BitExtractTables() : positions{}, counts{} {
-        for (int v = 0; v < 256; ++v) {
-            int c = 0;
-            for (int bit = 0; bit < 8; ++bit) {
-                if (v & (1 << bit)) {
-                    positions[v][c++] = static_cast<uint8_t>(bit);
-                }
-            }
-            counts[v] = static_cast<uint8_t>(c);
-        }
-    }
-};
-
-inline constexpr BitExtractTables kBitExtract{};
-
-}  // namespace detail
 
 inline uint32_t bitmap_to_array(const uint64_t* __restrict__ words,
                                 uint16_t* __restrict__ out) {
@@ -674,16 +649,31 @@ inline uint32_t bitmap_to_array(const uint64_t* __restrict__ words,
         uint64_t bits = words[w];
         if (bits == 0) continue;
         uint32_t base = w << 6;
-        // Process 8 bytes (one uint64_t) byte-by-byte using lookup table
-        const auto* bytes = reinterpret_cast<const uint8_t*>(&bits);
-        for (uint32_t byteIdx = 0; byteIdx < 8; ++byteIdx) {
-            uint8_t b = bytes[byteIdx];
-            if (b == 0) continue;
-            uint32_t byteBase = base + (byteIdx << 3);
-            uint8_t cnt = detail::kBitExtract.counts[b];
-            for (uint8_t k = 0; k < cnt; ++k) {
-                out[pos++] = static_cast<uint16_t>(byteBase + detail::kBitExtract.positions[b][k]);
-            }
+        while (bits) {
+            uint32_t tz = static_cast<uint32_t>(__builtin_ctzll(bits));
+            out[pos++] = static_cast<uint16_t>(base + tz);
+            bits &= bits - 1;  // clear lowest set bit
+        }
+    }
+    return pos;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Extract set bit positions from bitmap into uint32_t array with base offset.
+// Same ctz loop as bitmap_to_array but outputs uint32_t = base + bit_position.
+// ═══════════════════════════════════════════════════════════════════════════
+
+inline uint32_t bitmap_to_uint32_array(const uint64_t* __restrict__ words,
+                                        uint32_t base,
+                                        uint32_t* __restrict__ out) {
+    uint32_t pos = 0;
+    for (uint32_t w = 0; w < 1024; ++w) {
+        uint64_t bits = words[w];
+        if (bits == 0) continue;
+        uint32_t wbase = base + (w << 6);
+        while (bits) {
+            out[pos++] = wbase + static_cast<uint32_t>(__builtin_ctzll(bits));
+            bits &= bits - 1;
         }
     }
     return pos;
@@ -920,45 +910,27 @@ inline uint32_t bitmap_popcount_n(const uint64_t* __restrict__ words, uint32_t n
 // Batch bit manipulation from sorted uint16_t arrays
 // ═══════════════════════════════════════════════════════════════════════════
 
-// Group consecutive entries by word index and batch-apply.
-// For sorted input, this reduces memory writes (one read-modify-write per word
-// instead of one per element).
+// Set bits from a sorted uint16_t array. Simple load-OR-store per element,
+// matching CRoaring's bitset_set_list. Avoids the branch misprediction cost
+// of a coalescing inner loop on sparse data.
 inline void bitmap_set_list(uint64_t* __restrict__ words, const uint16_t* __restrict__ list, uint32_t n) {
-    uint32_t i = 0;
-    while (i < n) {
-        uint32_t wordIdx = list[i] >> 6;
-        uint64_t mask = 0;
-        do {
-            mask |= 1ULL << (list[i] & 63);
-            ++i;
-        } while (i < n && (list[i] >> 6) == wordIdx);
-        words[wordIdx] |= mask;
+    for (uint32_t i = 0; i < n; ++i) {
+        const uint32_t pos = list[i];
+        words[pos >> 6] |= UINT64_C(1) << (pos & 63);
     }
 }
 
 inline void bitmap_clear_list(uint64_t* __restrict__ words, const uint16_t* __restrict__ list, uint32_t n) {
-    uint32_t i = 0;
-    while (i < n) {
-        uint32_t wordIdx = list[i] >> 6;
-        uint64_t mask = 0;
-        do {
-            mask |= 1ULL << (list[i] & 63);
-            ++i;
-        } while (i < n && (list[i] >> 6) == wordIdx);
-        words[wordIdx] &= ~mask;
+    for (uint32_t i = 0; i < n; ++i) {
+        const uint32_t pos = list[i];
+        words[pos >> 6] &= ~(UINT64_C(1) << (pos & 63));
     }
 }
 
 inline void bitmap_flip_list(uint64_t* __restrict__ words, const uint16_t* __restrict__ list, uint32_t n) {
-    uint32_t i = 0;
-    while (i < n) {
-        uint32_t wordIdx = list[i] >> 6;
-        uint64_t mask = 0;
-        do {
-            mask |= 1ULL << (list[i] & 63);
-            ++i;
-        } while (i < n && (list[i] >> 6) == wordIdx);
-        words[wordIdx] ^= mask;
+    for (uint32_t i = 0; i < n; ++i) {
+        const uint32_t pos = list[i];
+        words[pos >> 6] ^= UINT64_C(1) << (pos & 63);
     }
 }
 
@@ -1059,6 +1031,193 @@ inline bool bitmap_is_empty(const uint64_t* __restrict__ words) {
         if (words[i]) return false;
     return true;
 #endif
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SIMD sorted array intersection (Gap 1)
+// Returns count of matching elements written to `out`.
+// Both inputs must be sorted. Output is sorted.
+// ═══════════════════════════════════════════════════════════════════════════
+
+#if ARROW_SIMD_TIER == 1  // NEON
+
+// NEON: broadcast-compare intersection.
+// For each element in A[0..7], broadcast it to all 8 lanes, compare against
+// B[0..7] using vceqq_u16, reduce with vmaxvq. If any lane matches, emit.
+inline uint32_t array_intersect_neon(const uint16_t* __restrict__ a, uint32_t na,
+                                     const uint16_t* __restrict__ b, uint32_t nb,
+                                     uint16_t* __restrict__ out) {
+    uint32_t pos = 0;
+    uint32_t ia = 0, ib = 0;
+
+    while (ia + 8 <= na && ib + 8 <= nb) {
+        // Skip blocks that can't intersect.
+        if (a[ia + 7] < b[ib]) { ia += 8; continue; }
+        if (b[ib + 7] < a[ia]) { ib += 8; continue; }
+
+        uint16x8_t vb = vld1q_u16(b + ib);
+
+        // Check each of a[ia..ia+7] against all of vb.
+        for (uint32_t k = 0; k < 8 && ia + k < na; ++k) {
+            uint16x8_t va = vdupq_n_u16(a[ia + k]);
+            uint16x8_t cmp = vceqq_u16(va, vb);
+            if (vmaxvq_u16(cmp) != 0) {
+                out[pos++] = a[ia + k];
+            }
+        }
+
+        // Advance the array whose maximum is smaller.
+        if (a[ia + 7] <= b[ib + 7]) ia += 8;
+        else ib += 8;
+    }
+
+    // Scalar tail.
+    while (ia < na && ib < nb) {
+        if (a[ia] < b[ib]) ++ia;
+        else if (a[ia] > b[ib]) ++ib;
+        else { out[pos++] = a[ia]; ++ia; ++ib; }
+    }
+    return pos;
+}
+
+#endif  // NEON
+
+// Portable (all tiers): sorted array intersection with block-skipping.
+// Falls through to NEON intrinsics on tier 1, scalar two-pointer otherwise.
+inline uint32_t array_intersect(const uint16_t* __restrict__ a, uint32_t na,
+                                const uint16_t* __restrict__ b, uint32_t nb,
+                                uint16_t* __restrict__ out) {
+#if ARROW_SIMD_TIER == 1
+    return array_intersect_neon(a, na, b, nb, out);
+#else
+    // Scalar two-pointer with block-skipping.
+    uint32_t pos = 0;
+    uint32_t ia = 0, ib = 0;
+    while (ia < na && ib < nb) {
+        if (a[ia] < b[ib]) ++ia;
+        else if (a[ia] > b[ib]) ++ib;
+        else { out[pos++] = a[ia]; ++ia; ++ib; }
+    }
+    return pos;
+#endif
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SIMD sorted array union (Gap 2)
+// Merge two sorted arrays, deduplicating. Output is sorted.
+// ═══════════════════════════════════════════════════════════════════════════
+
+inline uint32_t array_union(const uint16_t* __restrict__ a, uint32_t na,
+                            const uint16_t* __restrict__ b, uint32_t nb,
+                            uint16_t* __restrict__ out) {
+    uint32_t pos = 0;
+    uint32_t ia = 0, ib = 0;
+
+    while (ia < na && ib < nb) {
+        // Bulk-copy from A when next 8+ elements are all < B[ib].
+        if (ia + 8 <= na && a[ia + 7] < b[ib]) {
+            std::memcpy(out + pos, a + ia, 8 * sizeof(uint16_t));
+            pos += 8;
+            ia += 8;
+            continue;
+        }
+        // Symmetric: bulk-copy from B.
+        if (ib + 8 <= nb && b[ib + 7] < a[ia]) {
+            std::memcpy(out + pos, b + ib, 8 * sizeof(uint16_t));
+            pos += 8;
+            ib += 8;
+            continue;
+        }
+
+        if (a[ia] < b[ib]) out[pos++] = a[ia++];
+        else if (a[ia] > b[ib]) out[pos++] = b[ib++];
+        else { out[pos++] = a[ia++]; ++ib; }
+    }
+    // Copy remainder.
+    if (ia < na) {
+        std::memcpy(out + pos, a + ia, (na - ia) * sizeof(uint16_t));
+        pos += na - ia;
+    }
+    if (ib < nb) {
+        std::memcpy(out + pos, b + ib, (nb - ib) * sizeof(uint16_t));
+        pos += nb - ib;
+    }
+    return pos;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Sorted array XOR (Gap 2): emit elements in exactly one of A or B.
+// ═══════════════════════════════════════════════════════════════════════════
+
+inline uint32_t array_xor(const uint16_t* __restrict__ a, uint32_t na,
+                          const uint16_t* __restrict__ b, uint32_t nb,
+                          uint16_t* __restrict__ out) {
+    uint32_t pos = 0;
+    uint32_t ia = 0, ib = 0;
+
+    while (ia < na && ib < nb) {
+        // Bulk-copy from A when next 8+ elements are all < B[ib].
+        if (ia + 8 <= na && a[ia + 7] < b[ib]) {
+            std::memcpy(out + pos, a + ia, 8 * sizeof(uint16_t));
+            pos += 8;
+            ia += 8;
+            continue;
+        }
+        if (ib + 8 <= nb && b[ib + 7] < a[ia]) {
+            std::memcpy(out + pos, b + ib, 8 * sizeof(uint16_t));
+            pos += 8;
+            ib += 8;
+            continue;
+        }
+
+        if (a[ia] < b[ib]) out[pos++] = a[ia++];
+        else if (a[ia] > b[ib]) out[pos++] = b[ib++];
+        else { ++ia; ++ib; }  // skip common
+    }
+    if (ia < na) {
+        std::memcpy(out + pos, a + ia, (na - ia) * sizeof(uint16_t));
+        pos += na - ia;
+    }
+    if (ib < nb) {
+        std::memcpy(out + pos, b + ib, (nb - ib) * sizeof(uint16_t));
+        pos += nb - ib;
+    }
+    return pos;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Sorted array difference (Gap 2): emit elements in A but not B.
+// ═══════════════════════════════════════════════════════════════════════════
+
+inline uint32_t array_diff(const uint16_t* __restrict__ a, uint32_t na,
+                           const uint16_t* __restrict__ b, uint32_t nb,
+                           uint16_t* __restrict__ out) {
+    uint32_t pos = 0;
+    uint32_t ia = 0, ib = 0;
+
+    while (ia < na && ib < nb) {
+        // Bulk-copy from A when next 8+ elements are all < B[ib].
+        if (ia + 8 <= na && a[ia + 7] < b[ib]) {
+            std::memcpy(out + pos, a + ia, 8 * sizeof(uint16_t));
+            pos += 8;
+            ia += 8;
+            continue;
+        }
+        // Skip B when next 8+ elements are all < A[ia].
+        if (ib + 8 <= nb && b[ib + 7] < a[ia]) {
+            ib += 8;
+            continue;
+        }
+
+        if (a[ia] < b[ib]) out[pos++] = a[ia++];
+        else if (a[ia] > b[ib]) ++ib;
+        else { ++ia; ++ib; }
+    }
+    if (ia < na) {
+        std::memcpy(out + pos, a + ia, (na - ia) * sizeof(uint16_t));
+        pos += na - ia;
+    }
+    return pos;
 }
 
 }  // namespace arrow::simd

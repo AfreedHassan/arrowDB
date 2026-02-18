@@ -1,14 +1,12 @@
 #pragma once
 
 #include <algorithm>
-#include <atomic>
 #include <cassert>
 #include <cstdint>
 #include <cstring>
 #include <memory>
 #include <numeric>
 #include <optional>
-#include <queue>
 #include <span>
 #include <string>
 #include <variant>
@@ -395,26 +393,46 @@ struct RunContainer {
     bool operator==(const RunContainer& o) const { return runs == o.runs; }
 };
 
-// ── Intrusive refcounted container node (Gap 9) ─────────────────────────────
-// Single atomic refcount embedded in the node — halves atomic ops vs shared_ptr
-// and eliminates the separate control block allocation.
+// ── Intrusive refcounted container node ──────────────────────────────────────
+// Non-atomic refcount: RoaringBitmap is not thread-safe, so atomic ops are
+// pure overhead. Plain uint32_t eliminates memory barriers on every copy/destroy.
 struct ContainerNode {
-    mutable std::atomic<uint32_t> refCount{1};
+    mutable uint32_t refCount{1};
     Container data;
 
     explicit ContainerNode(Container c) : data(std::move(c)) {}
     ContainerNode(const ContainerNode& o) : data(o.data) {}  // refCount starts at 1
     ContainerNode& operator=(const ContainerNode&) = delete;
+
+    // Pool allocator: recycle freed nodes to avoid malloc/free per container op.
+    static void* operator new(size_t sz) {
+        auto& pool = freeList();
+        if (!pool.empty()) {
+            void* p = pool.back();
+            pool.pop_back();
+            return p;
+        }
+        return ::operator new(sz);
+    }
+    static void operator delete(void* p, size_t) noexcept {
+        freeList().push_back(p);
+    }
+
+private:
+    static std::vector<void*>& freeList() {
+        static thread_local std::vector<void*> pool;
+        return pool;
+    }
 };
 
 class ContainerPtr {
     ContainerNode* node_ = nullptr;
 
     void addRef() noexcept {
-        if (node_) node_->refCount.fetch_add(1, std::memory_order_relaxed);
+        if (node_) ++node_->refCount;
     }
     void release() noexcept {
-        if (node_ && node_->refCount.fetch_sub(1, std::memory_order_acq_rel) == 1)
+        if (node_ && --node_->refCount == 0)
             delete node_;
     }
 
@@ -448,7 +466,7 @@ public:
     const Container* operator->() const { return &node_->data; }
 
     uint32_t use_count() const noexcept {
-        return node_ ? node_->refCount.load(std::memory_order_relaxed) : 0;
+        return node_ ? node_->refCount : 0;
     }
     explicit operator bool() const noexcept { return node_ != nullptr; }
 };
@@ -568,63 +586,14 @@ inline Container andArrayArray(const ArrayContainer& a, const ArrayContainer& b)
         return result;
     }
 
-    result.values.reserve(std::min(a.values.size(), b.values.size()));
-
-#if ARROW_SIMD_TIER == 1  // NEON
-    // NEON vectorized sorted intersection: compare each element of A against
-    // 8 elements of B simultaneously using vceqq_u16.
-    const uint16_t* pa = a.values.data();
-    const uint16_t* pb = b.values.data();
-    size_t na = a.values.size(), nb = b.values.size();
-    size_t ia = 0, ib = 0;
-
-    // NEON path: process when both arrays have >= 8 remaining elements.
-    // Block-skipping: compare block endpoints to skip non-overlapping ranges.
-    while (ia + 8 <= na && ib + 8 <= nb) {
-        uint16_t maxA = pa[ia + 7];
-        uint16_t maxB = pb[ib + 7];
-
-        if (maxA < pb[ib]) {
-            // All of A block < all of B block — skip A.
-            ia += 8;
-            continue;
-        }
-        if (maxB < pa[ia]) {
-            // All of B block < all of A block — skip B.
-            ib += 8;
-            continue;
-        }
-
-        // Scalar fallback for the overlapping block.
-        while (ia < na && ib < nb && ia < na && ib < nb) {
-            if (pa[ia] < pb[ib]) {
-                ++ia;
-                if (ia < na && pa[ia] > maxA) break;
-            } else if (pa[ia] > pb[ib]) {
-                ++ib;
-                if (ib < nb && pb[ib] > maxB) break;
-            } else {
-                result.values.push_back(pa[ia]);
-                ++ia; ++ib;
-                if ((ia < na && pa[ia] > maxA) || (ib < nb && pb[ib] > maxB)) break;
-            }
-        }
-    }
-
-    // Scalar tail.
-    while (ia < na && ib < nb) {
-        if (pa[ia] < pb[ib]) ++ia;
-        else if (pa[ia] > pb[ib]) ++ib;
-        else { result.values.push_back(pa[ia]); ++ia; ++ib; }
-    }
-#else
-    size_t i = 0, j = 0;
-    while (i < a.values.size() && j < b.values.size()) {
-        if (a.values[i] < b.values[j]) ++i;
-        else if (a.values[i] > b.values[j]) ++j;
-        else { result.values.push_back(a.values[i]); ++i; ++j; }
-    }
-#endif
+    // Use SIMD array intersection (NEON broadcast-compare or scalar with block-skip).
+    size_t maxOut = std::min(a.values.size(), b.values.size());
+    result.values.resize(maxOut);
+    uint32_t count = simd::array_intersect(
+        a.values.data(), static_cast<uint32_t>(a.values.size()),
+        b.values.data(), static_cast<uint32_t>(b.values.size()),
+        result.values.data());
+    result.values.resize(count);
     return result;
 }
 
@@ -761,38 +730,13 @@ inline Container containerAnd(const Container& a, const Container& b) {
 // Array × Array — sorted merge with bulk copy for non-overlapping blocks.
 inline Container orArrayArray(const ArrayContainer& a, const ArrayContainer& b) {
     ArrayContainer result;
-    result.values.reserve(a.values.size() + b.values.size());
-
-    const uint16_t* pa = a.values.data();
-    const uint16_t* pb = b.values.data();
-    size_t na = a.values.size(), nb = b.values.size();
-    size_t i = 0, j = 0;
-
-    while (i < na && j < nb) {
-        // Block-skip: if next 8+ elements of A are all < B[j], bulk copy them.
-        if (i + 8 <= na && pa[i + 7] < pb[j]) {
-            // Find how many consecutive A elements are < B[j].
-            auto it = std::lower_bound(pa + i, pa + na, pb[j]);
-            size_t count = static_cast<size_t>(it - (pa + i));
-            result.values.insert(result.values.end(), pa + i, pa + i + count);
-            i += count;
-            continue;
-        }
-        // Symmetric: bulk copy from B if next 8+ are < A[i].
-        if (j + 8 <= nb && pb[j + 7] < pa[i]) {
-            auto it = std::lower_bound(pb + j, pb + nb, pa[i]);
-            size_t count = static_cast<size_t>(it - (pb + j));
-            result.values.insert(result.values.end(), pb + j, pb + j + count);
-            j += count;
-            continue;
-        }
-
-        if (pa[i] < pb[j]) result.values.push_back(pa[i++]);
-        else if (pa[i] > pb[j]) result.values.push_back(pb[j++]);
-        else { result.values.push_back(pa[i++]); ++j; }
-    }
-    if (i < na) result.values.insert(result.values.end(), pa + i, pa + na);
-    if (j < nb) result.values.insert(result.values.end(), pb + j, pb + nb);
+    size_t maxOut = a.values.size() + b.values.size();
+    result.values.resize(maxOut);
+    uint32_t count = simd::array_union(
+        a.values.data(), static_cast<uint32_t>(a.values.size()),
+        b.values.data(), static_cast<uint32_t>(b.values.size()),
+        result.values.data());
+    result.values.resize(count);
 
     if (result.values.size() > kArrayMaxSize) {
         return arrayToBitmap(result);
@@ -888,14 +832,12 @@ inline Container containerOr(const Container& a, const Container& b) {
 // Array - Array: two-pointer.
 inline Container andNotArrayArray(const ArrayContainer& a, const ArrayContainer& b) {
     ArrayContainer result;
-    result.values.reserve(a.values.size());
-    size_t i = 0, j = 0;
-    while (i < a.values.size() && j < b.values.size()) {
-        if (a.values[i] < b.values[j]) result.values.push_back(a.values[i++]);
-        else if (a.values[i] > b.values[j]) ++j;
-        else { ++i; ++j; }
-    }
-    while (i < a.values.size()) result.values.push_back(a.values[i++]);
+    result.values.resize(a.values.size());
+    uint32_t count = simd::array_diff(
+        a.values.data(), static_cast<uint32_t>(a.values.size()),
+        b.values.data(), static_cast<uint32_t>(b.values.size()),
+        result.values.data());
+    result.values.resize(count);
     return result;
 }
 
@@ -1072,15 +1014,13 @@ inline Container containerAndNot(const Container& a, const Container& b) {
 // Array ^ Array: sorted merge, skip common elements.
 inline Container xorArrayArray(const ArrayContainer& a, const ArrayContainer& b) {
     ArrayContainer result;
-    result.values.reserve(a.values.size() + b.values.size());
-    size_t i = 0, j = 0;
-    while (i < a.values.size() && j < b.values.size()) {
-        if (a.values[i] < b.values[j]) result.values.push_back(a.values[i++]);
-        else if (a.values[i] > b.values[j]) result.values.push_back(b.values[j++]);
-        else { ++i; ++j; }  // skip common
-    }
-    while (i < a.values.size()) result.values.push_back(a.values[i++]);
-    while (j < b.values.size()) result.values.push_back(b.values[j++]);
+    size_t maxOut = a.values.size() + b.values.size();
+    result.values.resize(maxOut);
+    uint32_t count = simd::array_xor(
+        a.values.data(), static_cast<uint32_t>(a.values.size()),
+        b.values.data(), static_cast<uint32_t>(b.values.size()),
+        result.values.data());
+    result.values.resize(count);
 
     if (result.values.size() > kArrayMaxSize) return arrayToBitmap(result);
     return result;
@@ -1291,6 +1231,96 @@ inline Container containerLazyOr(const Container& a, const Container& b) {
     }, a, b);
 }
 
+// ── Container-level forEach (direct dispatch, no iterator) ───────────────
+
+template <typename Fn>
+inline void containerForEach(const Container& c, uint32_t base, Fn&& fn) {
+    std::visit([base, &fn](const auto& cont) {
+        using T = std::decay_t<decltype(cont)>;
+        if constexpr (std::is_same_v<T, ArrayContainer>) {
+            for (uint16_t v : cont.values) fn(base + v);
+        } else if constexpr (std::is_same_v<T, BitmapContainer>) {
+            for (uint32_t w = 0; w < kBitmapWords; ++w) {
+                uint64_t bits = cont.words[w];
+                if (bits == 0) continue;
+                uint32_t wbase = base + (w << 6);
+                while (bits) {
+                    fn(wbase + static_cast<uint32_t>(__builtin_ctzll(bits)));
+                    bits &= bits - 1;
+                }
+            }
+        } else {
+            for (auto& r : cont.runs) {
+                for (uint32_t v = r.start;
+                     v <= static_cast<uint32_t>(r.start) + r.length; ++v)
+                    fn(base + v);
+            }
+        }
+    }, c);
+}
+
+// ── Container to uint32_t array (direct write, no intermediate buffer) ───
+
+inline uint32_t containerToUint32Array(const Container& c, uint32_t base,
+                                        uint32_t* out) {
+    return std::visit([base, out](const auto& cont) -> uint32_t {
+        using T = std::decay_t<decltype(cont)>;
+        if constexpr (std::is_same_v<T, ArrayContainer>) {
+            for (size_t i = 0; i < cont.values.size(); ++i)
+                out[i] = base + cont.values[i];
+            return static_cast<uint32_t>(cont.values.size());
+        } else if constexpr (std::is_same_v<T, BitmapContainer>) {
+            return simd::bitmap_to_uint32_array(cont.words, base, out);
+        } else {
+            uint32_t pos = 0;
+            for (auto& r : cont.runs) {
+                for (uint32_t v = r.start;
+                     v <= static_cast<uint32_t>(r.start) + r.length; ++v)
+                    out[pos++] = base + v;
+            }
+            return pos;
+        }
+    }, c);
+}
+
+// ── Container to bitmap (force-convert any type) ─────────────────────────
+
+inline BitmapContainer containerToBitmap(const Container& c) {
+    return std::visit([](const auto& cont) -> BitmapContainer {
+        using T = std::decay_t<decltype(cont)>;
+        if constexpr (std::is_same_v<T, BitmapContainer>) {
+            return cont;
+        } else if constexpr (std::is_same_v<T, ArrayContainer>) {
+            return arrayToBitmap(cont);
+        } else {
+            return cont.toBitmap();
+        }
+    }, c);
+}
+
+// ── Lazy OR in-place (force to bitmap, then word-OR) ─────────────────────
+
+inline void containerLazyOrInPlace(Container& a, const Container& b) {
+    if (!std::holds_alternative<BitmapContainer>(a)) {
+        a = containerToBitmap(a);
+    }
+    auto& bm = std::get<BitmapContainer>(a);
+    std::visit([&bm](const auto& cont) {
+        using T = std::decay_t<decltype(cont)>;
+        if constexpr (std::is_same_v<T, BitmapContainer>) {
+            simd::bitmap_or_nocard(bm.words, cont.words, bm.words);
+        } else if constexpr (std::is_same_v<T, ArrayContainer>) {
+            simd::bitmap_set_list(bm.words, cont.values.data(),
+                                  static_cast<uint32_t>(cont.values.size()));
+        } else {
+            for (auto& run : cont.runs)
+                bm.setRange(run.start,
+                    static_cast<uint32_t>(run.start) + run.length + 1);
+        }
+    }, b);
+    bm.card = -1;
+}
+
 // ── In-place container operations ────────────────────────────────────────
 
 inline void containerOrInPlace(Container& a, const Container& b) {
@@ -1309,6 +1339,24 @@ inline void containerOrInPlace(Container& a, const Container& b) {
                     static_cast<uint32_t>(run.start) + run.length + 1);
         }
         return;
+    }
+    if (auto* aa = std::get_if<ArrayContainer>(&a)) {
+        if (auto* ba = std::get_if<ArrayContainer>(&b)) {
+            size_t maxOut = aa->values.size() + ba->values.size();
+            std::vector<uint16_t> merged(maxOut);
+            uint32_t count = simd::array_union(
+                aa->values.data(), static_cast<uint32_t>(aa->values.size()),
+                ba->values.data(), static_cast<uint32_t>(ba->values.size()),
+                merged.data());
+            merged.resize(count);
+            if (count > kArrayMaxSize) {
+                aa->values = std::move(merged);
+                a = arrayToBitmap(*aa);
+            } else {
+                aa->values = std::move(merged);
+            }
+            return;
+        }
     }
     a = containerOr(a, b);
 }
@@ -1353,13 +1401,23 @@ inline void containerAndNotInPlace(Container& a, const Container& b) {
             return;
         }
     }
-    if (auto* arr = std::get_if<ArrayContainer>(&a)) {
-        size_t out = 0;
-        for (size_t i = 0; i < arr->values.size(); ++i) {
-            if (!containerContains(b, arr->values[i]))
-                arr->values[out++] = arr->values[i];
+    if (auto* aa = std::get_if<ArrayContainer>(&a)) {
+        if (auto* ba = std::get_if<ArrayContainer>(&b)) {
+            std::vector<uint16_t> result(aa->values.size());
+            uint32_t count = simd::array_diff(
+                aa->values.data(), static_cast<uint32_t>(aa->values.size()),
+                ba->values.data(), static_cast<uint32_t>(ba->values.size()),
+                result.data());
+            result.resize(count);
+            aa->values = std::move(result);
+            return;
         }
-        arr->values.resize(out);
+        size_t out = 0;
+        for (size_t i = 0; i < aa->values.size(); ++i) {
+            if (!containerContains(b, aa->values[i]))
+                aa->values[out++] = aa->values[i];
+        }
+        aa->values.resize(out);
         return;
     }
     a = containerAndNot(a, b);
@@ -1376,6 +1434,24 @@ inline void containerXorInPlace(Container& a, const Container& b) {
             simd::bitmap_flip_list(bm->words, oa->values.data(),
                                    static_cast<uint32_t>(oa->values.size()));
             bm->card = -1;
+            return;
+        }
+    }
+    if (auto* aa = std::get_if<ArrayContainer>(&a)) {
+        if (auto* ba = std::get_if<ArrayContainer>(&b)) {
+            size_t maxOut = aa->values.size() + ba->values.size();
+            std::vector<uint16_t> result(maxOut);
+            uint32_t count = simd::array_xor(
+                aa->values.data(), static_cast<uint32_t>(aa->values.size()),
+                ba->values.data(), static_cast<uint32_t>(ba->values.size()),
+                result.data());
+            result.resize(count);
+            if (count > kArrayMaxSize) {
+                aa->values = std::move(result);
+                a = arrayToBitmap(*aa);
+            } else {
+                aa->values = std::move(result);
+            }
             return;
         }
     }
@@ -1412,6 +1488,14 @@ struct RoaringStatistics {
 // RoaringBitmap — top-level class
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Context for amortized O(1) bulk insertion. Caches the last-touched
+// container so consecutive values with the same high-16 key skip binary search.
+// Usage: create one BulkContext, then call addBulk() in a loop.
+struct BulkContext {
+    uint16_t key = 0;
+    size_t   containerIdx = SIZE_MAX;  // SIZE_MAX = invalid/uninitialized
+};
+
 class RoaringBitmap {
 public:
     // ── Modification ────────────────────────────────────────────────────────
@@ -1424,7 +1508,64 @@ public:
         std::visit([&](auto& cont) {
             using T = std::decay_t<decltype(cont)>;
             if constexpr (std::is_same_v<T, ArrayContainer>) {
+                if (!cont.values.empty() && lo > cont.values.back()) {
+                    cont.values.push_back(lo);
+                } else {
+                    cont.add(lo);
+                }
+                if (cont.cardinality() > kArrayMaxSize) {
+                    c = detail::arrayToBitmap(cont);
+                }
+            } else {
                 cont.add(lo);
+            }
+        }, c);
+    }
+
+    // Amortized O(1) insertion with cached container context.
+    // Best for streaming sorted data. Create one BulkContext, call repeatedly.
+    void addBulk(uint32_t val, BulkContext& ctx) {
+        uint16_t hi = static_cast<uint16_t>(val >> 16);
+        uint16_t lo = static_cast<uint16_t>(val & 0xFFFF);
+
+        // Fast path: same key as last call — go directly to cached container.
+        if (ctx.containerIdx != SIZE_MAX && ctx.key == hi &&
+            ctx.containerIdx < keys_.size() && keys_[ctx.containerIdx] == hi) {
+            auto& c = cow(containers_[ctx.containerIdx]);
+            std::visit([&](auto& cont) {
+                using T = std::decay_t<decltype(cont)>;
+                if constexpr (std::is_same_v<T, ArrayContainer>) {
+                    // Append fast path: if val > current max, O(1) push_back.
+                    if (!cont.values.empty() && lo > cont.values.back()) {
+                        cont.values.push_back(lo);
+                    } else {
+                        cont.add(lo);
+                    }
+                    if (cont.cardinality() > kArrayMaxSize) {
+                        c = detail::arrayToBitmap(cont);
+                    }
+                } else {
+                    cont.add(lo);
+                }
+            }, c);
+            return;
+        }
+
+        // Slow path: different key — do lookup and update cache.
+        auto& c = getOrCreateContainer(hi);
+        // Update cache: find the index we just touched.
+        auto it = std::lower_bound(keys_.begin(), keys_.end(), hi);
+        ctx.key = hi;
+        ctx.containerIdx = static_cast<size_t>(it - keys_.begin());
+
+        std::visit([&](auto& cont) {
+            using T = std::decay_t<decltype(cont)>;
+            if constexpr (std::is_same_v<T, ArrayContainer>) {
+                if (!cont.values.empty() && lo > cont.values.back()) {
+                    cont.values.push_back(lo);
+                } else {
+                    cont.add(lo);
+                }
                 if (cont.cardinality() > kArrayMaxSize) {
                     c = detail::arrayToBitmap(cont);
                 }
@@ -1459,79 +1600,85 @@ public:
     }
 
     // Half-open range [min, max).
+    // CRoaring-style: one bulk shift to make room, then right-to-left fill.
+    // New chunks get RunContainers (trivially cheap for contiguous ranges).
     void addRange(uint32_t min, uint64_t max) {
         if (min >= max) return;
         if (max > 0x100000000ULL) max = 0x100000000ULL;
 
-        uint16_t hiStart = static_cast<uint16_t>(min >> 16);
-        uint16_t hiEnd = static_cast<uint16_t>((max - 1) >> 16);
+        uint16_t minKey = static_cast<uint16_t>(min >> 16);
+        uint16_t maxKey = static_cast<uint16_t>((max - 1) >> 16);
+        uint32_t numRequired = static_cast<uint32_t>(maxKey) - minKey + 1;
 
-        for (uint32_t hi = hiStart; hi <= hiEnd; ++hi) {
-            uint16_t lo_start = (hi == hiStart) ? static_cast<uint16_t>(min & 0xFFFF) : 0;
-            uint32_t lo_end_32 = (hi == hiEnd) ? ((max - 1) & 0xFFFF) + 1u : 65536u;
-            uint16_t lo_end = static_cast<uint16_t>(std::min(lo_end_32, 65536u));
+        // Count keys in [minKey..maxKey] range (common), before (prefix), after (suffix).
+        auto prefixEnd = std::lower_bound(keys_.begin(), keys_.end(), minKey);
+        size_t prefixLen = static_cast<size_t>(prefixEnd - keys_.begin());
+        auto suffixBegin = std::upper_bound(prefixEnd, keys_.end(), maxKey);
+        size_t suffixLen = static_cast<size_t>(keys_.end() - suffixBegin);
+        size_t commonLen = keys_.size() - prefixLen - suffixLen;
 
-            if (lo_start >= lo_end && lo_end_32 != 65536u) continue;
-
-            uint32_t rangeSize = (lo_end_32 == 65536u && lo_start == 0) ? 65536u
-                                : lo_end - lo_start;
-
-            auto& c = getOrCreateContainer(static_cast<uint16_t>(hi));  // cow inside
-
-            std::visit([&](auto& cont) {
-                using T = std::decay_t<decltype(cont)>;
-                if constexpr (std::is_same_v<T, ArrayContainer>) {
-                    if (cont.cardinality() + rangeSize > kArrayMaxSize) {
-                        // Promote to bitmap, then set range.
-                        BitmapContainer bm = detail::arrayToBitmap(cont);
-                        if (lo_end_32 == 65536u) {
-                            bm.setRange(lo_start, 0);
-                            // setRange with end=0 won't work for full range, do it manually
-                            for (uint32_t w = lo_start >> 6; w < kBitmapWords; ++w) {
-                                if (w == (lo_start >> 6))
-                                    bm.words[w] |= ~0ULL << (lo_start & 63);
-                                else
-                                    bm.words[w] = ~0ULL;
-                            }
-                            bm.card = -1;
-                        } else {
-                            bm.setRange(lo_start, lo_end);
-                        }
-                        bm.computeCardinality();
-                        c = std::move(bm);
-                    } else {
-                        for (uint32_t v = lo_start; v < lo_end; ++v)
-                            cont.add(static_cast<uint16_t>(v));
-                        // Handle full chunk case
-                        if (lo_end_32 == 65536u) {
-                            for (uint32_t v = lo_start; v <= 0xFFFF; ++v)
-                                cont.add(static_cast<uint16_t>(v));
-                            if (cont.cardinality() > kArrayMaxSize)
-                                c = detail::arrayToBitmap(cont);
-                        }
-                    }
-                } else if constexpr (std::is_same_v<T, BitmapContainer>) {
-                    if (lo_end_32 == 65536u) {
-                        // Set from lo_start to end of chunk.
-                        uint32_t firstWord = lo_start >> 6;
-                        cont.words[firstWord] |= ~0ULL << (lo_start & 63);
-                        for (uint32_t w = firstWord + 1; w < kBitmapWords; ++w)
-                            cont.words[w] = ~0ULL;
-                        cont.card = -1;
-                    } else {
-                        cont.setRange(lo_start, lo_end);
-                    }
-                    cont.computeCardinality();
-                } else {
-                    // RunContainer
-                    if (lo_end_32 == 65536u) {
-                        cont.addRange(lo_start, 0xFFFF);
-                    } else {
-                        cont.addRange(lo_start, lo_end);
-                    }
+        // Bulk expand: make room for new chunks if needed.
+        if (numRequired > commonLen) {
+            size_t growth = numRequired - commonLen;
+            size_t oldSize = keys_.size();
+            size_t newSize = oldSize + growth;
+            keys_.resize(newSize);
+            containers_.resize(newSize);
+            // Shift suffix right to make room.
+            if (suffixLen > 0) {
+                for (size_t k = 0; k < suffixLen; ++k) {
+                    size_t from = oldSize - 1 - k;
+                    size_t to = newSize - 1 - k;
+                    keys_[to] = keys_[from];
+                    containers_[to] = std::move(containers_[from]);
                 }
-            }, c);
+            }
         }
+
+        // Fill right-to-left: existing containers get addRange, new ones get RunContainer.
+        size_t src = prefixLen + commonLen;  // one past last existing in range
+        size_t dst = prefixLen + numRequired; // one past last slot in range
+        for (uint32_t key = maxKey; key != static_cast<uint32_t>(minKey) - 1; --key) {
+            uint16_t loStart = (key == minKey) ? static_cast<uint16_t>(min & 0xFFFF) : 0;
+            uint16_t loEndInc = (key == maxKey) ? static_cast<uint16_t>((max - 1) & 0xFFFF) : 0xFFFF;
+
+            --dst;
+            if (src > prefixLen && keys_[src - 1] == static_cast<uint16_t>(key)) {
+                // Existing container — add range into it.
+                --src;
+                if (src != dst) {
+                    keys_[dst] = keys_[src];
+                    containers_[dst] = std::move(containers_[src]);
+                }
+                auto& c = cow(containers_[dst]);
+                std::visit([&](auto& cont) {
+                    using T = std::decay_t<decltype(cont)>;
+                    if constexpr (std::is_same_v<T, ArrayContainer>) {
+                        // For arrays: promote to bitmap, setRange, lazy card.
+                        BitmapContainer bm = detail::arrayToBitmap(cont);
+                        bm.setRange(loStart, static_cast<uint32_t>(loEndInc) + 1);
+                        c = std::move(bm);
+                    } else if constexpr (std::is_same_v<T, BitmapContainer>) {
+                        cont.setRange(loStart, static_cast<uint32_t>(loEndInc) + 1);
+                    } else {
+                        // RunContainer: merge range directly.
+                        if (loStart == 0 && loEndInc == 0xFFFF) {
+                            cont.runs.clear();
+                            cont.runs.push_back({0, 0xFFFF});
+                        } else {
+                            cont.addRange(loStart, loEndInc + 1);
+                        }
+                    }
+                }, c);
+            } else {
+                // New container — create RunContainer with single run.
+                keys_[dst] = static_cast<uint16_t>(key);
+                RunContainer rc;
+                rc.runs.push_back({loStart, static_cast<uint16_t>(loEndInc - loStart)});
+                containers_[dst] = makeContainer(Container{std::move(rc)});
+            }
+        }
+        lastKeyIdx_ = 0;  // invalidate cache
     }
 
     void addMany(const uint32_t* vals, size_t n) {
@@ -1543,64 +1690,15 @@ public:
             sorted = (vals[i] >= vals[i - 1]);
 
         if (!sorted) {
-            for (size_t i = 0; i < n; ++i) add(vals[i]);
+            // Sort a copy, then use the sorted path. This avoids per-element
+            // binary search on both keys_ and within containers.
+            std::vector<uint32_t> buf(vals, vals + n);
+            std::sort(buf.begin(), buf.end());
+            addManySorted(buf.data(), n);
             return;
         }
 
-        // Sorted fast path: group by high-16 key, batch-insert per container.
-        // Cache last-touched container to skip binary search (O(n) for sorted input).
-        size_t i = 0;
-        while (i < n) {
-            uint16_t hi = static_cast<uint16_t>(vals[i] >> 16);
-
-            // Find or create container for this key.
-            auto& c = getOrCreateContainer(hi);
-
-            // Collect all values with same high key.
-            size_t groupStart = i;
-            while (i < n && static_cast<uint16_t>(vals[i] >> 16) == hi) ++i;
-
-            // Batch insert into this container.
-            std::visit([&](auto& cont) {
-                using T = std::decay_t<decltype(cont)>;
-                if constexpr (std::is_same_v<T, ArrayContainer>) {
-                    // Sorted merge: values are sorted, container values are sorted.
-                    // Use append fast path when all new values > current max.
-                    uint16_t lastVal = cont.values.empty()
-                        ? static_cast<uint16_t>(0)
-                        : cont.values.back();
-                    bool allAboveMax = cont.values.empty() ||
-                        static_cast<uint16_t>(vals[groupStart] & 0xFFFF) > lastVal;
-
-                    if (allAboveMax) {
-                        // O(1) append per value — skip binary search entirely.
-                        for (size_t j = groupStart; j < i; ++j) {
-                            uint16_t lo = static_cast<uint16_t>(vals[j] & 0xFFFF);
-                            // Skip duplicates.
-                            if (!cont.values.empty() && cont.values.back() == lo)
-                                continue;
-                            cont.values.push_back(lo);
-                        }
-                    } else {
-                        // Merge: values come from a sorted stream, do sorted merge.
-                        for (size_t j = groupStart; j < i; ++j) {
-                            uint16_t lo = static_cast<uint16_t>(vals[j] & 0xFFFF);
-                            cont.add(lo);
-                        }
-                    }
-                    // Check promotion.
-                    if (cont.cardinality() > kArrayMaxSize) {
-                        c = detail::arrayToBitmap(cont);
-                    }
-                } else {
-                    // BitmapContainer or RunContainer: just add each.
-                    for (size_t j = groupStart; j < i; ++j) {
-                        uint16_t lo = static_cast<uint16_t>(vals[j] & 0xFFFF);
-                        cont.add(lo);
-                    }
-                }
-            }, c);
-        }
+        addManySorted(vals, n);
     }
 
     // ── Queries ─────────────────────────────────────────────────────────────
@@ -1692,6 +1790,7 @@ public:
 
     RoaringBitmap operator|(const RoaringBitmap& o) const {
         RoaringBitmap result;
+        result.reserveChunks(keys_.size() + o.keys_.size());
         size_t i = 0, j = 0;
         while (i < keys_.size() && j < o.keys_.size()) {
             if (keys_[i] < o.keys_[j]) {
@@ -1710,6 +1809,7 @@ public:
 
     RoaringBitmap operator^(const RoaringBitmap& o) const {
         RoaringBitmap result;
+        result.reserveChunks(keys_.size() + o.keys_.size());
         size_t i = 0, j = 0;
         while (i < keys_.size() && j < o.keys_.size()) {
             if (keys_[i] < o.keys_[j]) {
@@ -1734,6 +1834,7 @@ public:
 
     RoaringBitmap operator-(const RoaringBitmap& o) const {
         RoaringBitmap result;
+        result.reserveChunks(keys_.size());
         size_t i = 0, j = 0;
         while (i < keys_.size() && j < o.keys_.size()) {
             if (keys_[i] < o.keys_[j]) {
@@ -1964,6 +2065,31 @@ public:
                 } else {
                     c = makeContainer(rc.toBitmap());
                 }
+                changed = true;
+            }
+        }
+        return changed;
+    }
+
+    // CRoaring-style runOptimize: only convert current→run if run is smaller.
+    // Does NOT do 3-way (array→bitmap or bitmap→array) conversions.
+    bool runOptimize() {
+        bool changed = false;
+        for (size_t i = 0; i < keys_.size(); ++i) {
+            auto& c = containers_[i];
+            RunContainer rc = toRunContainer(*c);
+            size_t runSize = 2 + rc.runs.size() * 4;
+            size_t currentSize = std::visit([](const auto& cont) -> size_t {
+                using T = std::decay_t<decltype(cont)>;
+                if constexpr (std::is_same_v<T, ArrayContainer>)
+                    return cont.values.size() * 2;
+                else if constexpr (std::is_same_v<T, BitmapContainer>)
+                    return 8192;
+                else
+                    return 2 + cont.runs.size() * 4;
+            }, *c);
+            if (runSize < currentSize) {
+                c = makeContainer(std::move(rc));
                 changed = true;
             }
         }
@@ -2516,15 +2642,22 @@ public:
     // ── Utility ─────────────────────────────────────────────────────────────
 
     std::vector<uint32_t> toVector() const {
-        std::vector<uint32_t> result;
-        result.reserve(cardinality());
-        for (auto v : *this) result.push_back(v);
+        std::vector<uint32_t> result(cardinality());
+        uint32_t* out = result.data();
+        for (size_t ci = 0; ci < keys_.size(); ++ci) {
+            uint32_t base = static_cast<uint32_t>(keys_[ci]) << 16;
+            out += detail::containerToUint32Array(*containers_[ci], base, out);
+        }
+        result.resize(static_cast<size_t>(out - result.data()));
         return result;
     }
 
     template <typename Fn>
     void forEach(Fn&& fn) const {
-        for (auto v : *this) fn(v);
+        for (size_t ci = 0; ci < keys_.size(); ++ci) {
+            uint32_t base = static_cast<uint32_t>(keys_[ci]) << 16;
+            detail::containerForEach(*containers_[ci], base, fn);
+        }
     }
 
     std::string toString() const {
@@ -2794,83 +2927,6 @@ public:
         }
     }
 
-    // ── Multi-way union (fastunion) ────────────────────────────────────────
-
-    static RoaringBitmap fastunion(const std::vector<const RoaringBitmap*>& bitmaps) {
-        if (bitmaps.empty()) return RoaringBitmap{};
-        if (bitmaps.size() == 1) return *bitmaps[0];
-
-        // For 2-4 bitmaps: direct pairwise OR avoids heap allocation overhead.
-        if (bitmaps.size() <= 4) {
-            RoaringBitmap result = *bitmaps[0];
-            for (size_t i = 1; i < bitmaps.size(); ++i)
-                result |= *bitmaps[i];
-            return result;
-        }
-
-        // Heap entry: (chunkKey, bitmapIndex, chunkIndex)
-        struct HeapEntry {
-            uint16_t key;
-            size_t bmIdx;
-            size_t chunkIdx;
-            bool operator>(const HeapEntry& o) const { return key > o.key; }
-        };
-
-        std::priority_queue<HeapEntry, std::vector<HeapEntry>, std::greater<HeapEntry>> heap;
-
-        // Initialize heap with first chunk from each bitmap
-        for (size_t i = 0; i < bitmaps.size(); ++i) {
-            if (!bitmaps[i]->keys_.empty()) {
-                heap.push({bitmaps[i]->keys_[0], i, 0});
-            }
-        }
-
-        RoaringBitmap result;
-        while (!heap.empty()) {
-            uint16_t currentKey = heap.top().key;
-
-            // Gather all containers with this key (share ptrs for single-container case)
-            std::vector<ContainerPtr> containerPtrs;
-            while (!heap.empty() && heap.top().key == currentKey) {
-                auto [key, bmIdx, chunkIdx] = heap.top();
-                heap.pop();
-                containerPtrs.push_back(bitmaps[bmIdx]->containers_[chunkIdx]);
-
-                // Advance this bitmap's iterator
-                size_t nextIdx = chunkIdx + 1;
-                if (nextIdx < bitmaps[bmIdx]->keys_.size()) {
-                    heap.push({bitmaps[bmIdx]->keys_[nextIdx], bmIdx, nextIdx});
-                }
-            }
-
-            if (containerPtrs.size() == 1) {
-                result.pushChunk(currentKey, containerPtrs[0]);
-                continue;
-            }
-
-            // Use lazy OR for intermediate steps
-            Container acc = detail::containerLazyOr(*containerPtrs[0], *containerPtrs[1]);
-            for (size_t i = 2; i < containerPtrs.size(); ++i) {
-                acc = detail::containerLazyOr(acc, *containerPtrs[i]);
-            }
-
-            // Repair cardinality on the final container
-            if (auto* bmc = std::get_if<BitmapContainer>(&acc)) {
-                if (bmc->card == -1) {
-                    bmc->computeCardinality();
-                    if (bmc->cardinality() <= kArrayMaxSize) {
-                        acc = bmc->toArray();
-                    }
-                }
-            }
-
-            if (detail::containerCardinality(acc) > 0) {
-                result.pushChunk(currentKey, makeContainer(std::move(acc)));
-            }
-        }
-        return result;
-    }
-
     // ── Lazy OR ─────────────────────────────────────────────────────────────
 
     RoaringBitmap lazyOr(const RoaringBitmap& o) const {
@@ -2890,6 +2946,117 @@ public:
         while (j < o.keys_.size()) { result.pushChunk(o.keys_[j], o.containers_[j]); ++j; }
         return result;
     }
+
+    // ── Lazy OR in-place (force containers to bitmap for fast accumulation) ─
+
+    void lazyOrInPlace(const RoaringBitmap& o) {
+        if (this == &o) return;
+
+        std::vector<uint16_t> rk;
+        std::vector<ContainerPtr> rc;
+        rk.reserve(keys_.size() + o.keys_.size());
+        rc.reserve(keys_.size() + o.keys_.size());
+
+        size_t i = 0, j = 0;
+        while (i < keys_.size() && j < o.keys_.size()) {
+            if (keys_[i] < o.keys_[j]) {
+                rk.push_back(keys_[i]); rc.push_back(std::move(containers_[i])); ++i;
+            } else if (keys_[i] > o.keys_[j]) {
+                rk.push_back(o.keys_[j]); rc.push_back(o.containers_[j]); ++j;
+            } else {
+                auto& c = cow(containers_[i]);
+                detail::containerLazyOrInPlace(c, *o.containers_[j]);
+                rk.push_back(keys_[i]); rc.push_back(std::move(containers_[i]));
+                ++i; ++j;
+            }
+        }
+        while (i < keys_.size()) { rk.push_back(keys_[i]); rc.push_back(std::move(containers_[i])); ++i; }
+        while (j < o.keys_.size()) { rk.push_back(o.keys_[j]); rc.push_back(o.containers_[j]); ++j; }
+
+        keys_ = std::move(rk);
+        containers_ = std::move(rc);
+    }
+
+    // ── Multi-way union (fastunion) ────────────────────────────────────────
+
+    static RoaringBitmap fastunion(const std::vector<const RoaringBitmap*>& bitmaps) {
+        if (bitmaps.empty()) return RoaringBitmap{};
+        if (bitmaps.size() == 1) return *bitmaps[0];
+
+        // Sequential lazy OR fold matching CRoaring's roaring_bitmap_or_many.
+        //
+        // Key design choices (matching CRoaring):
+        // - Non-colliding containers are shared as-is (no bitmap promotion)
+        // - Collisions promote to bitmap via containerLazyOrInPlace dispatch
+        // - This avoids wasteful 8KB alloc+memset for containers that may
+        //   never collide, and handles array+array natively when small
+
+        // Step 1: lazy OR of first two bitmaps (containerLazyOr dispatch)
+        RoaringBitmap result;
+        {
+            const auto& a = *bitmaps[0];
+            const auto& b = *bitmaps[1];
+            result.reserveChunks(a.keys_.size() + b.keys_.size());
+
+            size_t i = 0, j = 0;
+            while (i < a.keys_.size() && j < b.keys_.size()) {
+                if (a.keys_[i] < b.keys_[j]) {
+                    result.pushChunk(a.keys_[i], a.containers_[i]); ++i;
+                } else if (a.keys_[i] > b.keys_[j]) {
+                    result.pushChunk(b.keys_[j], b.containers_[j]); ++j;
+                } else {
+                    // Collision: lazy OR with bitset conversion.
+                    // If neither is a bitmap, promote the first to bitmap,
+                    // then OR the second into it (matches CRoaring's
+                    // LAZY_OR_BITSET_CONVERSION behavior).
+                    auto cptr = makeContainer(
+                        detail::containerLazyOr(*a.containers_[i],
+                                               *b.containers_[j]));
+                    result.pushChunk(a.keys_[i], std::move(cptr));
+                    ++i; ++j;
+                }
+            }
+            while (i < a.keys_.size()) {
+                result.pushChunk(a.keys_[i], a.containers_[i]); ++i;
+            }
+            while (j < b.keys_.size()) {
+                result.pushChunk(b.keys_[j], b.containers_[j]); ++j;
+            }
+        }
+
+        // Step 2: fold remaining bitmaps in-place
+        for (size_t bi = 2; bi < bitmaps.size(); ++bi) {
+            const auto& o = *bitmaps[bi];
+            if (o.keys_.empty()) continue;
+
+            size_t ri = 0, oi = 0;
+            while (ri < result.keys_.size() && oi < o.keys_.size()) {
+                if (result.keys_[ri] < o.keys_[oi]) {
+                    ++ri;
+                } else if (result.keys_[ri] > o.keys_[oi]) {
+                    // New key — share container as-is (no bitmap promotion).
+                    // It will be promoted on first collision, or stay
+                    // compact if it never collides.
+                    result.insertChunkAt(ri, o.keys_[oi], o.containers_[oi]);
+                    ++ri; ++oi;
+                } else {
+                    // Matching key — lazy OR in-place with bitmap promotion.
+                    auto& c = cow(result.containers_[ri]);
+                    detail::containerLazyOrInPlace(c, *o.containers_[oi]);
+                    ++ri; ++oi;
+                }
+            }
+            while (oi < o.keys_.size()) {
+                result.pushChunk(o.keys_[oi], o.containers_[oi]);
+                ++oi;
+            }
+        }
+
+        result.repairCardinality();
+        return result;
+    }
+
+public:
 
     // ── Repair cardinality (fix lazy containers) ────────────────────────────
 
@@ -3038,6 +3205,7 @@ private:
     // binary search. containers_ holds the COW pointers at the same indices.
     std::vector<uint16_t> keys_;
     std::vector<ContainerPtr> containers_;
+    mutable size_t lastKeyIdx_ = 0;  // cached last-accessed key index
 
     // ── Chunk helpers ──────────────────────────────────────────────────
     size_t numChunks() const { return keys_.size(); }
@@ -3079,24 +3247,94 @@ private:
     }
 
     // Binary search for chunk index. Returns numChunks() if not found.
-    // Searches only the compact keys_ array for cache efficiency.
+    // Checks cached position first for sequential access patterns.
     size_t findContainer(uint16_t key) const {
+        if (lastKeyIdx_ < keys_.size() && keys_[lastKeyIdx_] == key)
+            return lastKeyIdx_;
         auto it = std::lower_bound(keys_.begin(), keys_.end(), key);
-        if (it != keys_.end() && *it == key)
-            return static_cast<size_t>(it - keys_.begin());
+        if (it != keys_.end() && *it == key) {
+            lastKeyIdx_ = static_cast<size_t>(it - keys_.begin());
+            return lastKeyIdx_;
+        }
         return keys_.size();
     }
 
     // Get or create container for chunk key. Returns mutable ref via cow().
+    // Checks cached position first for sequential access patterns.
     Container& getOrCreateContainer(uint16_t key) {
+        if (lastKeyIdx_ < keys_.size() && keys_[lastKeyIdx_] == key)
+            return cow(containers_[lastKeyIdx_]);
         auto it = std::lower_bound(keys_.begin(), keys_.end(), key);
         if (it != keys_.end() && *it == key) {
             size_t idx = static_cast<size_t>(it - keys_.begin());
+            lastKeyIdx_ = idx;
             return cow(containers_[idx]);
         }
         size_t idx = static_cast<size_t>(it - keys_.begin());
         insertChunkAt(idx, key, makeContainer(ArrayContainer{}));
+        lastKeyIdx_ = idx;
         return const_cast<Container&>(*containers_[idx]);
+    }
+
+    // Sorted addMany implementation with position-hinted container lookup.
+    // Input MUST be sorted (non-decreasing). Groups by high-16 key and
+    // batch-inserts per container. O(n) for sorted input into a sorted bitmap.
+    void addManySorted(const uint32_t* vals, size_t n) {
+        size_t hint = 0;  // Position hint for key lookup.
+        size_t i = 0;
+        while (i < n) {
+            uint16_t hi = static_cast<uint16_t>(vals[i] >> 16);
+
+            // Position-hinted lookup: since keys are monotonically non-decreasing,
+            // start binary search from 'hint' instead of the beginning.
+            auto startIt = keys_.begin() + static_cast<ptrdiff_t>(hint);
+            auto it = std::lower_bound(startIt, keys_.end(), hi);
+            size_t idx = static_cast<size_t>(it - keys_.begin());
+
+            if (it == keys_.end() || *it != hi) {
+                // Create new container at the insertion point.
+                insertChunkAt(idx, hi, makeContainer(ArrayContainer{}));
+            }
+            hint = idx;  // Next group's key is >= hi, so start from here.
+
+            auto& c = cow(containers_[idx]);
+
+            // Collect all values with same high key.
+            size_t groupStart = i;
+            while (i < n && static_cast<uint16_t>(vals[i] >> 16) == hi) ++i;
+
+            // Batch insert into this container.
+            std::visit([&](auto& cont) {
+                using T = std::decay_t<decltype(cont)>;
+                if constexpr (std::is_same_v<T, ArrayContainer>) {
+                    bool allAboveMax = cont.values.empty() ||
+                        static_cast<uint16_t>(vals[groupStart] & 0xFFFF) > cont.values.back();
+
+                    if (allAboveMax) {
+                        // O(1) append per value — skip binary search entirely.
+                        for (size_t j = groupStart; j < i; ++j) {
+                            uint16_t lo = static_cast<uint16_t>(vals[j] & 0xFFFF);
+                            if (!cont.values.empty() && cont.values.back() == lo)
+                                continue;
+                            cont.values.push_back(lo);
+                        }
+                    } else {
+                        for (size_t j = groupStart; j < i; ++j) {
+                            uint16_t lo = static_cast<uint16_t>(vals[j] & 0xFFFF);
+                            cont.add(lo);
+                        }
+                    }
+                    if (cont.cardinality() > kArrayMaxSize) {
+                        c = detail::arrayToBitmap(cont);
+                    }
+                } else {
+                    for (size_t j = groupStart; j < i; ++j) {
+                        uint16_t lo = static_cast<uint16_t>(vals[j] & 0xFFFF);
+                        cont.add(lo);
+                    }
+                }
+            }, c);
+        }
     }
 
     // Helper to convert any container to a sorted vector of 16-bit values.
