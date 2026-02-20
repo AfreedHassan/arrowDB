@@ -274,3 +274,30 @@ TEST_F(ResultTest, ValueMethodThrowsOnError) {
   EXPECT_THROW(err.value(), std::bad_expected_access<Status>);
 }
 
+TEST_F(ResultTest, StatusMoveOnSuccess) {
+  Result<int> r(42);
+  auto status = std::move(r).status();
+  EXPECT_TRUE(status.ok());
+}
+
+TEST_F(ResultTest, ConstructFromLvalueStatus) {
+  Status s(StatusCode::kNotFound, "not found");
+  Result<int> r(s);
+  EXPECT_FALSE(r.ok());
+  EXPECT_EQ(r.status().code(), StatusCode::kNotFound);
+  EXPECT_EQ(r.status().message(), "not found");
+}
+
+TEST_F(ResultTest, ConstructFromRvalueStatus) {
+  Result<int> r(Status(StatusCode::kInternal, "moved"));
+  EXPECT_FALSE(r.ok());
+  EXPECT_EQ(r.status().code(), StatusCode::kInternal);
+}
+
+TEST_F(ResultTest, ConstructFromLvalueValue) {
+  int v = 42;
+  Result<int> r(v);
+  EXPECT_TRUE(r.ok());
+  EXPECT_EQ(*r, 42);
+}
+
