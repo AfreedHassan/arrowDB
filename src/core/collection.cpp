@@ -544,31 +544,32 @@ public:
         ARROW_LOG_ERROR("Collection", "WAL flush failed during compaction: " + flushStatus.message());
       }
 
-      // Snapshot mutable state under lock, then release.
-      // Metadata: O(1) shared_ptr copy; COW on next mutation if needed.
-      // IDSpace: full copy (smaller than metadata typically).
+      opsSinceLastSave_ = 0;
+
+      // Acquire saveMutex_ in correct order (saveMutex_ → mutex_) to avoid
+      // deadlock with savePhased() which uses the same lock order.
+      lock.unlock();
+      std::lock_guard saveLock(saveMutex_);
+      lock.lock();
+
+      // Re-snapshot under both locks so IDSpace and index are consistent.
+      // The earlier WAL flush is still valid; any concurrent inserts that
+      // snuck in between unlock/lock are now captured in the snapshot.
       auto metadataSnap = metadata_;
       IDSpace idSpaceCopy = idSpace_;
       uint64_t lsn = builder_.currentLsn();
       uint64_t txid = builder_.currentTxid();
-      opsSinceLastSave_ = 0;
-      lock.unlock();
-
-      // Save without holding collection lock.
-      // saveMutex_ prevents concurrent saves (from Collection::save()).
-      // config_/hnswConfig_ are immutable; pIndex_ has internal thread safety.
-      std::lock_guard saveLock(saveMutex_);
 
       RecoveryMetadata recovery{
         .lastPersistedLsn = (lsn > 0) ? lsn - 1 : 0,
         .lastPersistedTxid = (txid > 0) ? txid - 1 : 0,
         .cleanShutdown = true
       };
+      // Save under collection lock to keep IDSpace/index consistent.
+      // config_/hnswConfig_ are immutable.
       auto status = CollectionPersistence::save(
           *persistencePath_, config_, hnswConfig_,
           *pIndex_, idSpaceCopy, *metadataSnap, recovery);
-
-      lock.lock();
 
       if (!status.ok()) {
         ARROW_LOG_ERROR("Collection", "Background compaction save failed: " +
@@ -662,12 +663,8 @@ public:
     return utils::OkStatus();
   }
 
-  // Phased save that minimizes lock contention:
-  // Phase 1 (unique_lock): flush WAL, snapshot mutable state
-  // Phase 2 (no lock): persist snapshots + index to disk
-  //   (HNSW saveIndex is safe without collection lock — it has internal thread safety,
-  //    and concurrent inserts are blocked by unique_lock holders only)
-  // Phase 3 (unique_lock): truncate WAL, update counters
+  // Save under both saveMutex_ and mutex_ to keep IDSpace/index consistent.
+  // Lock order: saveMutex_ → mutex_ (same as compactionLoop).
   utils::Status savePhased() {
     if (!persistencePath_) {
       return utils::Status(utils::StatusCode::kInvalidArgument, "No persistence path set");
@@ -675,25 +672,20 @@ public:
 
     // saveMutex_ serializes concurrent save() and compaction saves
     std::lock_guard saveLock(saveMutex_);
+    std::unique_lock lock(mutex_);
 
-    // Phase 1: snapshot under exclusive lock
-    std::shared_ptr<MetadataMap> metadataSnap;
-    IDSpace idSpaceCopy;
-    uint64_t lsn, txid;
-    {
-      std::unique_lock lock(mutex_);
-      auto flushStatus = flushWal();
-      if (!flushStatus.ok()) {
-        ARROW_LOG_ERROR("Collection", "WAL flush failed during save: " + flushStatus.message());
-      }
-      metadataSnap = metadata_;
-      idSpaceCopy = idSpace_;
-      lsn = builder_.currentLsn();
-      txid = builder_.currentTxid();
+    // Phase 1: flush WAL, snapshot mutable state
+    auto flushStatus = flushWal();
+    if (!flushStatus.ok()) {
+      ARROW_LOG_ERROR("Collection", "WAL flush failed during save: " + flushStatus.message());
     }
+    auto metadataSnap = metadata_;
+    IDSpace idSpaceCopy = idSpace_;
+    uint64_t lsn = builder_.currentLsn();
+    uint64_t txid = builder_.currentTxid();
 
-    // Phase 2: persist to disk without holding collection lock.
-    // config_/hnswConfig_ are immutable; pIndex_ has internal thread safety.
+    // Phase 2: persist to disk under lock (IDSpace and index are consistent).
+    // config_/hnswConfig_ are immutable.
     RecoveryMetadata recovery{
       .lastPersistedLsn = (lsn > 0) ? lsn - 1 : 0,
       .lastPersistedTxid = (txid > 0) ? txid - 1 : 0,
@@ -704,16 +696,13 @@ public:
         *pIndex_, idSpaceCopy, *metadataSnap, recovery);
     if (!status.ok()) return status;
 
-    // Phase 3: post-save cleanup under exclusive lock
-    {
-      std::unique_lock lock(mutex_);
-      if (pWal_) {
-        wal::Status walStatus = pWal_->truncate();
-        if (!walStatus.ok()) return walStatus;
-      }
-      opsSinceLastSave_ = 0;
-      lastPersistedLsn_ = recovery.lastPersistedLsn;
+    // Phase 3: post-save cleanup (still under lock)
+    if (pWal_) {
+      wal::Status walStatus = pWal_->truncate();
+      if (!walStatus.ok()) return walStatus;
     }
+    opsSinceLastSave_ = 0;
+    lastPersistedLsn_ = recovery.lastPersistedLsn;
 
     return utils::OkStatus();
   }
