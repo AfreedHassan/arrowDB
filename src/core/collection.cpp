@@ -11,6 +11,8 @@
 #include "utils/file_lock.h"
 #include "utils/log.h"
 
+#include <roaring/roaring.hh>
+
 #include <cmath>
 #include <condition_variable>
 #include <fstream>
@@ -26,7 +28,8 @@ namespace arrow {
 // Input validation helpers
 // ─────────────────────────────────────────────────────────────
 
-static constexpr size_t kMaxBatchSize = 10000;
+static constexpr size_t kMaxBatchSize = 100000;
+static constexpr size_t kParallelInsertThreshold = 1000;
 static constexpr size_t kMaxMetadataKeys = 256;
 static constexpr size_t kMaxMetadataValueSize = 65536;  // 64KB per string value
 
@@ -433,8 +436,8 @@ public:
     if (!pIndex_->insert(internalID, vec))
       return utils::Status(utils::StatusCode::kInternal, "Update failed: HNSW insert error");
 
-    if (!metadata.empty())
-      mutableMetadata()[internalID] = std::move(metadata);
+    // Always update metadata (even if empty — caller may intend to clear it)
+    mutableMetadata()[internalID] = std::move(metadata);
 
     // WAL: log as INSERT (idempotent on replay since addPoint handles duplicates)
     if (pWal_) {
@@ -844,10 +847,7 @@ utils::Result<BatchInsertResult> Collection::insertBatch(std::vector<Document> d
     result.results[i].status = utils::OkStatus();
   }
 
-  // Phase 2: Insert validated entries
-  std::vector<wal::Entry> successfulWalEntries;
-  successfulWalEntries.reserve(docs.size());
-
+  // Phase 2: Assign IDSpace for all validated entries (sequential, not thread-safe)
   struct PendingInsert {
     size_t batchIdx;
     InternalID internalID;
@@ -858,43 +858,91 @@ utils::Result<BatchInsertResult> Collection::insertBatch(std::vector<Document> d
   for (size_t i = 0; i < docs.size(); ++i) {
     if (!result.results[i].status.ok()) continue;
 
-    const auto& doc = docs[i];
-
-    auto internalIDResult = pImpl_->idSpace_.assign(doc.id);
+    auto internalIDResult = pImpl_->idSpace_.assign(docs[i].id);
     if (!internalIDResult.ok()) {
       result.results[i].status = internalIDResult.status();
       result.failureCount++;
       continue;
     }
-    InternalID internalID = internalIDResult.value();
+    pendingInserts.push_back({i, internalIDResult.value()});
+  }
 
-    if (pImpl_->pIndex_->insert(internalID, doc.embedding)) {
-      result.results[i].status = utils::OkStatus();
-      result.successCount++;
+  // Phase 3: Pre-size HNSW to avoid auto-grow races during parallel insert
+  size_t needed = pImpl_->pIndex_->size() + pendingInserts.size();
+  if (needed > pImpl_->pIndex_->capacity()) {
+    size_t newCap = pImpl_->pIndex_->capacity();
+    while (newCap < needed) newCap *= 2;
+    pImpl_->pIndex_->reserve(newCap);
+  }
 
-      pendingInserts.push_back({i, internalID});
+  // Phase 4: Parallel HNSW insert
+  // Each slot in hnswSucceeded tracks whether that pending insert succeeded.
+  std::vector<bool> hnswSucceeded(pendingInserts.size(), false);
+  const size_t numPending = pendingInserts.size();
 
-      if (pImpl_->pWal_) {
-        auto entryResult = pImpl_->builder_.buildInsert(doc.id, pImpl_->config_.dimensions, doc.embedding);
-        if (!entryResult.ok()) {
-          ARROW_LOG_ERROR("Collection", "WAL entry build failed for batch insert " + doc.id + ": " + entryResult.status().message());
-          result.results[i].status = entryResult.status();
-          result.failureCount++;
-          result.successCount--;
-          pendingInserts.pop_back();
-          continue;
+  if (numPending >= kParallelInsertThreshold) {
+    unsigned nThreads = std::min(
+        static_cast<unsigned>(std::thread::hardware_concurrency()),
+        static_cast<unsigned>(numPending / 500));
+    nThreads = std::max(nThreads, 2u);
+
+    std::vector<std::thread> threads;
+    threads.reserve(nThreads);
+    size_t perThread = numPending / nThreads;
+
+    for (unsigned t = 0; t < nThreads; ++t) {
+      size_t begin = t * perThread;
+      size_t end = (t == nThreads - 1) ? numPending : begin + perThread;
+      threads.emplace_back([&, begin, end]() {
+        for (size_t j = begin; j < end; ++j) {
+          auto& p = pendingInserts[j];
+          if (pImpl_->pIndex_->insert(p.internalID, docs[p.batchIdx].embedding)) {
+            hnswSucceeded[j] = true;
+          }
         }
-        successfulWalEntries.push_back(std::move(entryResult.value()));
+      });
+    }
+    for (auto& t : threads) t.join();
+  } else {
+    // Serial path for small batches
+    for (size_t j = 0; j < numPending; ++j) {
+      auto& p = pendingInserts[j];
+      if (pImpl_->pIndex_->insert(p.internalID, docs[p.batchIdx].embedding)) {
+        hnswSucceeded[j] = true;
       }
-    } else {
-      pImpl_->idSpace_.remove(doc.id);
-      result.results[i].status = utils::Status(utils::StatusCode::kInternal,
-                                             "HNSW insert failed");
-      result.failureCount++;
     }
   }
 
-  // Phase 3: WAL batch fsync
+  // Phase 5: Collect results, tombstone IDSpace for failures, build WAL entries
+  std::vector<wal::Entry> successfulWalEntries;
+  successfulWalEntries.reserve(numPending);
+
+  for (size_t j = 0; j < numPending; ++j) {
+    auto& p = pendingInserts[j];
+    if (!hnswSucceeded[j]) {
+      pImpl_->idSpace_.remove(docs[p.batchIdx].id);
+      result.results[p.batchIdx].status = utils::Status(utils::StatusCode::kInternal,
+                                                         "HNSW insert failed");
+      result.failureCount++;
+      continue;
+    }
+
+    result.successCount++;
+
+    if (pImpl_->pWal_) {
+      auto entryResult = pImpl_->builder_.buildInsert(
+          docs[p.batchIdx].id, pImpl_->config_.dimensions, docs[p.batchIdx].embedding);
+      if (!entryResult.ok()) {
+        ARROW_LOG_ERROR("Collection", "WAL entry build failed for batch insert "
+            + docs[p.batchIdx].id + ": " + entryResult.status().message());
+        // HNSW insert succeeded but WAL failed — vector is searchable but not durable
+      } else {
+        successfulWalEntries.push_back(std::move(entryResult.value()));
+      }
+    }
+  }
+
+  // Phase 6: WAL batch fsync
   if (pImpl_->pWal_ && !successfulWalEntries.empty()) {
     utils::Status walStatus = pImpl_->pWal_->logBatch(successfulWalEntries);
     if (!walStatus.ok()) {
@@ -903,15 +951,15 @@ utils::Result<BatchInsertResult> Collection::insertBatch(std::vector<Document> d
     }
   }
 
-  // Phase 4: Assign metadata from docs
-  for (const auto& pending : pendingInserts) {
-    if (result.results[pending.batchIdx].status.ok()) {
-      const auto& docMeta = docs[pending.batchIdx].metadata;
-      if (!docMeta.empty()) {
-        pImpl_->mutableMetadata()[pending.internalID] = docMeta;
-      } else {
-        pImpl_->mutableMetadata()[pending.internalID];
-      }
+  // Phase 7: Assign metadata
+  for (size_t j = 0; j < numPending; ++j) {
+    if (!hnswSucceeded[j]) continue;
+    auto& p = pendingInserts[j];
+    const auto& docMeta = docs[p.batchIdx].metadata;
+    if (!docMeta.empty()) {
+      pImpl_->mutableMetadata()[p.internalID] = docMeta;
+    } else {
+      pImpl_->mutableMetadata()[p.internalID];
     }
   }
   pImpl_->opsSinceLastSave_ += result.successCount;
@@ -942,6 +990,11 @@ utils::Status Collection::setMetadata(const VectorID& id, const Metadata& metada
     return utils::Status(utils::StatusCode::kNotFound, "Vector not found: " + id);
   }
   pImpl_->mutableMetadata()[internalIDResult.value()] = metadata;
+
+  // Metadata changes must trigger a checkpoint to be durable.
+  // (WAL entries don't carry metadata, so only checkpoints persist it.)
+  pImpl_->opsSinceLastSave_++;
+  pImpl_->requestCheckpoint();
   return utils::OkStatus();
 }
 
@@ -961,6 +1014,11 @@ std::vector<IndexSearchResult>
 Collection::search(const std::vector<float> &query, uint32_t k,
                    uint32_t ef) const {
   std::shared_lock lock(pImpl_->mutex_);
+  if (query.size() != pImpl_->config_.dimensions) {
+    ARROW_LOG_ERROR("Collection", "Query dimension mismatch: expected " +
+        std::to_string(pImpl_->config_.dimensions) + ", got " + std::to_string(query.size()));
+    return {};
+  }
   auto internal = pImpl_->pIndex_->search(query, k, ef);
   std::vector<IndexSearchResult> results;
   results.reserve(internal.size());
@@ -979,6 +1037,11 @@ Collection::search(const std::vector<float>& query, uint32_t k,
   std::shared_ptr<const Impl::MetadataMap> metadataSnap;
   {
     std::shared_lock lock(pImpl_->mutex_);
+    if (query.size() != pImpl_->config_.dimensions) {
+      ARROW_LOG_ERROR("Collection", "Query dimension mismatch: expected " +
+          std::to_string(pImpl_->config_.dimensions) + ", got " + std::to_string(query.size()));
+      return {};
+    }
     if (pImpl_->pIndex_->size() == 0) return {};
     metadataSnap = pImpl_->metadata_;
   }
@@ -1014,6 +1077,11 @@ Collection::query(const std::string &queryText, uint32_t k, uint32_t ef) const {
 SearchResult Collection::query(const std::vector<float> &queryVec, uint32_t k,
                                uint32_t ef) const {
   std::shared_lock lock(pImpl_->mutex_);
+  if (queryVec.size() != pImpl_->config_.dimensions) {
+    ARROW_LOG_ERROR("Collection", "Query dimension mismatch: expected " +
+        std::to_string(pImpl_->config_.dimensions) + ", got " + std::to_string(queryVec.size()));
+    return {};
+  }
   auto indexResults = pImpl_->pIndex_->search(queryVec, k, ef);
   SearchResult result;
   result.hits.reserve(indexResults.size());
@@ -1042,6 +1110,11 @@ SearchResult Collection::query(const std::vector<float>& queryVec, uint32_t k,
   std::shared_ptr<const Impl::MetadataMap> metadataSnap;
   {
     std::shared_lock lock(pImpl_->mutex_);
+    if (queryVec.size() != pImpl_->config_.dimensions) {
+      ARROW_LOG_ERROR("Collection", "Query dimension mismatch: expected " +
+          std::to_string(pImpl_->config_.dimensions) + ", got " + std::to_string(queryVec.size()));
+      return {};
+    }
     if (pImpl_->pIndex_->size() == 0) return {};
     metadataSnap = pImpl_->metadata_;
   }
@@ -1054,6 +1127,120 @@ SearchResult Collection::query(const std::vector<float>& queryVec, uint32_t k,
   };
 
   auto indexResults = pImpl_->pIndex_->search(queryVec, k, idFilter, ef);
+
+  SearchResult result;
+  result.hits.reserve(indexResults.size());
+  for (const auto& ir : indexResults) {
+    auto vid = pImpl_->idSpace_.resolve(ir.id);
+    if (!vid.ok()) continue;
+
+    ScoredDocument doc;
+    doc.id = std::string(vid.value());
+    doc.score = ir.score;
+
+    auto metaIt = metadataSnap->find(ir.id);
+    if (metaIt != metadataSnap->end()) {
+      doc.metadata = metaIt->second;
+    }
+    result.hits.push_back(std::move(doc));
+  }
+  return result;
+}
+
+// ─────────────────────────────────────────────────────────────
+// PreparedFilter (CRoaring bitmap, build once, search many)
+// ─────────────────────────────────────────────────────────────
+
+struct PreparedFilter::Impl {
+  roaring::Roaring bitmap;
+};
+
+PreparedFilter::PreparedFilter(std::unique_ptr<Impl> impl) : pImpl_(std::move(impl)) {}
+PreparedFilter::~PreparedFilter() = default;
+PreparedFilter::PreparedFilter(PreparedFilter&&) noexcept = default;
+PreparedFilter& PreparedFilter::operator=(PreparedFilter&&) noexcept = default;
+
+PreparedFilter
+Collection::prepareFilter(const MetadataFilter& filter) const {
+  std::shared_ptr<const Impl::MetadataMap> metadataSnap;
+  size_t indexCapacity;
+  {
+    std::shared_lock lock(pImpl_->mutex_);
+    metadataSnap = pImpl_->metadata_;
+    indexCapacity = pImpl_->pIndex_->capacity();
+  }
+
+  auto pfImpl = std::make_unique<PreparedFilter::Impl>();
+  static const Metadata empty;
+  bool emptyPasses = filter(empty);
+
+  // InternalIDs are sequential from 0, bounded by HNSW's tableidx_t (uint32_t).
+  // Roaring bitmaps use uint32_t, which is safe given this invariant.
+  // IDs exceeding uint32 range are skipped defensively.
+
+  if (emptyPasses) {
+    pfImpl->bitmap.addRange(0, static_cast<uint64_t>(indexCapacity));
+    std::vector<uint32_t> failingIds;
+    failingIds.reserve(metadataSnap->size());
+    for (const auto& [id, meta] : *metadataSnap) {
+      if (id > std::numeric_limits<uint32_t>::max()) continue;  // skip out-of-range IDs
+      if (!filter(meta)) {
+        failingIds.push_back(static_cast<uint32_t>(id));
+      }
+    }
+    if (!failingIds.empty()) {
+      std::sort(failingIds.begin(), failingIds.end());
+      pfImpl->bitmap -= roaring::Roaring(failingIds.size(), failingIds.data());
+    }
+  } else {
+    std::vector<uint32_t> passingIds;
+    passingIds.reserve(metadataSnap->size());
+    for (const auto& [id, meta] : *metadataSnap) {
+      if (id > std::numeric_limits<uint32_t>::max()) continue;  // skip out-of-range IDs
+      if (filter(meta)) {
+        passingIds.push_back(static_cast<uint32_t>(id));
+      }
+    }
+    std::sort(passingIds.begin(), passingIds.end());
+    pfImpl->bitmap = roaring::Roaring(passingIds.size(), passingIds.data());
+  }
+
+  return PreparedFilter(std::move(pfImpl));
+}
+
+std::vector<IndexSearchResult>
+Collection::search(const std::vector<float>& query, uint32_t k,
+                   const PreparedFilter& filter, uint32_t ef) const {
+  std::shared_lock lock(pImpl_->mutex_);
+  if (query.size() != pImpl_->config_.dimensions) {
+    ARROW_LOG_ERROR("Collection", "Query dimension mismatch: expected " +
+        std::to_string(pImpl_->config_.dimensions) + ", got " + std::to_string(query.size()));
+    return {};
+  }
+  auto internal = pImpl_->pIndex_->searchBitmap(query, k, filter.pImpl_->bitmap, ef);
+  std::vector<IndexSearchResult> results;
+  results.reserve(internal.size());
+  for (const auto &r : internal) {
+    auto vid = pImpl_->idSpace_.resolve(r.id);
+    if (vid.ok())
+      results.push_back({std::string(vid.value()), r.score});
+  }
+  return results;
+}
+
+SearchResult
+Collection::query(const std::vector<float>& queryVec, uint32_t k,
+                  const PreparedFilter& filter, uint32_t ef) const {
+  std::shared_lock lock(pImpl_->mutex_);
+  if (queryVec.size() != pImpl_->config_.dimensions) {
+    ARROW_LOG_ERROR("Collection", "Query dimension mismatch: expected " +
+        std::to_string(pImpl_->config_.dimensions) + ", got " + std::to_string(queryVec.size()));
+    return {};
+  }
+  auto indexResults = pImpl_->pIndex_->searchBitmap(queryVec, k, filter.pImpl_->bitmap, ef);
+
+  // Use metadata directly under lock (COW ensures consistency)
+  const auto& metadataSnap = pImpl_->metadata_;
 
   SearchResult result;
   result.hits.reserve(indexResults.size());
@@ -1192,13 +1379,17 @@ utils::Result<Collection> Collection::load(const std::string &directoryPath) {
     .schema = config.schema
   };
 
-  // Consistency check: IDSpace and index must agree on element count
+  // Consistency check: IDSpace (live entries only) must equal index size minus deleted
   size_t idSpaceSize = idSpace.size();
   size_t indexSize = index->size();
-  if (idSpaceSize != 0 && idSpaceSize != indexSize) {
+  size_t deletedCount = index->deletedCount();
+  size_t liveIndexSize = indexSize - deletedCount;
+  if (idSpaceSize != 0 && idSpaceSize != liveIndexSize) {
     return utils::Status(utils::StatusCode::kCorruption,
       "Inconsistent state after load: IDSpace has " + std::to_string(idSpaceSize) +
-      " entries but index has " + std::to_string(indexSize) + " vectors");
+      " entries but index has " + std::to_string(liveIndexSize) +
+      " live vectors (" + std::to_string(indexSize) + " total, " +
+      std::to_string(deletedCount) + " deleted)");
   }
 
   auto implResult = Impl::create(collectionConfig, fs::path(directoryPath), false);

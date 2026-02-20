@@ -15,6 +15,24 @@
 
 namespace arrow {
 
+/// Pre-computed filter bitmap for fast repeated filtered searches.
+/// Build once with Collection::prepareFilter(), then pass to search()/query().
+class PreparedFilter {
+public:
+    ~PreparedFilter();
+    PreparedFilter(PreparedFilter&&) noexcept;
+    PreparedFilter& operator=(PreparedFilter&&) noexcept;
+
+    PreparedFilter(const PreparedFilter&) = delete;
+    PreparedFilter& operator=(const PreparedFilter&) = delete;
+
+private:
+    friend class Collection;
+    struct Impl;
+    std::unique_ptr<Impl> pImpl_;
+    PreparedFilter(std::unique_ptr<Impl> impl);
+};
+
 /**
  * @brief A collection of vectors with a specific configuration.
  *
@@ -164,6 +182,22 @@ public:
                                           uint32_t k,
                                           const MetadataFilter& filter,
                                           uint32_t ef = 200) const;
+
+    /// Pre-compute a filter bitmap for fast repeated filtered searches.
+    /// Build once, then pass to search()/query() for each query.
+    PreparedFilter prepareFilter(const MetadataFilter& filter) const;
+
+    /// Search with a pre-computed filter bitmap (fast, no per-query filter eval).
+    std::vector<IndexSearchResult> search(const std::vector<float>& query,
+                                          uint32_t k,
+                                          const PreparedFilter& filter,
+                                          uint32_t ef = 200) const;
+
+    /// Query with a pre-computed filter bitmap (returns SearchResult with metadata).
+    SearchResult query(const std::vector<float>& query,
+                       uint32_t k,
+                       const PreparedFilter& filter,
+                       uint32_t ef = 200) const;
 
     /// Retrieve a vector by ID.
     ///

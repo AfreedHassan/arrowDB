@@ -325,7 +325,12 @@ CollectionPersistence::load(const std::filesystem::path& dir) {
 
   std::filesystem::path metadataPath = dir / "metadata.json";
   if (std::filesystem::exists(metadataPath)) {
-    result.metadata = utils::importMetadataFromJson(metadataPath.string());
+    try {
+      result.metadata = utils::importMetadataFromJson(metadataPath.string());
+    } catch (const std::exception& e) {
+      return utils::Status(utils::StatusCode::kCorruption,
+        "Failed to parse metadata.json: " + std::string(e.what()));
+    }
   }
 
   return result;
