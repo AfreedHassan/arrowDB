@@ -315,6 +315,115 @@ TEST_F(IDSpaceTest, UUIDStrings) {
 	EXPECT_EQ(lookup3.value(), 2);
 }
 
+TEST_F(IDSpaceTest, TombstoneRoundTrip) {
+	IDSpace idSpace;
+
+	// Assign IDs
+	for (int i = 0; i < 10; ++i) {
+		auto result = idSpace.assign("vec_" + std::to_string(i));
+		ASSERT_TRUE(result.ok());
+		EXPECT_EQ(result.value(), static_cast<InternalID>(i));
+	}
+	EXPECT_EQ(idSpace.size(), 10);
+
+	// Remove some IDs (create tombstones)
+	ASSERT_TRUE(idSpace.remove("vec_2").ok());
+	ASSERT_TRUE(idSpace.remove("vec_5").ok());
+	ASSERT_TRUE(idSpace.remove("vec_8").ok());
+	EXPECT_EQ(idSpace.size(), 7);
+
+	// Verify removed IDs are not found
+	EXPECT_FALSE(idSpace.lookup("vec_2").ok());
+	EXPECT_FALSE(idSpace.lookup("vec_5").ok());
+	EXPECT_FALSE(idSpace.lookup("vec_8").ok());
+
+	// Save to disk
+	std::string path = GetTestPath("tombstone_id_map.bin");
+	auto saveResult = idSpace.save(path);
+	ASSERT_TRUE(saveResult.ok()) << saveResult.message();
+
+	// Load from disk
+	auto loadResult = IDSpace::load(path);
+	ASSERT_TRUE(loadResult.ok()) << loadResult.status().message();
+	IDSpace& loaded = loadResult.value();
+
+	// Verify size reflects only live entries
+	EXPECT_EQ(loaded.size(), 7);
+
+	// Verify removed IDs are still removed after round-trip
+	EXPECT_FALSE(loaded.lookup("vec_2").ok());
+	EXPECT_EQ(loaded.lookup("vec_2").status().code(), utils::StatusCode::kNotFound);
+	EXPECT_FALSE(loaded.lookup("vec_5").ok());
+	EXPECT_FALSE(loaded.lookup("vec_8").ok());
+
+	// Verify live IDs still resolve correctly
+	for (int i = 0; i < 10; ++i) {
+		if (i == 2 || i == 5 || i == 8) continue;
+		auto lookup = loaded.lookup("vec_" + std::to_string(i));
+		EXPECT_TRUE(lookup.ok()) << "vec_" << i << " should still be live";
+		EXPECT_EQ(lookup.value(), static_cast<InternalID>(i));
+
+		auto resolve = loaded.resolve(static_cast<InternalID>(i));
+		EXPECT_TRUE(resolve.ok()) << "InternalID " << i << " should still resolve";
+		EXPECT_EQ(resolve.value(), "vec_" + std::to_string(i));
+	}
+
+	// Verify tombstoned IDs do not resolve
+	EXPECT_FALSE(loaded.resolve(2).ok());
+	EXPECT_FALSE(loaded.resolve(5).ok());
+	EXPECT_FALSE(loaded.resolve(8).ok());
+}
+
+TEST_F(IDSpaceTest, LoadEmptyFile) {
+	std::string path = GetTestPath("empty_file.bin");
+	std::ofstream file(path, std::ios::binary);
+	file.close();
+
+	auto result = IDSpace::load(path);
+	EXPECT_FALSE(result.ok());
+}
+
+TEST_F(IDSpaceTest, LoadTruncatedAfterVersion) {
+	std::string path = GetTestPath("version_only.bin");
+	std::ofstream file(path, std::ios::binary);
+	uint8_t version = 2;
+	file.write(reinterpret_cast<const char*>(&version), sizeof(version));
+	file.close();
+
+	auto result = IDSpace::load(path);
+	EXPECT_FALSE(result.ok());
+}
+
+TEST_F(IDSpaceTest, LoadOversizedCount) {
+	std::string path = GetTestPath("oversized_count.bin");
+	std::ofstream file(path, std::ios::binary);
+	uint8_t version = 2;
+	file.write(reinterpret_cast<const char*>(&version), sizeof(version));
+	uint64_t count = 200000000;
+	file.write(reinterpret_cast<const char*>(&count), sizeof(count));
+	file.close();
+
+	auto result = IDSpace::load(path);
+	EXPECT_FALSE(result.ok());
+}
+
+TEST_F(IDSpaceTest, LoadStringLengthOverflow) {
+	std::string path = GetTestPath("overflow_string.bin");
+	std::ofstream file(path, std::ios::binary);
+	uint8_t version = 2;
+	file.write(reinterpret_cast<const char*>(&version), sizeof(version));
+	uint64_t count = 1;
+	file.write(reinterpret_cast<const char*>(&count), sizeof(count));
+	uint64_t strLen = 200;
+	file.write(reinterpret_cast<const char*>(&strLen), sizeof(strLen));
+	std::string garbage(200, 'x');
+	file.write(garbage.data(), garbage.size());
+	file.close();
+
+	auto result = IDSpace::load(path);
+	EXPECT_FALSE(result.ok());
+}
+
 TEST_F(IDSpaceTest, PersistenceWithUUIDs) {
 	IDSpace original;
 
