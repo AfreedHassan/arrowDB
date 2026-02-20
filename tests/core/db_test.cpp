@@ -285,3 +285,153 @@ TEST_F(ArrowDBTest, CreateOrGetCollectionLoadsFromDisk) {
     EXPECT_EQ(result.value()->dimension(), 128);
   }
 }
+
+TEST_F(ArrowDBTest, GetOrCreateFromDisk) {
+  CollectionConfig config{
+      .name = "test_collection",
+      .dimensions = 128,
+      .space = Space::Cosine
+  };
+
+  {
+    ClientOptions options{.dataDir = testDir};
+    Client db(options);
+    auto result = db.createCollection("test_collection", config);
+    ASSERT_TRUE(result.ok());
+
+    Collection* collection = result.value();
+    std::mt19937 gen(42);
+    for (size_t i = 0; i < 10; ++i) {
+      std::vector<float> vec = RandomVector(128, gen);
+      collection->insert(std::to_string(i), vec);
+    }
+    db.close();
+  }
+
+  {
+    ClientOptions options{.dataDir = testDir};
+    Client db(options);
+
+    auto result = db.getOrCreateCollection("test_collection", config);
+    ASSERT_TRUE(result.ok());
+    EXPECT_EQ(result.value()->size(), 10);
+  }
+}
+
+TEST_F(ArrowDBTest, GetOrCreateDefaultDims) {
+  ClientOptions options{.dataDir = testDir};
+  Client db(options);
+
+  auto result = db.getOrCreateCollection("test_collection");
+  ASSERT_TRUE(result.ok());
+  EXPECT_EQ(result.value()->dimension(), 384);
+}
+
+TEST_F(ArrowDBTest, DropPersistent) {
+  ClientOptions options{.dataDir = testDir};
+  Client db(options);
+
+  CollectionConfig config{
+      .name = "test_collection",
+      .dimensions = 128,
+      .space = Space::Cosine
+  };
+
+  db.createCollection("test_collection", config);
+  EXPECT_TRUE(db.hasCollection("test_collection"));
+
+  auto status = db.dropCollection("test_collection");
+  ASSERT_TRUE(status.ok());
+
+  EXPECT_FALSE(db.hasCollection("test_collection"));
+  EXPECT_FALSE(std::filesystem::exists(testDir / "test_collection"));
+}
+
+TEST_F(ArrowDBTest, ListCollectionsEmpty) {
+  ClientOptions options{.dataDir = testDir};
+  Client db(options);
+
+  auto names = db.listCollections();
+  EXPECT_TRUE(names.empty());
+}
+
+TEST_F(ArrowDBTest, CloseClearsCollections) {
+  ClientOptions options{.dataDir = testDir};
+  Client db(options);
+
+  CollectionConfig config{
+      .name = "test_collection",
+      .dimensions = 128,
+      .space = Space::Cosine
+  };
+
+  db.createCollection("test_collection", config);
+  EXPECT_FALSE(db.listCollections().empty());
+
+  auto status = db.close();
+  ASSERT_TRUE(status.ok());
+
+  EXPECT_TRUE(db.listCollections().empty());
+}
+
+TEST_F(ArrowDBTest, LoadExistingOnStartup) {
+  CollectionConfig config{
+      .name = "test_collection",
+      .dimensions = 128,
+      .space = Space::Cosine
+  };
+
+  {
+    ClientOptions options{.dataDir = testDir};
+    Client db(options);
+    auto r1 = db.createCollection("test_collection", config);
+    ASSERT_TRUE(r1.ok());
+    std::mt19937 gen(42);
+    r1.value()->insert("v1", RandomVector(128, gen));
+
+    auto r2 = db.createCollection("test_collection2", config);
+    ASSERT_TRUE(r2.ok());
+    r2.value()->insert("v2", RandomVector(128, gen));
+
+    db.close();
+  }
+
+  ClientOptions options{.dataDir = testDir};
+  Client db(options);
+
+  auto names = db.listCollections();
+  EXPECT_EQ(names.size(), 2);
+  EXPECT_TRUE(std::find(names.begin(), names.end(), "test_collection") != names.end());
+  EXPECT_TRUE(std::find(names.begin(), names.end(), "test_collection2") != names.end());
+}
+
+TEST_F(ArrowDBTest, EmptyDataDir) {
+  ClientOptions options{.dataDir = ""};
+  Client db(options);
+
+  CollectionConfig config{
+      .name = "test_collection",
+      .dimensions = 128,
+      .space = Space::Cosine
+  };
+
+  auto result = db.createCollection("test_collection", config);
+  EXPECT_TRUE(result.ok());
+  EXPECT_EQ(result.value()->size(), 0);
+}
+
+TEST_F(ArrowDBTest, ClientMoveAssignment) {
+  ClientOptions options{.dataDir = testDir};
+  Client db1(options);
+
+  CollectionConfig config{
+      .name = "move_assign",
+      .dimensions = 128,
+      .space = Space::Cosine
+  };
+  db1.createCollection("move_assign", config);
+
+  Client db2(options);
+  db2 = std::move(db1);
+  EXPECT_TRUE(db2.hasCollection("move_assign"));
+}
