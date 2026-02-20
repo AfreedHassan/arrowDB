@@ -85,8 +85,9 @@ int main() {
       std::cout << "A: (no results)\n\n";
       continue;
     }
-    const auto& hit = hits.hits[0];
-      std::cout << "A: " << std::get<std::string>(hit.metadata["text"])
+    ScoredDocument& hit = hits.hits[0];
+    if (hit.metadata.contains("text")) {
+      std::cout << "A: " << hit.metadata.at("text").asString()
                 << "  (score=" << hit.score << ")\n\n";
     } else {
       std::cout << "A: (no text metadata, score=" << hit.score << ")\n\n";
