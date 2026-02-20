@@ -68,31 +68,23 @@ FetchContent_MakeAvailable(hnswlib googletest benchmark json roaring)
 
 
 # ─────────────────────────────────────────────────────────────
-# Rust Embedding Library (optional — disable with -DARROW_ENABLE_EMBEDDER=OFF)
+# Rust Embedding Library
 # ─────────────────────────────────────────────────────────────
-option(ARROW_ENABLE_EMBEDDER "Enable Rust embedding library" ON)
-
 set(EMBED_LIB_DIR ${CMAKE_CURRENT_SOURCE_DIR}/embed/target/release)
 set(EMBED_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/embed/include)
 
-if(ARROW_ENABLE_EMBEDDER)
-    find_library(ARROW_EMBED_LIB
-        NAMES arrow_embed libarrow_embed
-        PATHS ${EMBED_LIB_DIR}
-        NO_DEFAULT_PATH
-    )
+find_library(ARROW_EMBED_LIB
+    NAMES arrow_embed libarrow_embed
+    PATHS ${EMBED_LIB_DIR}
+    NO_DEFAULT_PATH
+)
 
-    if(NOT ARROW_EMBED_LIB)
-      message(WARNING "Embed library not found. Build it with: cd embed && cargo build --release")
-        set(ARROW_EMBED_LIB "${EMBED_LIB_DIR}/libarrow_embed.a")
-    endif()
-
-    message(STATUS "Embed library: ${ARROW_EMBED_LIB}")
-else()
-    message(STATUS "Embedder disabled")
-    set(ARROW_EMBED_LIB "")
-    set(EMBED_INCLUDE_DIR "")
+if(NOT ARROW_EMBED_LIB)
+  message(WARNING "Embed library not found. Build it with: cd embed && cargo build --release")
+    set(ARROW_EMBED_LIB "${EMBED_LIB_DIR}/libarrow_embed.a")
 endif()
+
+message(STATUS "Embed library: ${ARROW_EMBED_LIB}")
 
 set(ARROW_EMBEDDING_MODEL_DIR ${CMAKE_CURRENT_SOURCE_DIR}/embed/models)
 
@@ -101,7 +93,7 @@ set(ARROW_EMBEDDING_MODEL_DIR ${CMAKE_CURRENT_SOURCE_DIR}/embed/models)
 # Arrow Library (static)
 # Note: src/index/hnsw/ is excluded (custom HNSW implementation WIP)
 # ─────────────────────────────────────────────────────────────
-set(ARROW_SOURCES
+add_library(arrow STATIC
     src/core/collection.cpp
     src/core/client.cpp
     src/wal/wal.cpp
@@ -109,13 +101,8 @@ set(ARROW_SOURCES
     src/core/collection_persistence.cpp
     src/core/id_space.cpp
     src/index/hnsw_index.cpp
+    src/embedder/embedder.cpp
 )
-
-if(ARROW_ENABLE_EMBEDDER)
-    list(APPEND ARROW_SOURCES src/embedder/embedder.cpp)
-endif()
-
-add_library(arrow STATIC ${ARROW_SOURCES})
 
 # PUBLIC: Users of the library get these include paths
 # PRIVATE: Only the library itself gets these (for internal headers)
@@ -128,13 +115,9 @@ target_link_libraries(arrow
     PRIVATE nlohmann_json::nlohmann_json hnswlib roaring ${ARROW_EMBED_LIB}
 )
 
-if(ARROW_ENABLE_EMBEDDER)
-    target_compile_definitions(arrow PRIVATE
-        ARROW_EMBEDDING_MODEL_DIR="${ARROW_EMBEDDING_MODEL_DIR}"
-    )
-else()
-    target_compile_definitions(arrow PRIVATE ARROW_NO_EMBEDDER)
-endif()
+target_compile_definitions(arrow PRIVATE
+    ARROW_EMBEDDING_MODEL_DIR="${ARROW_EMBEDDING_MODEL_DIR}"
+)
 
 # Optimization handled by CMAKE_BUILD_TYPE (Release = -O3, Debug = -g -O0)
 

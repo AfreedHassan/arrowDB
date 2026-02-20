@@ -104,6 +104,12 @@ public:
     /// @return The VectorID (generated if doc.id was empty), or error
     utils::Result<VectorID> insert(Document doc);
 
+    /// Insert a batch of text strings (embeds each, stores text as metadata).
+    ///
+    /// @param texts Vector of text strings to embed and insert
+    /// @return Result containing BatchInsertResult with per-vector status
+    utils::Result<BatchInsertResult> insertBatch(const std::vector<std::string>& texts);
+
     /// Insert a batch of documents with partial success semantics.
     ///
     /// @param docs Vector of documents to insert

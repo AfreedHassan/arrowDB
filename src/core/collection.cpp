@@ -2,9 +2,7 @@
 #include "arrow/collection.h"
 #include "arrow/utils/uuid.h"
 #include "utils/json_utils.h"
-#ifndef ARROW_NO_EMBEDDER
 #include "embedder/embedder.h"
-#endif
 #include "index/hnsw_index.h"
 #include <nlohmann/json.hpp>
 #include "wal/wal.h"
@@ -800,7 +798,6 @@ utils::Status Collection::insert(const VectorID& id, const std::vector<float>& v
   return pImpl_->insertLocked(id, vec, std::move(metadata));
 }
 
-#ifndef ARROW_NO_EMBEDDER
 utils::Status Collection::insert(const std::vector<std::string> &text) {
   Embedder embedder;
   if (!embedder.ok()) {
@@ -820,7 +817,30 @@ utils::Status Collection::insert(const std::vector<std::string> &text) {
   }
   return utils::OkStatus();
 }
-#endif
+
+utils::Result<BatchInsertResult> Collection::insertBatch(const std::vector<std::string>& texts) {
+  Embedder embedder;
+  if (!embedder.ok()) {
+    return utils::Status(utils::StatusCode::kInternal, "Embedder not initialized");
+  }
+
+  std::vector<Document> docs;
+  docs.reserve(texts.size());
+  for (size_t i = 0; i < texts.size(); ++i) {
+    std::vector<float> vec = embedder.embed(texts[i].c_str());
+    if (vec.empty()) {
+      return utils::Status(utils::StatusCode::kInternal,
+          "Embedding failed for text at index " + std::to_string(i));
+    }
+    docs.push_back({
+      .id = "doc-" + std::to_string(i + 1),
+      .embedding = std::move(vec),
+      .metadata = {{"text", texts[i]}},
+    });
+  }
+
+  return insertBatch(std::move(docs));
+}
 
 utils::Result<VectorID> Collection::insert(Document doc) {
   if (doc.id.empty()) doc.id = arrow::uuid::uuidv4();
@@ -1121,7 +1141,6 @@ Collection::search(const std::vector<float>& query, uint32_t k,
   return results;
 }
 
-#ifndef ARROW_NO_EMBEDDER
 SearchResult
 Collection::query(const std::string &queryText, uint32_t k, uint32_t ef) const {
   Embedder embedder;
@@ -1132,7 +1151,6 @@ Collection::query(const std::string &queryText, uint32_t k, uint32_t ef) const {
 
   return query(vec, k, ef);
 }
-#endif
 
 SearchResult Collection::query(const std::vector<float> &queryVec, uint32_t k,
                                uint32_t ef) const {
@@ -1572,12 +1590,12 @@ Collection::Stats Collection::stats() const {
 void Collection::printStats() const {
   std::shared_lock lock(pImpl_->mutex_);
   nlohmann::json j = {
-    {"name", pImpl_->config_.name},
     {"vectorCount", pImpl_->pIndex_->size()},
     {"metadataCount", pImpl_->metadata_->size()},
     {"maxCapacity", pImpl_->pIndex_->capacity()},
     {"dimensions", pImpl_->config_.dimensions},
   };
+  std::cout << "collection: "<< pImpl_->config_.name << " = ";
   std::cout << j.dump(2) << "\n";
 }
 
