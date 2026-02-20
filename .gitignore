@@ -25,16 +25,5 @@ tools/genembeddings/.*
 tools/genembeddings/models
 tools/genembeddings/*.txt
 
-# Bindings
-bindings/python/.venv/
-bindings/python/.pytest_cache/
-bindings/python/__pycache__/
-bindings/python/*.egg-info/
-bindings/python/uv.lock
-bindings/node/build/
-bindings/node/dist/
-bindings/node/node_modules/
-bindings/node/bun.lock
-
 AGENTS.md
 !README.md

@@ -1,0 +1,12 @@
+# Python
+.venv/
+.pytest_cache/
+__pycache__/
+*.egg-info/
+uv.lock
+
+# Node
+node/build/
+node/dist/
+node/node_modules/
+bun.lock
