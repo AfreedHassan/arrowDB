@@ -277,48 +277,64 @@ TEST_F(HNSWIndexTest, LoadIndexRequiresMatchingDimension) {
     // Create and save index with dimension 3
     HNSWIndex original(3, Space::Cosine);
     original.insert(1, {1.0f, 0.0f, 0.0f});
-    
+
     std::string path = GetTestPath("dim3_index.bin");
     original.saveIndex(path);
-    
-    // Try to load with wrong dimension - this should fail
-    // Note: hnswlib may or may not validate dimension at load time
-    // The actual behavior depends on hnswlib implementation
+
+    // Loading with wrong dimension currently succeeds at the hnsw layer
+    // but the wrapper's dim_ field mismatches the loaded index.
+    // Verify that search is rejected due to query dimension check.
     HNSWIndex wrongDim(5, Space::Cosine);
-    
-    // This might throw or might succeed but produce incorrect results
-    // We'll test that it at least doesn't crash
-    try {
-        wrongDim.loadIndex(path);
-        // If it doesn't throw, the dimension mismatch might be detected later
-        // or might cause incorrect behavior
-    } catch (const std::exception& e) {
-        // Expected if dimension validation occurs
-        SUCCEED();
-    }
+    auto status = wrongDim.loadIndex(path);
+
+    // Even if load succeeds, searching with dim=5 query must fail or return empty
+    // because the wrapper checks query.size() != dim_ before calling into hnsw.
+    auto results = wrongDim.search({1.0f, 0.0f, 0.0f}, 1);
+    EXPECT_TRUE(results.empty())
+        << "Search with mismatched query dimension should return empty results";
 }
 
 TEST_F(HNSWIndexTest, LoadIndexRequiresMatchingSpace) {
-    // Create and save L2 index
+    // Create and save L2 index with distinct vectors
     HNSWIndex l2Index(3, Space::L2);
     l2Index.insert(1, {1.0f, 0.0f, 0.0f});
-    
+    l2Index.insert(2, {0.707f, 0.707f, 0.0f});
+    l2Index.insert(3, {0.0f, 1.0f, 0.0f});
+
     std::string path = GetTestPath("l2_index.bin");
     l2Index.saveIndex(path);
-    
-    // Try to load with Cosine space
-    // Note: hnswlib may not validate space at load time
+
+    // Load the L2-built index into a Cosine-configured wrapper.
+    // The load succeeds but search scores are computed with the wrong
+    // distance function, so the ordering may differ from the L2 index.
     HNSWIndex cosineIndex(3, Space::Cosine);
-    
-    // This might work but produce incorrect results
-    // We test that it doesn't crash
-    try {
-        cosineIndex.loadIndex(path);
-        // If successful, results might be incorrect due to space mismatch
-    } catch (const std::exception& e) {
-        // Expected if space validation occurs
-        SUCCEED();
+    auto status = cosineIndex.loadIndex(path);
+    // Load itself may succeed (hnsw doesn't check space type)
+    // But scores will be computed differently because the space_ object
+    // is InnerProduct-based, not L2-based.
+
+    // Verify the loaded index has the same number of elements
+    EXPECT_EQ(cosineIndex.size(), 3);
+
+    // The key insight: L2 results and "cosine" results will use different
+    // distance metrics, so the scores should differ.
+    auto l2Results = l2Index.search({1.0f, 0.0f, 0.0f}, 3);
+    auto cosResults = cosineIndex.search({1.0f, 0.0f, 0.0f}, 3);
+
+    ASSERT_EQ(l2Results.size(), 3);
+    ASSERT_EQ(cosResults.size(), 3);
+
+    // Scores should differ because different distance functions are used
+    // (L2 returns positive distances, cosine returns negative similarity)
+    bool scoresDiffer = false;
+    for (size_t i = 0; i < l2Results.size(); ++i) {
+      if (std::abs(l2Results[i].score - cosResults[i].score) > 1e-6f) {
+        scoresDiffer = true;
+        break;
+      }
     }
+    EXPECT_TRUE(scoresDiffer)
+        << "Scores should differ when index is loaded with wrong space type";
 }
 
 TEST_F(HNSWIndexTest, SaveEmptyIndex) {
