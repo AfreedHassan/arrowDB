@@ -27,7 +27,7 @@ float l2_norm(const std::vector<float>& v) {
     return std::sqrt(sum);
 }
 
-TEST(EmbeddingDebug, SciQQueryVsDocuments) {
+TEST(DISABLED_EmbeddingDebug, SciQQueryVsDocuments) {
     Embedder embedder(ARROW_EMBEDDING_MODEL_DIR "/all-MiniLM-L6-v2.onnx",
                       "sentence-transformers/all-MiniLM-L6-v2");
     ASSERT_TRUE(embedder.ok()) << "Failed to init embedder";

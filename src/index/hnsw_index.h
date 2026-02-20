@@ -1,0 +1,144 @@
+#ifndef HNSW_INDEX_H
+#define HNSW_INDEX_H
+
+#include <functional>
+#include <vector>
+#include <memory>
+#include "arrow/types.h"
+#include "arrow/utils/status.h"
+#include "core/types_internal.h"
+
+// Forward declare custom HNSW types
+namespace hnsw {
+    template<typename T> class HierarchicalNSW;
+    template<typename T> class SpaceInterface;
+}
+namespace roaring { class Roaring; }
+
+namespace arrow {
+
+/// Internal search result from HNSW index (uses InternalID, not exposed publicly).
+struct HNSWSearchResult {
+    InternalID id;    ///< Internal vector identifier
+    float score;      ///< Similarity score
+};
+
+/// Configuration for HNSW index construction.
+/// 
+/// Default values optimized for 100K+ vectors based on benchmark results:
+/// - M=64: Provides 91-92% recall@10 for 100K vectors (vs 74-78% with M=32)
+/// - efConstruction=200: Minimal impact on recall (200 vs 400 vs 800), balanced build time
+/// 
+/// For smaller datasets (<10K), M=32 may be sufficient and uses less memory.
+/// For very large datasets (1M+), consider M=64 with efConstruction=400.
+struct HNSWConfig {
+    size_t maxElements = 1000000;   // Initial capacity
+    size_t M = 16;                  // Max connections per node (matches public HNSWParams default)
+    size_t efConstruction = 200;    // Construction beam width
+    bool quantize = false;          // Enable INT8 scalar quantization for search
+};
+
+/// HNSW index wrapper using custom HNSW implementation.
+/// Owns vector data internally - no separate VectorStore needed.
+class HNSWIndex {
+private:
+    size_t dim_;
+    Space spaceKind_;
+    std::unique_ptr<hnsw::SpaceInterface<float>> space_;
+    std::unique_ptr<hnsw::HierarchicalNSW<float>> hnsw_;
+public:
+    HNSWIndex(size_t dim, Space space, const HNSWConfig& config = {});
+    ~HNSWIndex();
+    
+    // Non-copyable, movable
+    HNSWIndex(const HNSWIndex&) = delete;
+    HNSWIndex& operator=(const HNSWIndex&) = delete;
+    HNSWIndex(HNSWIndex&&) noexcept;
+    HNSWIndex& operator=(HNSWIndex&&) noexcept;
+    
+    /// Insert a vector with the given ID.
+    bool insert(InternalID id, const std::vector<float>& vec);
+    
+    /// Search for k nearest neighbors.
+    /// @param ef Search beam width (higher = better recall, slower)
+    std::vector<HNSWSearchResult> search(
+        const std::vector<float>& query,
+        size_t k,
+        size_t ef = 200
+    ) const;
+
+    /// Filter predicate: returns true if the vector with the given ID should
+    /// be included in search results. Evaluated during HNSW graph traversal.
+    using IDFilter = std::function<bool(InternalID)>;
+
+    /// Search for k nearest neighbors, only considering vectors accepted by filter.
+    std::vector<HNSWSearchResult> search(
+        const std::vector<float>& query,
+        size_t k,
+        const IDFilter& filter,
+        size_t ef = 200
+    ) const;
+
+    /// Search with pre-computed CRoaring bitmap (bypasses callback overhead).
+    std::vector<HNSWSearchResult> searchBitmap(
+        const std::vector<float>& query,
+        size_t k,
+        const roaring::Roaring& bitmap,
+        size_t ef = 200
+    ) const;
+    
+    /// Vector dimension.
+    inline size_t dimension() const { return dim_; }
+
+  /// Save the index to disk.
+  /// @param path File path where the index will be saved
+  /// @return Status indicating success or failure
+  utils::Status saveIndex(const std::string& path) const;
+  
+  /// Load an index from disk.
+  /// @param path File path to load the index from
+  /// @return Status indicating success or failure
+  /// @note This replaces the current index with the loaded one.
+  ///       The dimension and space must match the saved index.
+  utils::Status loadIndex(const std::string& path);
+
+    // Number of vectors in the index (including deleted).
+    size_t size() const;
+
+    /// Number of vectors marked as deleted.
+    size_t deletedCount() const;
+
+    /// Resize index capacity.
+    void reserve(size_t max_elements);
+
+    /// Mark a vector as deleted (lazy deletion).
+    ///
+    /// The vector remains in the index but is excluded from search results.
+    /// The space is reclaimed when the index is rebuilt or compacted.
+    ///
+    /// @param id Vector identifier to mark as deleted
+    utils::Status markDelete(InternalID id);
+
+    /// Get a pointer to vector data for a given external label.
+    const float* getVectorData(InternalID id) const;
+
+    /// Get current max capacity.
+    size_t capacity() const;
+
+    /// BFS reorder internal IDs for cache-friendly graph traversal.
+    /// Call after building the index. Improves search throughput by clustering
+    /// graph neighbors in contiguous memory.
+    void reorderBFS();
+
+    /// Switch to global scalar quantization with integer-domain distance kernels.
+    /// Computes a single scale/offset across all vectors and re-quantizes.
+    /// Call after building the index. Enables pure uint8 distance computation.
+    void computeGlobalSQ();
+
+    /// Check if the index is using global scalar quantization.
+    bool isGlobalSQ() const;
+};
+
+}  // namespace arrow
+
+#endif  // HNSW_INDEX_H
