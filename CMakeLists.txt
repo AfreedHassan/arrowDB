@@ -121,6 +121,7 @@ target_compile_definitions(arrow PRIVATE
 
 # Optimization handled by CMAKE_BUILD_TYPE (Release = -O3, Debug = -g -O0)
 
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/data/sciq.txt ${CMAKE_BINARY_DIR}/sciq.txt COPYONLY)
 
 # ─────────────────────────────────────────────────────────────
 # LI executable
