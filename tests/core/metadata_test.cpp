@@ -78,19 +78,19 @@ TEST_F(MetadataUnit, MetadataValueToJsonBool) {
 TEST_F(MetadataUnit, JsonToMetadataValueInt64) {
     utils::json j = 42;
     MetadataValue value = utils::jsonToMetadataValue(j);
-    EXPECT_EQ(std::get<int64_t>(value), 42);
+    EXPECT_EQ(value.asInt64(), 42);
 }
 
 TEST_F(MetadataUnit, JsonToMetadataValueDouble) {
     utils::json j = 3.14159;
     MetadataValue value = utils::jsonToMetadataValue(j);
-    EXPECT_DOUBLE_EQ(std::get<double>(value), 3.14159);
+    EXPECT_DOUBLE_EQ(value.asDouble(), 3.14159);
 }
 
 TEST_F(MetadataUnit, JsonToMetadataValueString) {
     utils::json j = "test_string";
     MetadataValue value = utils::jsonToMetadataValue(j);
-    EXPECT_EQ(std::get<std::string>(value), "test_string");
+    EXPECT_EQ(value.asString(), "test_string");
 }
 
 TEST_F(MetadataUnit, JsonToMetadataValueBool) {
@@ -100,8 +100,8 @@ TEST_F(MetadataUnit, JsonToMetadataValueBool) {
     MetadataValue valueTrue = utils::jsonToMetadataValue(jTrue);
     MetadataValue valueFalse = utils::jsonToMetadataValue(jFalse);
     
-    EXPECT_EQ(std::get<bool>(valueTrue), true);
-    EXPECT_EQ(std::get<bool>(valueFalse), false);
+    EXPECT_EQ(valueTrue.asBool(), true);
+    EXPECT_EQ(valueFalse.asBool(), false);
 }
 
 TEST_F(MetadataUnit, JsonToMetadataValueInvalidType) {
@@ -148,10 +148,10 @@ TEST_F(MetadataUnit, JsonToMetadata) {
     Metadata meta = utils::jsonToMetadata(j);
     
     EXPECT_EQ(meta.size(), 4);
-    EXPECT_EQ(std::get<std::string>(meta.at("category")), "image");
-    EXPECT_DOUBLE_EQ(std::get<double>(meta.at("score")), 0.95);
-    EXPECT_EQ(std::get<bool>(meta.at("active")), true);
-    EXPECT_EQ(std::get<int64_t>(meta.at("count")), 42);
+    EXPECT_EQ(meta.at("category").asString(), "image");
+    EXPECT_DOUBLE_EQ(meta.at("score").asDouble(), 0.95);
+    EXPECT_EQ(meta.at("active").asBool(), true);
+    EXPECT_EQ(meta.at("count").asInt64(), 42);
 }
 
 TEST_F(MetadataUnit, JsonToMetadataEmpty) {
