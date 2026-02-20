@@ -127,4 +127,4 @@ BENCHMARK(BM_SearchThroughput)
 
 }  // namespace
 
-BENCHMARK_MAIN();
+// main() lives in bench_main.cpp
