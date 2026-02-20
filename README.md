@@ -88,7 +88,7 @@ client.close();
 ## API Overview
 
 | Operation | Description |
-|-----------|-------------|
+|---|---|
 | `insert(id, vec, metadata)` | Insert a vector with optional metadata |
 | `insertBatch(docs)` | Batch insert with partial success semantics |
 | `search(query, k, ef)` | K-nearest neighbor search |
@@ -159,13 +159,21 @@ collection_dir/
 Benchmarks on Apple Silicon (M-series), 384-dimensional vectors, Cosine space, M=16, ef=200:
 
 | Operation | 10K vectors | 100K vectors |
-|-----------|------------|-------------|
+|---|---|---|
 | Insert (in-memory) | 10,150 vec/s | 3,642 vec/s |
 | Insert (persistent) | 8,742 vec/s | 3,272 vec/s |
 | Insert (batch) | 9,909 vec/s | 3,459 vec/s |
 | Save | 45ms | 146ms |
 | Search | 110us (9,061 qps) | 356us (2,807 qps) |
 | Filtered search (50% selectivity) | 201us (4,979 qps) | 879us (1,138 qps) |
+
+### SIFT1M Recall
+
+Standard [SIFT1M](http://corpus-texmex.irisa.fr/) benchmark (1M vectors, 128D, L2 distance, 1000 queries, ground truth provided by dataset):
+
+| Config | Recall@10 | Insert | QPS |
+|---|---|---|---|
+| M=64, efC=200, ef=200 | **99.76%** | 19,273 vec/s | 2,561 |
 
 ## Building
 
