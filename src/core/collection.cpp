@@ -146,7 +146,10 @@ public:
   }
 
   ~Impl() {
-    stopRequested_.store(true, std::memory_order_release);
+    {
+      std::unique_lock lock(mutex_);
+      stopRequested_.store(true, std::memory_order_release);
+    }
     cv_.notify_one();
     if (compactionThread_.joinable()) compactionThread_.join();
   }
@@ -708,7 +711,10 @@ public:
   }
 
   utils::Status close() {
-    stopRequested_.store(true, std::memory_order_release);
+    {
+      std::unique_lock lock(mutex_);
+      stopRequested_.store(true, std::memory_order_release);
+    }
     cv_.notify_one();
 
     if (compactionThread_.joinable()) {
