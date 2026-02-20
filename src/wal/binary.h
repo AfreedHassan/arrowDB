@@ -1,9 +1,11 @@
 #ifndef BINARY_H
 #define BINARY_H
 
+#include <cstdint>
 #include <fstream>
-#include <sstream>
 #include <iostream>
+#include <sstream>
+#include <vector>
 
 namespace arrow {
 class BinaryWriter {
