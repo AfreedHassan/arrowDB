@@ -464,6 +464,108 @@ inline void sq_int_l2_batch_neon(
         outDistances[t] = sq_int_l2_neon(query, targets[t], dim);
     }
 }
+/// Integer IP: uint8 query × uint8 target → dot product distance as uint32 (NEON).
+/// Returns dim*65025 - dot(q, t) so that higher similarity = lower distance.
+inline uint32_t sq_int_ip_neon(
+    const uint8_t* query,
+    const uint8_t* target,
+    std::size_t dim) {
+
+    uint32x4_t sum1 = vdupq_n_u32(0);
+    uint32x4_t sum2 = vdupq_n_u32(0);
+
+    std::size_t i = 0;
+    for (; i + 16 <= dim; i += 16) {
+        uint8x16_t q = vld1q_u8(query + i);
+        uint8x16_t t = vld1q_u8(target + i);
+
+        // Pairwise u8×u8→u16 products
+        uint16x8_t prod_lo = vmull_u8(vget_low_u8(q), vget_low_u8(t));
+        uint16x8_t prod_hi = vmull_u8(vget_high_u8(q), vget_high_u8(t));
+
+        // Accumulate u16→u32
+        sum1 = vpadalq_u16(sum1, prod_lo);
+        sum2 = vpadalq_u16(sum2, prod_hi);
+    }
+
+    uint32_t dot = vaddvq_u32(vaddq_u32(sum1, sum2));
+
+    // Residual
+    for (; i < dim; ++i) {
+        dot += static_cast<uint32_t>(query[i]) * static_cast<uint32_t>(target[i]);
+    }
+    return static_cast<uint32_t>(dim * 65025) - dot;
+}
+
+/// Integer batch IP: uint8 query × N uint8 targets → N uint32 distances (NEON).
+inline void sq_int_ip_batch_neon(
+    const uint8_t* query,
+    const uint8_t* const* targets,
+    std::size_t numTargets,
+    std::size_t dim,
+    uint32_t* outDistances) {
+
+    const uint32_t maxDot = static_cast<uint32_t>(dim * 65025);
+    std::size_t t = 0;
+    for (; t + 4 <= numTargets; t += 4) {
+        uint32x4_t s0 = vdupq_n_u32(0);
+        uint32x4_t s1 = vdupq_n_u32(0);
+        uint32x4_t s2 = vdupq_n_u32(0);
+        uint32x4_t s3 = vdupq_n_u32(0);
+
+        const uint8_t* t0 = targets[t];
+        const uint8_t* t1 = targets[t + 1];
+        const uint8_t* t2 = targets[t + 2];
+        const uint8_t* t3 = targets[t + 3];
+
+        std::size_t i = 0;
+        for (; i + 16 <= dim; i += 16) {
+            uint8x16_t q = vld1q_u8(query + i);
+
+            // Target 0
+            uint16x8_t p0_lo = vmull_u8(vget_low_u8(q), vget_low_u8(vld1q_u8(t0 + i)));
+            uint16x8_t p0_hi = vmull_u8(vget_high_u8(q), vget_high_u8(vld1q_u8(t0 + i)));
+            s0 = vpadalq_u16(s0, p0_lo);
+            s0 = vpadalq_u16(s0, p0_hi);
+
+            // Target 1
+            uint16x8_t p1_lo = vmull_u8(vget_low_u8(q), vget_low_u8(vld1q_u8(t1 + i)));
+            uint16x8_t p1_hi = vmull_u8(vget_high_u8(q), vget_high_u8(vld1q_u8(t1 + i)));
+            s1 = vpadalq_u16(s1, p1_lo);
+            s1 = vpadalq_u16(s1, p1_hi);
+
+            // Target 2
+            uint16x8_t p2_lo = vmull_u8(vget_low_u8(q), vget_low_u8(vld1q_u8(t2 + i)));
+            uint16x8_t p2_hi = vmull_u8(vget_high_u8(q), vget_high_u8(vld1q_u8(t2 + i)));
+            s2 = vpadalq_u16(s2, p2_lo);
+            s2 = vpadalq_u16(s2, p2_hi);
+
+            // Target 3
+            uint16x8_t p3_lo = vmull_u8(vget_low_u8(q), vget_low_u8(vld1q_u8(t3 + i)));
+            uint16x8_t p3_hi = vmull_u8(vget_high_u8(q), vget_high_u8(vld1q_u8(t3 + i)));
+            s3 = vpadalq_u16(s3, p3_lo);
+            s3 = vpadalq_u16(s3, p3_hi);
+        }
+
+        outDistances[t]     = maxDot - vaddvq_u32(s0);
+        outDistances[t + 1] = maxDot - vaddvq_u32(s1);
+        outDistances[t + 2] = maxDot - vaddvq_u32(s2);
+        outDistances[t + 3] = maxDot - vaddvq_u32(s3);
+
+        // Residual
+        for (; i < dim; ++i) {
+            uint32_t qv = query[i];
+            outDistances[t]     -= qv * t0[i];
+            outDistances[t + 1] -= qv * t1[i];
+            outDistances[t + 2] -= qv * t2[i];
+            outDistances[t + 3] -= qv * t3[i];
+        }
+    }
+
+    for (; t < numTargets; ++t) {
+        outDistances[t] = sq_int_ip_neon(query, targets[t], dim);
+    }
+}
 #endif
 
 // Scalar fallback for integer L2
@@ -487,6 +589,29 @@ inline void sq_int_l2_batch_scalar(
     uint32_t* outDistances) {
     for (std::size_t t = 0; t < numTargets; ++t) {
         outDistances[t] = sq_int_l2_scalar(query, targets[t], dim);
+    }
+}
+
+// Scalar fallback for integer IP
+inline uint32_t sq_int_ip_scalar(
+    const uint8_t* query,
+    const uint8_t* target,
+    std::size_t dim) {
+    uint32_t dot = 0;
+    for (std::size_t i = 0; i < dim; ++i) {
+        dot += static_cast<uint32_t>(query[i]) * static_cast<uint32_t>(target[i]);
+    }
+    return static_cast<uint32_t>(dim * 65025) - dot;
+}
+
+inline void sq_int_ip_batch_scalar(
+    const uint8_t* query,
+    const uint8_t* const* targets,
+    std::size_t numTargets,
+    std::size_t dim,
+    uint32_t* outDistances) {
+    for (std::size_t t = 0; t < numTargets; ++t) {
+        outDistances[t] = sq_int_ip_scalar(query, targets[t], dim);
     }
 }
 

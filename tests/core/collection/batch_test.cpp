@@ -93,7 +93,7 @@ TEST_F(CollectionBatchTest, SearchBatchDimensionMismatch) {
 }
 
 TEST_F(CollectionBatchTest, InsertBatchDataIntegrity) {
-  CollectionConfig cfg{.name = "test", .dimensions = 128, .space = Space::Cosine};
+  CollectionConfig cfg{.name = "test", .dimensions = 128, .space = Space::L2};
   Collection collection(cfg);
 
   constexpr size_t kCount = 25000;  // well above parallel threshold (1000)
@@ -190,7 +190,7 @@ TEST_F(CollectionBatchTest, InsertBatchMetadataIntegrity) {
 }
 
 TEST_F(CollectionBatchTest, InsertBatchNoOverwrite) {
-  CollectionConfig cfg{.name = "test", .dimensions = 128, .space = Space::Cosine};
+  CollectionConfig cfg{.name = "test", .dimensions = 128, .space = Space::L2};
   Collection collection(cfg);
 
   std::mt19937 gen(42);
@@ -224,7 +224,7 @@ TEST_F(CollectionBatchTest, InsertBatchNoOverwrite) {
 }
 
 TEST_F(CollectionBatchTest, InsertBatchPartialFailureIntegrity) {
-  CollectionConfig cfg{.name = "test", .dimensions = 128, .space = Space::Cosine};
+  CollectionConfig cfg{.name = "test", .dimensions = 128, .space = Space::L2};
   Collection collection(cfg);
 
   std::mt19937 gen(42);

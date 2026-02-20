@@ -737,7 +737,7 @@ TEST_F(CollectionTest, InsertBatchExceedsMaxSize) {
   CollectionConfig cfg{.name = "batch_max", .dimensions = 4, .space = Space::Cosine};
   Collection col(cfg);
 
-  std::vector<Document> docs(10001);
+  std::vector<Document> docs(1000001);
   for (size_t i = 0; i < docs.size(); ++i) {
     docs[i].embedding = {1.0f, 2.0f, 3.0f, 4.0f};
   }

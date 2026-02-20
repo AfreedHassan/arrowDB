@@ -197,7 +197,7 @@ utils::Status HNSWIndex::loadIndex(const std::string& path) {
         hnsw_->setSQDistType(sqDistType);
         // For global SQ, also select integer-domain kernels
         if (hnsw_->isGlobalSQ()) {
-            hnsw_->selectSQIntKernels();
+            hnsw_->selectSQIntKernels(sqDistType);
         }
     }
     return utils::OkStatus();

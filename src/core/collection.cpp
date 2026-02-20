@@ -2,7 +2,9 @@
 #include "arrow/collection.h"
 #include "arrow/utils/uuid.h"
 #include "utils/json_utils.h"
+#ifndef ARROW_NO_EMBEDDER
 #include "embedder/embedder.h"
+#endif
 #include "index/hnsw_index.h"
 #include <nlohmann/json.hpp>
 #include "wal/wal.h"
@@ -25,10 +27,23 @@
 namespace arrow {
 
 // ─────────────────────────────────────────────────────────────
+// Vector normalization for Cosine space
+// ─────────────────────────────────────────────────────────────
+
+static void normalizeVector(std::vector<float>& vec) {
+  float norm = 0.0f;
+  for (float v : vec) norm += v * v;
+  if (norm > 0.0f) {
+    norm = 1.0f / std::sqrt(norm);
+    for (float& v : vec) v *= norm;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
 // Input validation helpers
 // ─────────────────────────────────────────────────────────────
 
-static constexpr size_t kMaxBatchSize = 100000;
+static constexpr size_t kMaxBatchSize = 1000000;
 static constexpr size_t kParallelInsertThreshold = 1000;
 static constexpr size_t kMaxMetadataKeys = 256;
 static constexpr size_t kMaxMetadataValueSize = 65536;  // 64KB per string value
@@ -370,6 +385,15 @@ public:
     auto schemaStatus = validateMetadataSchema(config_.schema, metadata);
     if (!schemaStatus.ok()) return schemaStatus;
 
+    // L2-normalize for Cosine space (IP on unit vectors == cosine similarity)
+    const std::vector<float>* vecPtr = &vec;
+    std::vector<float> normalizedVec;
+    if (config_.space == Space::Cosine) {
+      normalizedVec = vec;
+      normalizeVector(normalizedVec);
+      vecPtr = &normalizedVec;
+    }
+
     auto internalIDResult = idSpace_.assign(id);
     if (!internalIDResult.ok()) {
       return internalIDResult.status();
@@ -377,7 +401,7 @@ public:
 
     InternalID internalID = internalIDResult.value();
 
-    if (!pIndex_->insert(internalID, vec)) {
+    if (!pIndex_->insert(internalID, *vecPtr)) {
       idSpace_.remove(id);
       return utils::Status(utils::StatusCode::kInternal, "Insert failed");
     }
@@ -387,7 +411,7 @@ public:
     // succeeded in-memory and is immediately searchable. The only risk
     // is losing this entry on crash (it won't be replayed from WAL).
     if (pWal_) {
-      auto entryResult = builder_.buildInsert(id, config_.dimensions, vec);
+      auto entryResult = builder_.buildInsert(id, config_.dimensions, *vecPtr);
       if (!entryResult.ok()) {
         ARROW_LOG_ERROR("Collection", "WAL entry build failed for " + id +
             ": " + entryResult.status().message());
@@ -430,10 +454,19 @@ public:
     auto schemaStatus = validateMetadataSchema(config_.schema, metadata);
     if (!schemaStatus.ok()) return schemaStatus;
 
+    // L2-normalize for Cosine space
+    const std::vector<float>* vecPtr = &vec;
+    std::vector<float> normalizedVec;
+    if (config_.space == Space::Cosine) {
+      normalizedVec = vec;
+      normalizeVector(normalizedVec);
+      vecPtr = &normalizedVec;
+    }
+
     InternalID internalID = idResult.value();
 
     // Custom HNSW handles duplicate labels via updatePoint internally
-    if (!pIndex_->insert(internalID, vec))
+    if (!pIndex_->insert(internalID, *vecPtr))
       return utils::Status(utils::StatusCode::kInternal, "Update failed: HNSW insert error");
 
     // Always update metadata (even if empty — caller may intend to clear it)
@@ -441,7 +474,7 @@ public:
 
     // WAL: log as INSERT (idempotent on replay since addPoint handles duplicates)
     if (pWal_) {
-      auto entry = builder_.buildInsert(id, config_.dimensions, vec);
+      auto entry = builder_.buildInsert(id, config_.dimensions, *vecPtr);
       if (!entry.ok()) {
         ARROW_LOG_ERROR("Collection", "WAL entry build failed for update " + id + ": " + entry.status().message());
         return entry.status();
@@ -767,6 +800,7 @@ utils::Status Collection::insert(const VectorID& id, const std::vector<float>& v
   return pImpl_->insertLocked(id, vec, std::move(metadata));
 }
 
+#ifndef ARROW_NO_EMBEDDER
 utils::Status Collection::insert(const std::vector<std::string> &text) {
   Embedder embedder;
   if (!embedder.ok()) {
@@ -786,6 +820,7 @@ utils::Status Collection::insert(const std::vector<std::string> &text) {
   }
   return utils::OkStatus();
 }
+#endif
 
 utils::Result<VectorID> Collection::insert(Document doc) {
   if (doc.id.empty()) doc.id = arrow::uuid::uuidv4();
@@ -845,6 +880,15 @@ utils::Result<BatchInsertResult> Collection::insertBatch(std::vector<Document> d
     }
 
     result.results[i].status = utils::OkStatus();
+  }
+
+  // Normalize validated vectors for Cosine space
+  if (pImpl_->config_.space == Space::Cosine) {
+    for (size_t i = 0; i < docs.size(); ++i) {
+      if (result.results[i].status.ok()) {
+        normalizeVector(docs[i].embedding);
+      }
+    }
   }
 
   // Phase 2: Assign IDSpace for all validated entries (sequential, not thread-safe)
@@ -1019,7 +1063,14 @@ Collection::search(const std::vector<float> &query, uint32_t k,
         std::to_string(pImpl_->config_.dimensions) + ", got " + std::to_string(query.size()));
     return {};
   }
-  auto internal = pImpl_->pIndex_->search(query, k, ef);
+  const std::vector<float>* qPtr = &query;
+  std::vector<float> normalizedQuery;
+  if (pImpl_->config_.space == Space::Cosine) {
+    normalizedQuery = query;
+    normalizeVector(normalizedQuery);
+    qPtr = &normalizedQuery;
+  }
+  auto internal = pImpl_->pIndex_->search(*qPtr, k, ef);
   std::vector<IndexSearchResult> results;
   results.reserve(internal.size());
   for (const auto &r : internal) {
@@ -1046,13 +1097,20 @@ Collection::search(const std::vector<float>& query, uint32_t k,
     metadataSnap = pImpl_->metadata_;
   }
   // Lock released. HNSW search is thread-safe via internal locks.
+  const std::vector<float>* qPtr = &query;
+  std::vector<float> normalizedQuery;
+  if (pImpl_->config_.space == Space::Cosine) {
+    normalizedQuery = query;
+    normalizeVector(normalizedQuery);
+    qPtr = &normalizedQuery;
+  }
   HNSWIndex::IDFilter idFilter = [&metadataSnap, &filter](InternalID id) -> bool {
     auto it = metadataSnap->find(id);
     if (it != metadataSnap->end()) return filter(it->second);
     static const Metadata empty;
     return filter(empty);
   };
-  auto internal = pImpl_->pIndex_->search(query, k, idFilter, ef);
+  auto internal = pImpl_->pIndex_->search(*qPtr, k, idFilter, ef);
   std::vector<IndexSearchResult> results;
   results.reserve(internal.size());
   for (const auto &r : internal) {
@@ -1063,6 +1121,7 @@ Collection::search(const std::vector<float>& query, uint32_t k,
   return results;
 }
 
+#ifndef ARROW_NO_EMBEDDER
 SearchResult
 Collection::query(const std::string &queryText, uint32_t k, uint32_t ef) const {
   Embedder embedder;
@@ -1073,6 +1132,7 @@ Collection::query(const std::string &queryText, uint32_t k, uint32_t ef) const {
 
   return query(vec, k, ef);
 }
+#endif
 
 SearchResult Collection::query(const std::vector<float> &queryVec, uint32_t k,
                                uint32_t ef) const {
@@ -1082,7 +1142,14 @@ SearchResult Collection::query(const std::vector<float> &queryVec, uint32_t k,
         std::to_string(pImpl_->config_.dimensions) + ", got " + std::to_string(queryVec.size()));
     return {};
   }
-  auto indexResults = pImpl_->pIndex_->search(queryVec, k, ef);
+  const std::vector<float>* qPtr = &queryVec;
+  std::vector<float> normalizedQuery;
+  if (pImpl_->config_.space == Space::Cosine) {
+    normalizedQuery = queryVec;
+    normalizeVector(normalizedQuery);
+    qPtr = &normalizedQuery;
+  }
+  auto indexResults = pImpl_->pIndex_->search(*qPtr, k, ef);
   SearchResult result;
   result.hits.reserve(indexResults.size());
 
@@ -1119,6 +1186,14 @@ SearchResult Collection::query(const std::vector<float>& queryVec, uint32_t k,
     metadataSnap = pImpl_->metadata_;
   }
 
+  const std::vector<float>* qPtr = &queryVec;
+  std::vector<float> normalizedQuery;
+  if (pImpl_->config_.space == Space::Cosine) {
+    normalizedQuery = queryVec;
+    normalizeVector(normalizedQuery);
+    qPtr = &normalizedQuery;
+  }
+
   HNSWIndex::IDFilter idFilter = [&metadataSnap, &filter](InternalID id) -> bool {
     auto it = metadataSnap->find(id);
     if (it != metadataSnap->end()) return filter(it->second);
@@ -1126,7 +1201,7 @@ SearchResult Collection::query(const std::vector<float>& queryVec, uint32_t k,
     return filter(empty);
   };
 
-  auto indexResults = pImpl_->pIndex_->search(queryVec, k, idFilter, ef);
+  auto indexResults = pImpl_->pIndex_->search(*qPtr, k, idFilter, ef);
 
   SearchResult result;
   result.hits.reserve(indexResults.size());
@@ -1217,7 +1292,14 @@ Collection::search(const std::vector<float>& query, uint32_t k,
         std::to_string(pImpl_->config_.dimensions) + ", got " + std::to_string(query.size()));
     return {};
   }
-  auto internal = pImpl_->pIndex_->searchBitmap(query, k, filter.pImpl_->bitmap, ef);
+  const std::vector<float>* qPtr = &query;
+  std::vector<float> normalizedQuery;
+  if (pImpl_->config_.space == Space::Cosine) {
+    normalizedQuery = query;
+    normalizeVector(normalizedQuery);
+    qPtr = &normalizedQuery;
+  }
+  auto internal = pImpl_->pIndex_->searchBitmap(*qPtr, k, filter.pImpl_->bitmap, ef);
   std::vector<IndexSearchResult> results;
   results.reserve(internal.size());
   for (const auto &r : internal) {
@@ -1237,7 +1319,14 @@ Collection::query(const std::vector<float>& queryVec, uint32_t k,
         std::to_string(pImpl_->config_.dimensions) + ", got " + std::to_string(queryVec.size()));
     return {};
   }
-  auto indexResults = pImpl_->pIndex_->searchBitmap(queryVec, k, filter.pImpl_->bitmap, ef);
+  const std::vector<float>* qPtr2 = &queryVec;
+  std::vector<float> normalizedQuery2;
+  if (pImpl_->config_.space == Space::Cosine) {
+    normalizedQuery2 = queryVec;
+    normalizeVector(normalizedQuery2);
+    qPtr2 = &normalizedQuery2;
+  }
+  auto indexResults = pImpl_->pIndex_->searchBitmap(*qPtr2, k, filter.pImpl_->bitmap, ef);
 
   // Use metadata directly under lock (COW ensures consistency)
   const auto& metadataSnap = pImpl_->metadata_;
@@ -1273,7 +1362,14 @@ Collection::searchBatch(const std::vector<std::vector<float>> &queries,
     }
   }
 
-  auto internalBatch = Impl::parallelSearch(pImpl_->pIndex_.get(), queries, k, ef);
+  const std::vector<std::vector<float>>* qsPtr = &queries;
+  std::vector<std::vector<float>> normalizedQueries;
+  if (pImpl_->config_.space == Space::Cosine) {
+    normalizedQueries = queries;
+    for (auto& q : normalizedQueries) normalizeVector(q);
+    qsPtr = &normalizedQueries;
+  }
+  auto internalBatch = Impl::parallelSearch(pImpl_->pIndex_.get(), *qsPtr, k, ef);
   std::vector<std::vector<IndexSearchResult>> mapped(internalBatch.size());
   for (size_t i = 0; i < internalBatch.size(); ++i) {
     mapped[i].reserve(internalBatch[i].size());

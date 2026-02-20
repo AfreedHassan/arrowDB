@@ -120,7 +120,7 @@ TEST_F(CollectionTest, GetNonexistent) {
 }
 
 TEST_F(CollectionTest, UpdateSuccess) {
-  CollectionConfig cfg{.name = "update_success", .dimensions = 4, .space = Space::Cosine};
+  CollectionConfig cfg{.name = "update_success", .dimensions = 4, .space = Space::L2};
   Collection col(cfg);
 
   std::vector<float> vec1 = {1.0f, 2.0f, 3.0f, 4.0f};
@@ -137,7 +137,7 @@ TEST_F(CollectionTest, UpdateSuccess) {
 }
 
 TEST_F(CollectionTest, UpsertExisting) {
-  CollectionConfig cfg{.name = "upsert_existing", .dimensions = 4, .space = Space::Cosine};
+  CollectionConfig cfg{.name = "upsert_existing", .dimensions = 4, .space = Space::L2};
   Collection col(cfg);
 
   std::vector<float> vec1 = {1.0f, 2.0f, 3.0f, 4.0f};

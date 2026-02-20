@@ -102,6 +102,7 @@ namespace hnsw {
 
       // Global SQ: one scale/offset for the whole dataset, enabling integer kernels
       SQVectorMeta globalSQParams_{0.0f, 0.0f};
+      SQDistType sqDistType_{SQDistType::L2};
       psq_int_distfunc_t sqIntDistFunc_{nullptr};
       psq_int_batchdistfunc_t sqIntBatchDistFunc_{nullptr};
 
@@ -201,6 +202,7 @@ namespace hnsw {
         // Scalar quantization setup
         if (quantize) {
             quantizationEnabled_ = true;
+            sqDistType_ = sqDistType;
             quantizer_ = ScalarQuantizer(dim_);
             allocateQuantizedBlocks(maxElements_);
             selectSQKernels(sqDistType);
@@ -562,13 +564,23 @@ namespace hnsw {
 #endif
       }
 
-      void selectSQIntKernels() {
+      void selectSQIntKernels(SQDistType distType) {
 #if defined(__aarch64__) || defined(_M_ARM64)
-          sqIntDistFunc_ = impl::sq_int_l2_neon;
-          sqIntBatchDistFunc_ = impl::sq_int_l2_batch_neon;
+          if (distType == SQDistType::L2) {
+              sqIntDistFunc_ = impl::sq_int_l2_neon;
+              sqIntBatchDistFunc_ = impl::sq_int_l2_batch_neon;
+          } else {
+              sqIntDistFunc_ = impl::sq_int_ip_neon;
+              sqIntBatchDistFunc_ = impl::sq_int_ip_batch_neon;
+          }
 #else
-          sqIntDistFunc_ = impl::sq_int_l2_scalar;
-          sqIntBatchDistFunc_ = impl::sq_int_l2_batch_scalar;
+          if (distType == SQDistType::L2) {
+              sqIntDistFunc_ = impl::sq_int_l2_scalar;
+              sqIntBatchDistFunc_ = impl::sq_int_l2_batch_scalar;
+          } else {
+              sqIntDistFunc_ = impl::sq_int_ip_scalar;
+              sqIntBatchDistFunc_ = impl::sq_int_ip_batch_scalar;
+          }
 #endif
       }
 
@@ -617,22 +629,9 @@ namespace hnsw {
           return a.first < b.first;
         };
 
-        // If we have more than M, reduce the set first.
-        if (n > M) {
-          // Heuristic: if M is very small compared to n, nth_element + sort M is best.
-          // Otherwise partial_sort (which produces the first M sorted) is fine.
-          if (M * 20 < n) {
-            std::nth_element(candidates.begin(), candidates.begin() + M, candidates.end(), cmpAsc);
-            candidates.resize(M);
-            std::sort(candidates.begin(), candidates.end(), cmpAsc); // now near -> far
-          } else {
-            std::partial_sort(candidates.begin(), candidates.begin() + M, candidates.end(), cmpAsc);
-            candidates.resize(M); // first M are sorted ascending
-          }
-        } else {
-          // Few candidates: just sort them ascending
-          std::sort(candidates.begin(), candidates.end(), cmpAsc);
-        }
+        // Sort ALL candidates ascending (nearest first) — do NOT pre-truncate to M.
+        // The diversity loop below iterates the full efConstruction pool and stops at M kept.
+        std::sort(candidates.begin(), candidates.end(), cmpAsc);
 
         // Apply HNSW diversification heuristic: keep candidate if it's not closer to any selected neighbor
         keptPtrs.reserve(std::min(M, candidates.size()));
@@ -1225,12 +1224,13 @@ namespace hnsw {
           }
 
           sqMode_ = SQMode::Global;
-          selectSQIntKernels();
+          selectSQIntKernels(sqDistType_);
       }
 
       /// Set SQ distance kernels after loading (when dist type wasn't known at load time).
       void setSQDistType(SQDistType distType) {
           if (quantizationEnabled_) {
+              sqDistType_ = distType;
               selectSQKernels(distType);
           }
       }
