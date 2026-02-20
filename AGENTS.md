@@ -1,124 +1,70 @@
 # AGENTS.md
 
-If any part of the instructions seem unclear or you are not sure how to do something, stop immediately and ask instead of guessing. Follow the principles of the codebase and always choose the simplest method of accomplishing something instead of something complex. 
+If any part of the instructions seem unclear or you are not sure how to do something, stop immediately and ask instead of guessing. Follow the principles of the codebase and always choose the simplest method of accomplishing something instead of something complex.
 
-## Project Overview 
+## Project Overview
 
-This is a lightweight vector database implementation in C++ with an Embedding Pipeline making use of Rust.
+ArrowDB is a lightweight vector database in C++23 with HNSW indexing, WAL-based durability, and optional scalar quantization (SQ8).
 
 ## Build Commands
 
 ```bash
 mkdir -p build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release
-make
+make -j$(sysctl -n hw.ncpu)  # macOS
 ```
 
-### Run Tests
+**Optional build flags:**
+- `cmake .. -DARROW_SANITIZE=address` - Enable address sanitizer
+- `cmake .. -DARROW_COVERAGE=ON -DCMAKE_BUILD_TYPE=Debug` - Enable code coverage
 
-**Note:** Tests must be run directly via the test binary, not through ctest:
+**Rust embedder (optional):** `cd embed && cargo build --release`
 
+## Run Tests
+
+**All tests:** `./build/tests`
+
+**Skip external data tests (SIFT/embedder):**
 ```bash
-cd build
-make tests                           # Build tests only
-./tests                              # Run all tests
-./tests --gtest_filter="*WAL*"       # Run WAL-related tests
-./tests --gtest_filter="*Collection*" # Run Collection tests
-./tests --gtest_filter=CollectionTest.InsertVectors  # Single test case
+./build/tests --gtest_filter="-DatasetTest.*:EmbeddingDebug.*:ThreadSafety.*:SIFTTest.*"
 ```
 
-**Common test filters:**
-- `"*WAL*"` - All WAL tests (36 tests)
-- `"*Collection*"` - All Collection tests (40 tests)
-- `"*HNSW*"` - HNSW index tests
-- `"*Binary*"` - Binary serialization tests
-- `"*Metadata*"` - Metadata tests
-- `"*IDSpace*"` - ID space management tests
-
-### Test Organization
-Tests are organized by category in CMakeLists.txt:
-- **HNSW Tests**: HNSWIndexTest, Distance Kernels (IP/L2), VectorStorage, SIFT
-- **Embedder Tests**: EmbeddingDebug, Dataset, ThreadSafety
-- **Core Tests**: Collection, WAL, Metadata, Binary, ArrowDB
-
-Test categories can be run together:
+**Single test suite:**
 ```bash
-ctest -R AllHNSWTests          # All HNSW-related tests
-ctest -R AllCoreTests          # All core functionality tests
-ctest -R UnitTests             # HNSW, Metadata, WAL unit tests
-ctest -R IntegrationTests      # Collection, Metadata integration tests
+./build/tests --gtest_filter=CollectionTest.*
+./build/tests --gtest_filter=HNSWIndexTest.*
+./build/tests --gtest_filter=WALTest.*
+./build/tests --gtest_filter=CollectionTest.InsertVectors
 ```
 
-### Test Utilities
-Use `test_util.h` helper functions for generating test data:
+**Test categories (via ctest):**
+```bash
+ctest -R AllHNSWTests       # HNSW-related tests
+ctest -R AllCoreTests       # Core functionality (Collection, WAL, Metadata)
+ctest -R UnitTests          # HNSW, Metadata, WAL unit tests
+ctest -R IntegrationTests   # Collection, Metadata integration
+```
+
+**Test utilities:**
 ```cpp
 #include "test_util.h"
-
 using arrow::testing::RandomVector;
-
 std::mt19937 gen(42);
 std::vector<float> vec = RandomVector(128, gen);  // Normalized vector
 ```
 
-## WAL Entry Structure
-
-The WAL Entry struct uses a fixed 128-byte array for vectorID storage:
-
-```cpp
-struct Entry {
-    OperationType type;
-    uint16_t version;
-    uint64_t lsn;
-    uint64_t txid;
-    uint32_t headerCRC;
-    uint32_t payloadLength = 0;
-    char vectorID[kVectorIDSize] = {};  // Fixed 128-byte array
-    uint32_t dimension = 0;
-    uint8_t padding;
-    std::vector<float> embedding;
-    uint32_t payloadCRC = 0;
-
-    std::string getVectorID() const;           // Extract string from buffer
-    utils::Status setVectorID(const std::string& id);  // Set with bounds check
-};
-```
-
-**Important constants:**
-- `kVectorIDSize = 128` - Wire/struct size of vectorID field
-- `kMaxVectorIDSize = 127` - Max usable string length (1 byte reserved for null terminator)
-
-**Creating WAL entries:**
-```cpp
-wal::Entry entry{
-    .type = wal::OperationType::INSERT,
-    .version = 1,
-    .lsn = 1,
-    .txid = 1,
-    // ... other fields (NOT vectorID here)
-};
-entry.setVectorID("my-vector-id");  // Use helper method after initialization
-```
-
-
 ## Code Style Guidelines
-
-### Namespace
-All code in `arrow` namespace. Use `namespace arrow {` at file level.
 
 ### Naming Conventions
 - Classes/Structs: `PascalCase` (e.g., `Collection`, `HNSWIndex`)
-- Methods/Functions: `camelCase` (e.g., `insert`, `search`, `saveIndex`)
-- Free Functions: `CamelCase` (e.g., `DoThis`, `DoThat`, `ComputeLikeThis`)
+- Methods/Functions: `camelCase` (e.g., `insert`, `search`)
+- Free Functions: `CamelCase` (e.g., `DoThis`, `ComputeLikeThis`)
 - Variables: `camelCase` (e.g., `maxElements`, `efConstruction`)
 - Private members: `snake_case_` (e.g., `dim_`, `metric_`, `index_`)
 - Constants: `kPascalCase` (e.g., `kDefaultDim`)
-- Enums/Type aliases: `PascalCase` (e.g., `DistanceMetric::Cosine`, `VectorID`)
 
-### File Organization
-- Headers: `include/arrow/` - Public interfaces
-- Source: `src/core/`, `src/index/` - Implementation
-- Tests: `tests/` - Google Test files
-- Utils: `include/arrow/utils/` - Helper functions
+### Namespace
+All code in `arrow` namespace. Utilities in `arrow::utils`.
 
 ### Import Order
 1. Local headers (quotes, alphabetical)
@@ -127,7 +73,8 @@ All code in `arrow` namespace. Use `namespace arrow {` at file level.
 
 ```cpp
 #include "arrow/types.h"
-#include "arrow/hnsw_index.h"
+#include "arrow/collection.h"
+#include "index/hnsw_index.h"
 #include <hnswlib/hnswlib.h>
 #include <nlohmann/json.hpp>
 #include <vector>
@@ -135,9 +82,9 @@ All code in `arrow` namespace. Use `namespace arrow {` at file level.
 ```
 
 ### Formatting
-- Use spaces for indentation (1 TUS = 4 spaces)
-- NO comments unless explicitly requested
+- Spaces for indentation (1 TUS = 4 spaces)
 - Opening braces on same line, closing on new line
+- NO comments unless explicitly requested
 
 ```cpp
 class Collection {
@@ -151,28 +98,19 @@ private:
 ```
 
 ### Types
-- Use `size_t` for sizes/counts
-- Use `uint32_t`, `uint64_t`, `int64_t` for bit-width requirements
-- Use `float` for vector embeddings, `std::vector<float>` for vectors
-- Use `std::unique_ptr` for owned resources
-- Use `utils::Result<T>` for fallible operations (preferred)
-- Use `std::optional<T>` for operations that may return no value
+- `size_t` for sizes/counts
+- `uint32_t`, `uint64_t`, `int64_t` for bit-width requirements
+- `float` for vector embeddings, `std::vector<float>` for vectors
+- `std::unique_ptr` for owned resources
+- `utils::Result<T>` for fallible operations (preferred)
+- `std::optional<T>` for operations that may return no value
 
 ### Error Handling
-- **NO EXCEPTIONS** - Project does not use exceptions at all
-- Handle errors explicitly within functions instead of throwing
-- Use `utils::Status` for status-only returns (success/failure with error info)
-- Use `utils::Result<T>` for fallible operations (wraps `std::expected<T, Status>`)
-- Use `std::optional<T>` for operations that may return no value
-- Return error codes or bool for simple success/failure cases
-
-**StatusCode enum values:**
-- `kOk` - Success
-- `kInvalidArgument`, `kNotFound`, `kAlreadyExists`, `kUnimplemented` - Generic errors
-- `kDimensionMismatch` - Vector dimension errors
-- `kIoError`, `kEof`, `kCorruption`, `kChecksumMismatch` - I/O & persistence errors
-- `kBadRecord`, `kBadHeader`, `kVersionMismatch` - WAL / recovery errors
-- `kInternal` - Internal invariants
+**NO EXCEPTIONS** - Handle errors explicitly. Use:
+- `utils::Status` for status-only returns
+- `utils::Result<T>` for fallible operations (wraps `std::expected<T, Status>`)
+- `std::optional<T>` for operations that may return no value
+- Error codes or bool for simple success/failure
 
 ```cpp
 utils::Status insert(VectorID id, const std::vector<float>& vec) {
@@ -188,20 +126,11 @@ utils::Status insert(VectorID id, const std::vector<float>& vec) {
 utils::Result<BatchInsertResult> insertBatch(
 	const std::vector<std::pair<VectorID, std::vector<float>>>& batch) {
 	if (batch.empty()) {
-		return utils::Status(utils::StatusCode::kInvalidArgument,
-			"Batch cannot be empty");
+		return utils::Status(utils::StatusCode::kInvalidArgument, "Batch cannot be empty");
 	}
 	BatchInsertResult result;
 	return result;
 }
-```
-
-### Const Correctness
-- Mark member functions `const` if they don't modify state
-- Pass by `const&` for read-only parameters
-
-```cpp
-const std::string& name() const { return config_.name; }
 ```
 
 ### RAII and Resource Management
@@ -223,35 +152,17 @@ public:
 - Test fixtures: `ClassNameTest : public ::testing::Test`
 - Test names: `PascalCase` descriptive names (e.g., `InsertAndSearch`)
 - Use `SetUp()` and `TearDown()` for fixture setup/cleanup
-- Use `EXPECT_*` for non-critical, `ASSERT_*` for test-terminating assertions
+- `EXPECT_*` for non-critical, `ASSERT_*` for test-terminating assertions
 
 ```cpp
 TEST_F(HNSWIndexTest, InsertAndSearch) {
-	HNSWIndex index(3, DistanceMetric::Cosine);
+	HNSWIndex index(3, Space::Cosine);
 	index.insert(1, {1.0f, 0.0f, 0.0f});
 	EXPECT_EQ(index.size(), 1);
 }
 ```
 
-### Doxygen Comments
-Use Doxygen-style comments only for public APIs:
-```cpp
-/// Insert a vector into the collection.
-void insert(VectorID id, const std::vector<float>& vec);
-```
-
-### CMake Integration
-- Source files added to `add_library()` or `add_executable()` in CMakeLists.txt
-- New tests: add to TEST_SOURCES glob pattern or individual test entries
-- Link test binaries with `GTest::gtest` and `GTest::gtest_main`
-
-### After Changes
-Always run tests: `cd build && make && ctest --output-on-failure`
-No lint commands configured. Focus on following existing patterns.
-
 ### Commit Message Format
-
-Use conventional commit messages for all commits:
 
 ```
 <type>(<scope>): <subject>
@@ -261,34 +172,50 @@ Use conventional commit messages for all commits:
 <footer>
 ```
 
-**Types:**
-- `feat`: New feature
-- `fix`: Bug fix
-- `refactor`: Code refactoring (no functional change)
-- `docs`: Documentation changes
-- `style`: Code style changes (formatting, etc.)
-- `test`: Adding or updating tests
-- `chore`: Maintenance tasks
+**Types:** `feat`, `fix`, `refactor`, `docs`, `style`, `test`, `chore`
 
-**Examples:**
-
+**Example:**
 ```
 feat(hnsw): add HNSW index implementation
 
-Implements HNSW (Hierarchical Navigable Small World) index for efficient
-approximate nearest neighbor search. Supports Euclidean and Cosine distance metrics.
+Implements HNSW for efficient approximate nearest neighbor search.
+Supports Euclidean and Cosine distance metrics.
+```
 
-Closes #123
+## WAL Entry Structure
 
----
+```cpp
+struct Entry {
+    OperationType type;
+    uint16_t version;
+    uint64_t lsn;
+    uint64_t txid;
+    uint32_t headerCRC;
+    uint32_t payloadLength = 0;
+    char vectorID[kVectorIDSize] = {};  // Fixed 128-byte array
+    uint32_t dimension = 0;
+    uint8_t padding;
+    std::vector<float> embedding;
+    uint32_t payloadCRC = 0;
 
-refactor(wal): use std::unique_ptr for stream ownership
+    std::string getVectorID() const;
+    utils::Status setVectorID(const std::string& id);
+};
+```
 
-Makes BinaryReader and BinaryWriter take ownership of filestreams
-using std::unique_ptr. Provides automatic RAII resource management
-and eliminates manual file lifecycle concerns.
+**Important constants:**
+- `kVectorIDSize = 128` - Wire/struct size
+- `kMaxVectorIDSize = 127` - Max usable string length
 
-Affects WAL tests - ensures proper file handle cleanup.
+**Creating WAL entries:**
+```cpp
+wal::Entry entry{
+    .type = wal::OperationType::INSERT,
+    .version = 1,
+    .lsn = 1,
+    .txid = 1,
+};
+entry.setVectorID("my-vector-id");  // Use helper after initialization
 ```
 
 ## BOUNDARIES
