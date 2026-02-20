@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 #include "arrow/collection.h"
-#include "internal/hnsw_index.h"
+#include "index/hnsw_index.h"
 #include <chrono>
 #include <iostream>
 #include <vector>
@@ -88,7 +88,7 @@ std::vector<std::vector<float>> LoadSIFTVectors(
  * @param k Number of nearest neighbors per query
  * @return Vector of query results, each containing k vector IDs
  */
-std::vector<std::vector<VectorID>> LoadSIFTGroundTruth(
+std::vector<std::vector<InternalID>> LoadSIFTGroundTruth(
     const std::string& filepath,
     size_t num_queries,
     size_t k
@@ -98,7 +98,7 @@ std::vector<std::vector<VectorID>> LoadSIFTGroundTruth(
         throw std::runtime_error("Failed to open ground truth file: " + filepath);
     }
 
-    std::vector<std::vector<VectorID>> ground_truth;
+    std::vector<std::vector<InternalID>> ground_truth;
     ground_truth.reserve(num_queries);
     
     for (size_t q = 0; q < num_queries; ++q) {
@@ -115,10 +115,10 @@ std::vector<std::vector<VectorID>> LoadSIFTGroundTruth(
             throw std::runtime_error("Failed to read ground truth IDs");
         }
         
-        std::vector<VectorID> query_gt;
+        std::vector<InternalID> query_gt;
         query_gt.reserve(k_actual);
         for (size_t i = 0; i < k_actual; ++i) {
-            query_gt.push_back(static_cast<VectorID>(ids[i]));
+            query_gt.push_back(static_cast<InternalID>(ids[i]));
         }
         ground_truth.push_back(std::move(query_gt));
     }
@@ -135,27 +135,28 @@ std::vector<std::vector<VectorID>> LoadSIFTGroundTruth(
  * @return Average recall@k across all queries
  */
 double CalculateSIFTRecall(
-    const std::vector<std::vector<VectorID>>& groundTruthFull,
+    const std::vector<std::vector<InternalID>>& groundTruthFull,
     const std::vector<std::vector<arrow::IndexSearchResult>>& results,
     size_t k
 ) {
     if (groundTruthFull.size() != results.size()) {
         throw std::runtime_error("Ground truth and results size mismatch");
     }
-    
+
     if (groundTruthFull.empty()) {
         return 0.0;
     }
-    
+
     double totalRecall = 0.0;
     for (size_t q = 0; q < groundTruthFull.size(); ++q) {
         const auto& gt = groundTruthFull[q];
         const auto& res = results[q];
-        
-        std::unordered_set<VectorID> gtSet;
+
+        // Convert ground truth InternalIDs to VectorID strings for comparison
+        std::unordered_set<std::string> gtSet;
         size_t kActual = std::min(k, gt.size());
         for (size_t i = 0; i < kActual; ++i) {
-            gtSet.insert(gt[i]);
+            gtSet.insert(std::to_string(gt[i]));
         }
         size_t found = 0;
         size_t resK = std::min(k, res.size());
@@ -164,10 +165,10 @@ double CalculateSIFTRecall(
                 found++;
             }
         }
-        
+
         totalRecall += static_cast<double>(found) / kActual;
     }
-    
+
     return totalRecall / groundTruthFull.size();
 }
 
@@ -213,7 +214,7 @@ TEST(SIFTTest, DISABLED_SIFT1M_Recall) {
         .name = "sift1m",
         .dimensions = 128,
         .space = Space::L2,
-        .index = {.max_elements = vectors.size(), .M = 64, .ef_construction = 200}
+        .index_config = {.max_elements = vectors.size(), .hnsw_params = {.M = 64, .ef_construction = 200}}
     };
 
     Collection collection(collectionCfg);
@@ -222,7 +223,7 @@ TEST(SIFTTest, DISABLED_SIFT1M_Recall) {
     std::cout << "Building HNSW index..." << std::endl;
     start = std::chrono::high_resolution_clock::now();
     for (size_t i = 0; i < vectors.size(); ++i) {
-        collection.insert(i, vectors[i]);
+        collection.insert(std::to_string(i), vectors[i]);
     }
     auto build_time = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::high_resolution_clock::now() - start).count();
@@ -237,7 +238,7 @@ TEST(SIFTTest, DISABLED_SIFT1M_Recall) {
         std::cout << "Running searches..." << std::endl;
         start = std::chrono::high_resolution_clock::now();
         
-        std::vector<std::vector<IndexSearchResult>> results;
+        std::vector<std::vector<arrow::IndexSearchResult>> results;
         results.reserve(queries.size());
         
         // For L2 distance with 1M vectors, use EF=400 for >90% recall@100
@@ -278,14 +279,14 @@ TEST(SIFTTest, DISABLED_SIFT_Performance) {
             .name = "sift_bench",
             .dimensions = 128,
             .space = Space::L2,
-            .index = {.max_elements = vectors.size(), .M = 64, .ef_construction = 200}
+            .index_config = {.max_elements = vectors.size(), .hnsw_params = {.M = 64, .ef_construction = 200}}
         };
 
         Collection collection(cfg);
         
         auto start = std::chrono::high_resolution_clock::now();
         for (size_t i = 0; i < vectors.size(); ++i) {
-            collection.insert(i, vectors[i]);
+            collection.insert(std::to_string(i), vectors[i]);
         }
         auto build_time = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::high_resolution_clock::now() - start).count();

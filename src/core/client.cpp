@@ -3,7 +3,6 @@
 #include "arrow/collection.h"
 
 #include <filesystem>
-#include <iostream>
 #include <unordered_map>
 
 namespace arrow {
@@ -53,7 +52,11 @@ public:
         if (collectionPath.empty()) {
             collection = std::make_unique<Collection>(effectiveConfig);
         } else {
-            collection = std::make_unique<Collection>(effectiveConfig, collectionPath);
+            auto result = Collection::create(effectiveConfig, collectionPath);
+            if (!result.ok()) {
+                return result.status();
+            }
+            collection = std::make_unique<Collection>(std::move(result.value()));
         }
 
         Collection* ptr = collection.get();
@@ -73,11 +76,7 @@ public:
         if (!options_.dataDir.empty()) {
             std::filesystem::path collectionPath = options_.dataDir / name;
             std::filesystem::path metaPath = collectionPath / "meta.json";
-            std::cout << "Checking if collection exists at " << collectionPath << "\n";
-            std::cout << "Checking if meta.json exists at " << metaPath << "\n";
-
             if (std::filesystem::exists(metaPath)) {
-                std::cout << "Collection found on disk. Loading...\n";
                 auto loadResult = Collection::load(collectionPath.string());
                 if (loadResult.ok()) {
                     auto collection = std::make_unique<Collection>(std::move(loadResult.value()));
@@ -87,8 +86,6 @@ public:
                 }
             }
         }
-        std::cout << "Collection not found on disk. Creating...\n";
-
         return createCollection(name, config);
     }
 
@@ -180,6 +177,9 @@ private:
 Client::Client(const ClientOptions& options)
     : pImpl_(std::make_unique<Impl>(options)) {}
 
+Client::Client(std::filesystem::path dataDir)
+    : Client(ClientOptions{.dataDir = std::move(dataDir)}) {}
+
 Client::~Client() = default;
 
 Client::Client(Client&&) noexcept = default;
@@ -197,6 +197,11 @@ utils::Result<Collection*> Client::getCollection(const std::string& name) {
 utils::Result<Collection*> Client::getOrCreateCollection(const std::string& name,
                                                          const CollectionConfig& config) {
     return pImpl_->getOrCreateCollection(name, config);
+}
+
+utils::Result<Collection*> Client::getOrCreateCollection(const std::string& name) {
+    static constexpr uint32_t kDefaultEmbeddingDim = 384;  // all-MiniLM-L6-v2
+    return pImpl_->getOrCreateCollection(name, {.dimensions = kDefaultEmbeddingDim});
 }
 
 utils::Status Client::dropCollection(const std::string& name) {

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstring>
 #include <deque>
 #include <limits>
@@ -21,10 +22,30 @@ public:
             visitedEpoch = new epoch_t[numElements];
           }
 
+    ~VisitedList() {
+        delete[] visitedEpoch;
+    }
+
     VisitedList(const VisitedList&) = delete;
     VisitedList& operator=(const VisitedList&) = delete;
-    VisitedList(VisitedList&&) = default;
-    VisitedList& operator=(VisitedList&&) = default;
+
+    VisitedList(VisitedList&& other) noexcept
+        : curEpoch(other.curEpoch),
+          visitedEpoch(other.visitedEpoch),
+          numElements(other.numElements) {
+        other.visitedEpoch = nullptr;
+    }
+
+    VisitedList& operator=(VisitedList&& other) noexcept {
+        if (this != &other) {
+            delete[] visitedEpoch;
+            curEpoch = other.curEpoch;
+            visitedEpoch = other.visitedEpoch;
+            numElements = other.numElements;
+            other.visitedEpoch = nullptr;
+        }
+        return *this;
+    }
 
     void reset() noexcept {
         ++curEpoch;
@@ -38,7 +59,7 @@ public:
 class VisitedListPool {
     std::deque<VisitedList *> pool_;
     std::mutex poolGuard_;
-    size_t numElements_;
+    std::atomic<size_t> numElements_;
 
 public:
     VisitedListPool(size_t initMaxPools, size_t numElementsParam)
@@ -51,16 +72,30 @@ public:
     VisitedListPool(const VisitedListPool&) = delete;
     VisitedListPool& operator=(const VisitedListPool&) = delete;
 
+    /// Update the expected number of elements. Existing pooled lists that are
+    /// too small will be discarded on next acquire.
+    void resize(size_t newNumElements) {
+        numElements_.store(newNumElements, std::memory_order_release);
+    }
+
     VisitedList* getFreeVisitedList() {
-        VisitedList* vlist;
+        VisitedList* vlist = nullptr;
+        size_t requiredSize = numElements_.load(std::memory_order_acquire);
         {
             std::unique_lock lock(poolGuard_);
-            if (!pool_.empty()) {
+            while (!pool_.empty()) {
                 vlist = pool_.front();
                 pool_.pop_front();
-            } else {
-                vlist = new VisitedList(numElements_);
+                // Discard lists that are too small for the current index size
+                if (vlist->numElements >= requiredSize) {
+                    break;
+                }
+                delete vlist;
+                vlist = nullptr;
             }
+        }
+        if (!vlist) {
+            vlist = new VisitedList(requiredSize);
         }
         vlist->reset();
         return vlist;

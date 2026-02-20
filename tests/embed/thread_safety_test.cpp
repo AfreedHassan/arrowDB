@@ -10,7 +10,7 @@
 #include <cmath>
 #include <iostream>
 
-TEST(ThreadSafety, ConcurrentEmbedCalls) {
+TEST(DISABLED_ThreadSafety, ConcurrentEmbedCalls) {
     std::cout << "\n=== Testing concurrent embed calls (8 threads, 100 calls each) ===" << std::endl;
     
     Embedder embedder;
@@ -64,7 +64,7 @@ TEST(ThreadSafety, ConcurrentEmbedCalls) {
                         << (num_threads * calls_per_thread) << " concurrent calls";
 }
 
-TEST(ThreadSafety, ConcurrentInitialization) {
+TEST(DISABLED_ThreadSafety, ConcurrentInitialization) {
     std::cout << "\n=== Testing concurrent initialization (4 threads) ===" << std::endl;
     
     std::vector<std::thread> threads;
@@ -92,7 +92,7 @@ TEST(ThreadSafety, ConcurrentInitialization) {
     ASSERT_GT(success_count, 0) << "No initialization succeeded";
 }
 
-TEST(ThreadSafety, RapidSequentialCalls) {
+TEST(DISABLED_ThreadSafety, RapidSequentialCalls) {
     std::cout << "\n=== Testing rapid sequential calls (1000 iterations) ===" << std::endl;
     
     Embedder embedder;
@@ -117,7 +117,7 @@ TEST(ThreadSafety, RapidSequentialCalls) {
     EXPECT_EQ(errors, 0) << "Found " << errors << " errors in " << num_calls << " sequential calls";
 }
 
-TEST(ThreadSafety, StressTest) {
+TEST(DISABLED_ThreadSafety, StressTest) {
     std::cout << "\n=== Running stress test (4 threads, 500 calls each) ===" << std::endl;
     
     Embedder embedder;

@@ -36,9 +36,9 @@ class Status {
  public:
   Status() noexcept : code_(StatusCode::kOk) {}
   explicit Status(StatusCode code) noexcept : code_(code) {}
-  Status(StatusCode code, const std::string& msg) noexcept
+  Status(StatusCode code, const std::string& msg)
       : code_(code), message_(msg) {}
-  Status(StatusCode code, std::string&& msg) noexcept
+  Status(StatusCode code, std::string&& msg)
       : code_(code), message_(std::move(msg)) {}
 
   bool ok() const noexcept {

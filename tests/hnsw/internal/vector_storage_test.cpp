@@ -8,7 +8,7 @@
 #include <vector>
 #include <random>
 
-#include "internal/hnsw_index.h"
+#include "index/hnsw_index.h"
 #include "index/hnsw/hnsw.cpp"
 #include "index/hnsw/space_ip.h"
 
@@ -145,7 +145,7 @@ TEST(VectorStorageTest, HNSWIndexStoresCorrectly) {
     size_t correct = 0;
     for (size_t i = 0; i < num_vectors; ++i) {
         auto results = index.search(vectors[i], 1, 100);
-        if (!results.empty() && results[0].id == static_cast<VectorID>(i + 1)) {
+        if (!results.empty() && results[0].id == static_cast<InternalID>(i + 1)) {
             correct++;
         }
     }

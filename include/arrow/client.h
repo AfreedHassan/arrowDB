@@ -45,6 +45,9 @@ public:
     /// @param options Client configuration options
     explicit Client(const ClientOptions& options);
 
+    /// Convenience constructor: opens/creates a database at the given path.
+    explicit Client(std::filesystem::path dataDir);
+
     /// Destructor - closes all collections gracefully.
     ~Client();
 
@@ -82,6 +85,9 @@ public:
     /// @return Pointer to the collection (existing or newly created)
     utils::Result<Collection*> getOrCreateCollection(const std::string& name,
                                                       const CollectionConfig& config);
+
+    /// Convenience overload using default embedding dimensions (384).
+    utils::Result<Collection*> getOrCreateCollection(const std::string& name);
 
     /// Drop a collection.
     ///

@@ -1,9 +1,10 @@
 #include <gtest/gtest.h>
-#include "internal/hnsw_index.h"
+#include "index/hnsw_index.h"
 #include "test_util.h"
 #include <filesystem>
 #include <fstream>
 #include <stdexcept>
+#include <unordered_set>
 
 using namespace arrow;
 using arrow::testing::RandomVector;
@@ -96,7 +97,7 @@ TEST_F(HNSWIndexTest, RecallAt10) {
     
     for (size_t q = 0; q < num_queries; ++q) {
         std::vector<float> query = RandomVector(dim, gen);
-        std::vector<IndexSearchResult> results = index.search(query, k, 100);
+        std::vector<HNSWSearchResult> results = index.search(query, k, 100);
         
         // Verify we got k results
         EXPECT_EQ(results.size(), k);
@@ -105,9 +106,10 @@ TEST_F(HNSWIndexTest, RecallAt10) {
 
 TEST_F(HNSWIndexTest, DimensionMismatch) {
     HNSWIndex index(3, Space::Cosine);
-    
+
     EXPECT_EQ(index.insert(1, {1.0f, 0.0f}), false);
-    EXPECT_THROW(index.search({1.0f, 0.0f}, 1), std::invalid_argument);
+    auto results = index.search({1.0f, 0.0f}, 1);
+    EXPECT_TRUE(results.empty());
 }
 
 // ============================================================================
@@ -249,75 +251,90 @@ TEST_F(HNSWIndexTest, LoadIndexReplacesExisting) {
     EXPECT_EQ(results[0].id, 10);
 }
 
-TEST_F(HNSWIndexTest, LoadIndexThrowsOnInvalidPath) {
+TEST_F(HNSWIndexTest, LoadIndexReturnsErrorOnInvalidPath) {
     HNSWIndex index(3, Space::Cosine);
-    
-    // Try to load from non-existent file
-    EXPECT_THROW(
-        index.loadIndex(GetTestPath("nonexistent.bin")),
-        std::runtime_error
-    );
+
+    // Try to load from non-existent file — returns error Status
+    auto status = index.loadIndex(GetTestPath("nonexistent.bin"));
+    EXPECT_FALSE(status.ok());
 }
 
-TEST_F(HNSWIndexTest, LoadIndexThrowsOnCorruptedFile) {
+TEST_F(HNSWIndexTest, LoadIndexReturnsErrorOnCorruptedFile) {
     // Create a corrupted file
     std::string path = GetTestPath("corrupted.bin");
     std::ofstream file(path, std::ios::binary);
     file << "This is not a valid index file";
     file.close();
-    
+
     HNSWIndex index(3, Space::Cosine);
-    
-    // Should throw when trying to load corrupted file
-    EXPECT_THROW(index.loadIndex(path), std::runtime_error);
+
+    // Should return error Status for corrupted file
+    auto status = index.loadIndex(path);
+    EXPECT_FALSE(status.ok());
 }
 
 TEST_F(HNSWIndexTest, LoadIndexRequiresMatchingDimension) {
     // Create and save index with dimension 3
     HNSWIndex original(3, Space::Cosine);
     original.insert(1, {1.0f, 0.0f, 0.0f});
-    
+
     std::string path = GetTestPath("dim3_index.bin");
     original.saveIndex(path);
-    
-    // Try to load with wrong dimension - this should fail
-    // Note: hnswlib may or may not validate dimension at load time
-    // The actual behavior depends on hnswlib implementation
+
+    // Loading with wrong dimension currently succeeds at the hnsw layer
+    // but the wrapper's dim_ field mismatches the loaded index.
+    // Verify that search is rejected due to query dimension check.
     HNSWIndex wrongDim(5, Space::Cosine);
-    
-    // This might throw or might succeed but produce incorrect results
-    // We'll test that it at least doesn't crash
-    try {
-        wrongDim.loadIndex(path);
-        // If it doesn't throw, the dimension mismatch might be detected later
-        // or might cause incorrect behavior
-    } catch (const std::exception& e) {
-        // Expected if dimension validation occurs
-        SUCCEED();
-    }
+    auto status = wrongDim.loadIndex(path);
+
+    // Even if load succeeds, searching with dim=5 query must fail or return empty
+    // because the wrapper checks query.size() != dim_ before calling into hnsw.
+    auto results = wrongDim.search({1.0f, 0.0f, 0.0f}, 1);
+    EXPECT_TRUE(results.empty())
+        << "Search with mismatched query dimension should return empty results";
 }
 
 TEST_F(HNSWIndexTest, LoadIndexRequiresMatchingSpace) {
-    // Create and save L2 index
+    // Create and save L2 index with distinct vectors
     HNSWIndex l2Index(3, Space::L2);
     l2Index.insert(1, {1.0f, 0.0f, 0.0f});
-    
+    l2Index.insert(2, {0.707f, 0.707f, 0.0f});
+    l2Index.insert(3, {0.0f, 1.0f, 0.0f});
+
     std::string path = GetTestPath("l2_index.bin");
     l2Index.saveIndex(path);
-    
-    // Try to load with Cosine space
-    // Note: hnswlib may not validate space at load time
+
+    // Load the L2-built index into a Cosine-configured wrapper.
+    // The load succeeds but search scores are computed with the wrong
+    // distance function, so the ordering may differ from the L2 index.
     HNSWIndex cosineIndex(3, Space::Cosine);
-    
-    // This might work but produce incorrect results
-    // We test that it doesn't crash
-    try {
-        cosineIndex.loadIndex(path);
-        // If successful, results might be incorrect due to space mismatch
-    } catch (const std::exception& e) {
-        // Expected if space validation occurs
-        SUCCEED();
+    auto status = cosineIndex.loadIndex(path);
+    // Load itself may succeed (hnsw doesn't check space type)
+    // But scores will be computed differently because the space_ object
+    // is InnerProduct-based, not L2-based.
+
+    // Verify the loaded index has the same number of elements
+    EXPECT_EQ(cosineIndex.size(), 3);
+
+    // The key insight: L2 results and "cosine" results will use different
+    // distance metrics, so the scores should differ.
+    auto l2Results = l2Index.search({1.0f, 0.0f, 0.0f}, 3);
+    auto cosResults = cosineIndex.search({1.0f, 0.0f, 0.0f}, 3);
+
+    ASSERT_EQ(l2Results.size(), 3);
+    ASSERT_EQ(cosResults.size(), 3);
+
+    // Scores should differ because different distance functions are used
+    // (L2 returns positive distances, cosine returns negative similarity)
+    bool scoresDiffer = false;
+    for (size_t i = 0; i < l2Results.size(); ++i) {
+      if (std::abs(l2Results[i].score - cosResults[i].score) > 1e-6f) {
+        scoresDiffer = true;
+        break;
+      }
     }
+    EXPECT_TRUE(scoresDiffer)
+        << "Scores should differ when index is loaded with wrong space type";
 }
 
 TEST_F(HNSWIndexTest, SaveEmptyIndex) {
@@ -358,5 +375,169 @@ TEST_F(HNSWIndexTest, SaveLargeIndex) {
     HNSWIndex loaded(dim, Space::Cosine);
     EXPECT_NO_THROW(loaded.loadIndex(path));
     EXPECT_EQ(loaded.size(), n);
+}
+
+// ============================================================================
+// Scalar Quantization (SQ8) Tests
+// ============================================================================
+
+TEST_F(HNSWIndexTest, SQ_InsertAndSearch) {
+    const size_t dim = 128;
+    HNSWConfig config;
+    config.maxElements = 1000;
+    config.M = 16;
+    config.efConstruction = 100;
+    config.quantize = true;
+
+    HNSWIndex index(dim, Space::L2, config);
+
+    std::mt19937 gen(42);
+    const size_t n = 500;
+    std::vector<std::vector<float>> vectors(n);
+    for (size_t i = 0; i < n; ++i) {
+        vectors[i] = RandomVector(dim, gen);
+        EXPECT_TRUE(index.insert(i, vectors[i]));
+    }
+    EXPECT_EQ(index.size(), n);
+
+    // Search should return results
+    auto results = index.search(vectors[0], 10, 200);
+    EXPECT_EQ(results.size(), 10);
+    // The closest result should be the query itself
+    EXPECT_EQ(results[0].id, 0);
+}
+
+TEST_F(HNSWIndexTest, SQ_RecallComparedToFloat32) {
+    const size_t dim = 128;
+    const size_t n = 1000;
+    const size_t k = 10;
+    const size_t ef = 200;
+
+    // Build float32 index
+    HNSWConfig configFloat;
+    configFloat.maxElements = n;
+    configFloat.M = 32;
+    configFloat.efConstruction = 200;
+    configFloat.quantize = false;
+    HNSWIndex floatIndex(dim, Space::L2, configFloat);
+
+    // Build SQ index
+    HNSWConfig configSQ = configFloat;
+    configSQ.quantize = true;
+    HNSWIndex sqIndex(dim, Space::L2, configSQ);
+
+    std::mt19937 genInsert(42);
+    std::vector<std::vector<float>> vectors(n);
+    for (size_t i = 0; i < n; ++i) {
+        vectors[i] = RandomVector(dim, genInsert);
+        floatIndex.insert(i, vectors[i]);
+        sqIndex.insert(i, vectors[i]);
+    }
+
+    // Compare recall: SQ should achieve >= 90% of float32's recall
+    size_t sqMatches = 0;
+    const size_t numQueries = 50;
+    std::mt19937 genQuery(10000);
+    for (size_t q = 0; q < numQueries; ++q) {
+        auto query = RandomVector(dim, genQuery);
+        auto floatResults = floatIndex.search(query, k, ef);
+        auto sqResults = sqIndex.search(query, k, ef);
+
+        // Count how many SQ results appear in float32 results
+        std::unordered_set<InternalID> floatSet;
+        for (const auto& r : floatResults) floatSet.insert(r.id);
+        for (const auto& r : sqResults) {
+            if (floatSet.count(r.id)) ++sqMatches;
+        }
+    }
+
+    double sqRecall = static_cast<double>(sqMatches) / (numQueries * k);
+    EXPECT_GE(sqRecall, 0.90) << "SQ recall (" << sqRecall
+        << ") should be >= 90% of float32 results";
+}
+
+TEST_F(HNSWIndexTest, SQ_InnerProductSpace) {
+    const size_t dim = 64;
+    HNSWConfig config;
+    config.maxElements = 500;
+    config.M = 16;
+    config.efConstruction = 100;
+    config.quantize = true;
+
+    HNSWIndex index(dim, Space::InnerProduct, config);
+
+    std::mt19937 gen(42);
+    const size_t n = 200;
+    for (size_t i = 0; i < n; ++i) {
+        auto vec = RandomVector(dim, gen);  // Already normalized by RandomVector
+        EXPECT_TRUE(index.insert(i, vec));
+    }
+
+    auto query = RandomVector(dim, gen);
+    auto results = index.search(query, 10, 200);
+    EXPECT_EQ(results.size(), 10);
+}
+
+TEST_F(HNSWIndexTest, SQ_PersistenceRoundTrip) {
+    const size_t dim = 64;
+    const size_t n = 200;
+    HNSWConfig config;
+    config.maxElements = 500;
+    config.M = 16;
+    config.efConstruction = 100;
+    config.quantize = true;
+
+    HNSWIndex index(dim, Space::L2, config);
+    std::mt19937 gen(42);
+    std::vector<std::vector<float>> vectors(n);
+    for (size_t i = 0; i < n; ++i) {
+        vectors[i] = RandomVector(dim, gen);
+        index.insert(i, vectors[i]);
+    }
+
+    // Save and reload
+    auto path = GetTestPath("sq_index.bin");
+    EXPECT_TRUE(index.saveIndex(path).ok());
+
+    HNSWIndex loaded(dim, Space::L2, config);
+    EXPECT_TRUE(loaded.loadIndex(path).ok());
+    EXPECT_EQ(loaded.size(), n);
+
+    // Search results should be similar
+    auto query = RandomVector(dim, gen);
+    auto origResults = index.search(query, 10, 200);
+    auto loadedResults = loaded.search(query, 10, 200);
+
+    EXPECT_EQ(origResults.size(), loadedResults.size());
+
+    // At least 8 of top 10 should match (allowing for minor differences)
+    std::unordered_set<InternalID> origSet;
+    for (const auto& r : origResults) origSet.insert(r.id);
+    size_t matches = 0;
+    for (const auto& r : loadedResults) {
+        if (origSet.count(r.id)) ++matches;
+    }
+    EXPECT_GE(matches, 8) << "Loaded SQ index should produce similar results";
+}
+
+TEST_F(HNSWIndexTest, SQ_AutoResize) {
+    const size_t dim = 32;
+    HNSWConfig config;
+    config.maxElements = 10;  // Small initial capacity
+    config.M = 8;
+    config.efConstruction = 50;
+    config.quantize = true;
+
+    HNSWIndex index(dim, Space::L2, config);
+
+    std::mt19937 gen(42);
+    // Insert more than initial capacity to trigger resize
+    for (size_t i = 0; i < 50; ++i) {
+        EXPECT_TRUE(index.insert(i, RandomVector(dim, gen)));
+    }
+    EXPECT_EQ(index.size(), 50);
+
+    auto results = index.search(RandomVector(dim, gen), 5, 50);
+    EXPECT_EQ(results.size(), 5);
 }
 

@@ -7,12 +7,31 @@
 #include <string>
 #include <vector>
 
+#include "arrow/filter.h"
 #include "arrow/options.h"
 #include "arrow/types.h"
 #include "arrow/utils/result.h"
 #include "arrow/utils/status.h"
 
 namespace arrow {
+
+/// Pre-computed filter bitmap for fast repeated filtered searches.
+/// Build once with Collection::prepareFilter(), then pass to search()/query().
+class PreparedFilter {
+public:
+    ~PreparedFilter();
+    PreparedFilter(PreparedFilter&&) noexcept;
+    PreparedFilter& operator=(PreparedFilter&&) noexcept;
+
+    PreparedFilter(const PreparedFilter&) = delete;
+    PreparedFilter& operator=(const PreparedFilter&) = delete;
+
+private:
+    friend class Collection;
+    struct Impl;
+    std::unique_ptr<Impl> pImpl_;
+    PreparedFilter(std::unique_ptr<Impl> impl);
+};
 
 /**
  * @brief A collection of vectors with a specific configuration.
@@ -21,20 +40,24 @@ namespace arrow {
  * dimension, distance space, and data type. It serves as the primary
  * interface for vector database operations.
  *
- * Default HNSW parameters are optimized for large datasets (100K+ vectors):
- * - M=64: Provides 91-92% recall@10 for 100K vectors
+ * Default HNSW parameters are optimized for ≤100K vectors:
+ * - M=16: Optimal for ≤100K vectors (benchmarked)
  * - efConstruction=200: Balanced build time and quality
- * - Default EF search=200: Provides ~91% recall@10 for 100K vectors
+ * - Default EF search=200: Provides ~91% recall@10
  */
 class Collection {
 public:
-    /// Constructs a Collection with the given configuration.
-    /// IndexConfig is embedded in CollectionConfig.
+    /// Creates an in-memory Collection with the given configuration.
     explicit Collection(const CollectionConfig& config);
 
-    /// Constructs a Collection with persistence path for durability.
-    Collection(const CollectionConfig& config,
-               const std::filesystem::path& persistencePath);
+    /// Creates a persistent Collection with file locking and WAL.
+    ///
+    /// @param config Collection configuration
+    /// @param persistencePath Directory for persistence data
+    /// @return The Collection, or error (e.g., file lock held by another process)
+    static utils::Result<Collection> create(
+        const CollectionConfig& config,
+        const std::filesystem::path& persistencePath);
 
     /// Destructor
     ~Collection();
@@ -59,14 +82,39 @@ public:
     /// Get the number of vectors in the collection.
     size_t size() const;
 
+    /// Insert a vector with an auto-generated UUID.
+    ///
+    /// @param vec Vector data (must match collection dimension)
+    /// @param metadata Optional metadata
+    /// @return The generated VectorID, or error
+    utils::Result<VectorID> insert(const std::vector<float>& vec, Metadata metadata = {});
+
     /// Insert a vector into the collection.
     ///
     /// @param id Unique identifier for the vector
     /// @param vec Vector data (must match collection dimension)
     /// @return Status indicating success or failure
-    utils::Status insert(VectorID id, const std::vector<float>& vec, Metadata metadata = {});
+    utils::Status insert(const VectorID& id, const std::vector<float>& vec, Metadata metadata = {});
 
     utils::Status insert(const std::vector<std::string>& data);
+
+    /// Insert a document (vector + metadata + optional ID).
+    ///
+    /// @param doc Document with embedding, metadata, and optional ID
+    /// @return The VectorID (generated if doc.id was empty), or error
+    utils::Result<VectorID> insert(Document doc);
+
+    /// Insert a batch of text strings (embeds each, stores text as metadata).
+    ///
+    /// @param texts Vector of text strings to embed and insert
+    /// @return Result containing BatchInsertResult with per-vector status
+    utils::Result<BatchInsertResult> insertBatch(const std::vector<std::string>& texts);
+
+    /// Insert a batch of documents with partial success semantics.
+    ///
+    /// @param docs Vector of documents to insert
+    /// @return Result containing BatchInsertResult with per-vector status
+    utils::Result<BatchInsertResult> insertBatch(std::vector<Document> docs);
 
     /// Insert a batch of vectors with partial success semantics.
     ///
@@ -79,8 +127,14 @@ public:
     ///
     /// @param id Vector identifier
     /// @param metadata Metadata to associate with the vector
-    void setMetadata(VectorID id, const Metadata& metadata);
-    Metadata getMetadata(VectorID id);
+    /// @return Status indicating success or failure
+    utils::Status setMetadata(const VectorID& id, const Metadata& metadata);
+
+    /// Get metadata for a vector.
+    ///
+    /// @param id Vector identifier
+    /// @return Result containing metadata or error if vector not found
+    utils::Result<Metadata> getMetadata(const VectorID& id);
 
     /// Search for k nearest neighbors.
     ///
@@ -92,9 +146,9 @@ public:
                                           uint32_t k,
                                           uint32_t ef = 200) const;
 
-    std::vector<IndexSearchResult> query(const std::string& query,
-                                          uint32_t k,
-                                          uint32_t ef = 200) const; 
+    SearchResult query(const std::string& query,
+                       uint32_t k,
+                       uint32_t ef = 200) const;
 
     /// Query for k nearest neighbors with metadata.
     ///
@@ -104,6 +158,12 @@ public:
     /// @return SearchResult with hits containing id, score, and metadata
     SearchResult query(const std::vector<float>& query,
                        uint32_t k,
+                       uint32_t ef = 200) const;
+
+    /// Query with metadata filter (returns SearchResult with metadata).
+    SearchResult query(const std::vector<float>& query,
+                       uint32_t k,
+                       const MetadataFilter& filter,
                        uint32_t ef = 200) const;
 
     /// Search for k nearest neighbors for multiple queries in parallel.
@@ -117,11 +177,69 @@ public:
         uint32_t k,
         uint32_t ef = 200) const;
 
+    /// Search for k nearest neighbors with metadata filtering.
+    ///
+    /// @param query Query vector (must match collection dimension)
+    /// @param k Number of results to return
+    /// @param filter Predicate applied to each candidate's metadata
+    /// @param ef Search beam width (higher = better recall, slower)
+    /// @return Vector of search results passing the filter
+    std::vector<IndexSearchResult> search(const std::vector<float>& query,
+                                          uint32_t k,
+                                          const MetadataFilter& filter,
+                                          uint32_t ef = 200) const;
+
+    /// Pre-compute a filter bitmap for fast repeated filtered searches.
+    /// Build once, then pass to search()/query() for each query.
+    PreparedFilter prepareFilter(const MetadataFilter& filter) const;
+
+    /// Search with a pre-computed filter bitmap (fast, no per-query filter eval).
+    std::vector<IndexSearchResult> search(const std::vector<float>& query,
+                                          uint32_t k,
+                                          const PreparedFilter& filter,
+                                          uint32_t ef = 200) const;
+
+    /// Query with a pre-computed filter bitmap (returns SearchResult with metadata).
+    SearchResult query(const std::vector<float>& query,
+                       uint32_t k,
+                       const PreparedFilter& filter,
+                       uint32_t ef = 200) const;
+
+    /// Retrieve a vector by ID.
+    ///
+    /// @param id Vector identifier
+    /// @return Result containing the vector data or error
+    utils::Result<std::vector<float>> get(const VectorID& id) const;
+
+    /// Update vector data and/or metadata for an existing ID.
+    ///
+    /// @param id Vector identifier (must already exist)
+    /// @param vec New vector data (must match collection dimension)
+    /// @param metadata New metadata (replaces existing)
+    /// @return Status indicating success or failure
+    utils::Status update(const VectorID& id, const std::vector<float>& vec,
+                         Metadata metadata = {});
+
+    /// Insert or update a vector.
+    ///
+    /// @param id Vector identifier
+    /// @param vec Vector data (must match collection dimension)
+    /// @param metadata Metadata to associate with the vector
+    /// @return Status indicating success or failure
+    utils::Status upsert(const VectorID& id, const std::vector<float>& vec,
+                         Metadata metadata = {});
+
     /// Remove a vector from the collection.
     ///
     /// @param id Vector identifier to remove
     /// @return Status indicating success or failure
-    utils::Status remove(VectorID id);
+    utils::Status remove(const VectorID& id);
+
+    /// Apply post-build optimizations for best search performance.
+    /// When quantization is enabled, switches to global quantization with
+    /// integer-domain distance kernels. Also reorders the graph for cache locality.
+    /// No-op if already optimized or quantization is disabled.
+    utils::Status optimize();
 
     /// Save the collection to disk.
     ///
@@ -141,11 +259,25 @@ public:
     /// Check if collection recovered from WAL on load.
     bool recoveredFromWal() const;
 
+    /// Collection statistics.
+    struct Stats {
+      size_t vectorCount = 0;
+      size_t metadataCount = 0;
+      size_t maxCapacity = 0;
+      size_t dimensions = 0;
+    };
+
+    /// Get collection statistics.
+    Stats stats() const;
+
+    /// Print collection statistics as JSON to stdout.
+    void printStats() const;
+
 private:
     class Impl;
     std::unique_ptr<Impl> pImpl_;
 
-    // Private constructor used by load()
+    // Private constructor used by load() and create()
     Collection(std::unique_ptr<Impl> impl);
 };
 

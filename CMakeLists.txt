@@ -12,6 +12,23 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 
+option(ARROW_SANITIZE "Enable sanitizers (address, undefined, thread)" OFF)
+set(ARROW_SANITIZER "address" CACHE STRING "Sanitizer to use: address, undefined, thread")
+if(ARROW_SANITIZE)
+  add_compile_options(-fsanitize=${ARROW_SANITIZER} -fno-omit-frame-pointer)
+  add_link_options(-fsanitize=${ARROW_SANITIZER})
+endif()
+
+option(ARROW_COVERAGE "Enable code coverage instrumentation (use with Debug build)" OFF)
+if(ARROW_COVERAGE)
+  message(STATUS "Code coverage enabled")
+  add_compile_options(--coverage -fno-inline -O0)
+  add_link_options(--coverage)
+endif()
+
+# Warning flags for all targets
+add_compile_options(-Wall -Wextra -Wpedantic -Wno-unused-parameter)
+
 # ─────────────────────────────────────────────────────────────
 # Dependencies
 # ─────────────────────────────────────────────────────────────
@@ -38,17 +55,23 @@ FetchContent_Declare(
   GIT_REPOSITORY https://github.com/nlohmann/json.git
   GIT_TAG v3.11.3
 )
+FetchContent_Declare(
+  roaring
+  GIT_REPOSITORY https://github.com/RoaringBitmap/CRoaring.git
+  GIT_TAG v4.5.1
+)
 
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 set(BENCHMARK_ENABLE_TESTING OFF CACHE BOOL "" FORCE)
-FetchContent_MakeAvailable(hnswlib googletest benchmark json)
+set(ENABLE_ROARING_TESTS OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(hnswlib googletest benchmark json roaring)
 
 
 # ─────────────────────────────────────────────────────────────
 # Rust Embedding Library
 # ─────────────────────────────────────────────────────────────
-set(EMBED_LIB_DIR ${CMAKE_SOURCE_DIR}/embed/target/release)
-set(EMBED_INCLUDE_DIR ${CMAKE_SOURCE_DIR}/embed/include)
+set(EMBED_LIB_DIR ${CMAKE_CURRENT_SOURCE_DIR}/embed/target/release)
+set(EMBED_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/embed/include)
 
 find_library(ARROW_EMBED_LIB
     NAMES arrow_embed libarrow_embed
@@ -63,7 +86,7 @@ endif()
 
 message(STATUS "Embed library: ${ARROW_EMBED_LIB}")
 
-set(ARROW_EMBEDDING_MODEL_DIR ${CMAKE_SOURCE_DIR}/embed/models)
+set(ARROW_EMBEDDING_MODEL_DIR ${CMAKE_CURRENT_SOURCE_DIR}/embed/models)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -73,7 +96,10 @@ set(ARROW_EMBEDDING_MODEL_DIR ${CMAKE_SOURCE_DIR}/embed/models)
 add_library(arrow STATIC
     src/core/collection.cpp
     src/core/client.cpp
-    src/core/wal.cpp
+    src/wal/wal.cpp
+    src/wal/wal_writer.cpp
+    src/core/collection_persistence.cpp
+    src/core/id_space.cpp
     src/index/hnsw_index.cpp
     src/embedder/embedder.cpp
 )
@@ -86,11 +112,14 @@ target_include_directories(arrow
 )
 
 target_link_libraries(arrow
-    PUBLIC nlohmann_json::nlohmann_json
-    PRIVATE hnswlib ${ARROW_EMBED_LIB}
+    PRIVATE nlohmann_json::nlohmann_json hnswlib roaring ${ARROW_EMBED_LIB}
 )
 
-target_compile_options(arrow PRIVATE -O3 -march=native)
+target_compile_definitions(arrow PRIVATE
+    ARROW_EMBEDDING_MODEL_DIR="${ARROW_EMBEDDING_MODEL_DIR}"
+)
+
+# Optimization handled by CMAKE_BUILD_TYPE (Release = -O3, Debug = -g -O0)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -126,7 +155,7 @@ if(APPLE)
     )
 endif()
 
-target_compile_options(arrowDB PRIVATE -O3 -march=native)
+# Optimization handled by CMAKE_BUILD_TYPE
 
 
 # ─────────────────────────────────────────────────────────────
@@ -150,15 +179,17 @@ target_include_directories(tests PRIVATE
 target_link_libraries(tests PRIVATE
     arrow
     hnswlib
+    roaring
+    nlohmann_json::nlohmann_json
     GTest::gtest
     GTest::gtest_main
 )
 
 target_compile_definitions(tests PRIVATE
-    ARROW_EMBEDDING_MODEL_DIR="${CMAKE_SOURCE_DIR}/embed/models"
+    ARROW_EMBEDDING_MODEL_DIR="${CMAKE_CURRENT_SOURCE_DIR}/embed/models"
 )
 
-target_compile_options(tests PRIVATE -O3 -march=native)
+# Optimization handled by CMAKE_BUILD_TYPE
 
 # Test entries - organized by category
 # HNSW Tests
@@ -180,11 +211,13 @@ add_test(NAME MetadataTests COMMAND tests --gtest_filter=MetadataUnit.*)
 add_test(NAME MetadataIntegrationTests COMMAND tests --gtest_filter=MetadataIntegrationTest.*)
 add_test(NAME BinaryTests COMMAND tests --gtest_filter=BinaryTest.*)
 add_test(NAME ArrowDBTests COMMAND tests --gtest_filter=ArrowDBTest.*)
+add_test(NAME IDSpaceTests COMMAND tests --gtest_filter=IDSpaceTest.*)
+add_test(NAME RoaringBitmapTests COMMAND tests --gtest_filter=RoaringBitmapTest.*)
 
 # Grouped test suites
 add_test(NAME AllHNSWTests COMMAND tests --gtest_filter=HNSWIndexTest.*:IPDistanceTest.*:L2DistanceTest.*:BatchDistanceTest.*:VectorStorageTest.*)
 add_test(NAME AllEmbedderTests COMMAND tests --gtest_filter=EmbeddingDebug.*:DatasetTest.*:ThreadSafety.*)
-add_test(NAME AllCoreTests COMMAND tests --gtest_filter=BinaryTest.*:CollectionTest.*:CollectionWalTest.*:WALTest.*:MetadataUnit.*:MetadataIntegrationTest.*:ArrowDBTest.*)
+add_test(NAME AllCoreTests COMMAND tests --gtest_filter=BinaryTest.*:CollectionTest.*:CollectionWalTest.*:WALTest.*:MetadataUnit.*:MetadataIntegrationTest.*:ArrowDBTest.*:IDSpaceTest.*)
 
 add_test(NAME UnitTests COMMAND tests --gtest_filter="HNSWIndexTest.*:MetadataUnit.*:WALTest.*")
 add_test(NAME IntegrationTests COMMAND tests --gtest_filter="CollectionTest.*:CollectionWalTest.*:MetadataIntegrationTest.*")
@@ -201,13 +234,15 @@ add_executable(benchmarks ${BENCH_SOURCES})
 target_include_directories(benchmarks PRIVATE
     include
     src
+    ${roaring_SOURCE_DIR}/cpp
 )
 
 target_link_libraries(benchmarks PRIVATE
     arrow
     hnswlib
+    roaring
     benchmark::benchmark
     benchmark::benchmark_main
 )
 
-target_compile_options(benchmarks PRIVATE -O3 -march=native)
+# Optimization handled by CMAKE_BUILD_TYPE
