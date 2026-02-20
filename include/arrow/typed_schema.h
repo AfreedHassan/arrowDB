@@ -128,34 +128,13 @@ typename FieldT::storage_type extractField(const Metadata& meta) {
             return std::nullopt;
         }
     }
-    if constexpr (FieldT::fieldType == FieldType::Int64) {
-        if constexpr (FieldT::required) {
-            return it->second.asInt64();
-        } else {
-            if (!holds_alternative<int64_t>(it->second)) return std::nullopt;
-            return it->second.asInt64();
-        }
-    } else if constexpr (FieldT::fieldType == FieldType::Double) {
-        if constexpr (FieldT::required) {
-            return it->second.asDouble();
-        } else {
-            if (!holds_alternative<double>(it->second)) return std::nullopt;
-            return it->second.asDouble();
-        }
-    } else if constexpr (FieldT::fieldType == FieldType::String) {
-        if constexpr (FieldT::required) {
-            return std::string(it->second.asString());
-        } else {
-            if (!holds_alternative<std::string>(it->second)) return std::nullopt;
-            return std::string(it->second.asString());
-        }
-    } else if constexpr (FieldT::fieldType == FieldType::Bool) {
-        if constexpr (FieldT::required) {
-            return it->second.asBool();
-        } else {
-            if (!holds_alternative<bool>(it->second)) return std::nullopt;
-            return it->second.asBool();
-        }
+    using V = typename FieldT::value_type;
+    if constexpr (FieldT::required) {
+        return std::get<V>(it->second);
+    } else {
+        if (auto* p = std::get_if<V>(&it->second))
+            return *p;
+        return std::nullopt;
     }
 }
 
