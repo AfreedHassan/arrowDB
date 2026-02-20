@@ -1,205 +1,223 @@
 # ArrowDB
 
-A lightweight vector database implementation in C++. 
+A lightweight vector database in C++23 for similarity search.
 
 ## Features
 
-- **Vector Storage**: Configurable dimensions, support for multiple types of spaces (Cosine, L2, Inner Product)
-- **Similarity Search**: Fast approximate nearest neighbor search using HNSW index
-- **Batch Operations**: Efficient bulk insert and search for improved throughput
-- **Persistence**: Save and load collections with write-ahead logging for durability
-- **Data Ingestion**: Load 200K+ pre-computed embeddings from OpenWebText via Rust FFI
-- **Semantic Search**: Search with query embeddings to find similar content
-- **Text Embedding**: Generate embeddings using all-MiniLM-L6-v2 ONNX model
-- **Multi-Language**: C++ core with Rust integration for text processing and file I/O
+- **HNSW index** - Fast approximate nearest neighbor search with configurable M and ef parameters
+- **WAL durability** - Write-ahead logging with CRC32 checksums and crash recovery
+- **Metadata filtering** - Filter search results by metadata predicates (eq, gt, lt, in, and/or/not)
+- **SQ8 quantization** - Optional scalar quantization for reduced memory and faster search
+- **Thread-safe** - Concurrent reads and writes with `std::shared_mutex`
+- **Persistence** - Atomic save/load with fsync and file locking
+- **Bindings** - Native Node.js and Python bindings
+
+## Quick Start (C++)
+
+```cpp
+#include <arrow/arrow.h>
+
+arrow::CollectionConfig config;
+config.name = "my_collection";
+config.dimensions = 384;
+config.space = arrow::Space::Cosine;
+
+// In-memory collection
+auto collection = arrow::Collection(config);
+
+// Insert vectors
+std::vector<float> embedding(384, 0.1f);
+auto id = collection.insert(embedding, {{"category", std::string("science")}});
+
+// Search
+auto results = collection.search(embedding, 10);
+for (auto& r : results.value()) {
+    std::cout << r.id << " score=" << r.score << "\n";
+}
+
+// Filtered search
+auto filter = arrow::MetadataFilter::eq("category", std::string("science"));
+auto filtered = collection.search(embedding, 10, filter);
+
+// Persistent collection
+auto persistent = arrow::Collection::create(config, "/tmp/my_db");
+```
+
+## Quick Start (Python)
+
+```bash
+cd bindings/python && uv pip install -e .
+```
+
+```python
+import arrowdb
+
+# Using the Client API (manages persistence automatically)
+with arrowdb.Client("/tmp/my_db") as client:
+    config = arrowdb.CollectionConfig(name="docs", dimensions=384)
+    col = client.get_or_create_collection("docs", config)
+
+    col.insert("doc1", [0.1] * 384, {"category": "science"})
+    results = col.search([0.1] * 384, k=10)
+
+    # Filtered search
+    f = arrowdb.MetadataFilter.eq("category", "science")
+    results = col.search([0.1] * 384, k=10, filter=f)
+```
+
+## Quick Start (Node.js)
+
+```bash
+cd bindings/node && bun install && bun run build
+```
+
+```typescript
+import { Client, Collection } from "arrowdb";
+
+const client = new Client("/tmp/my_db");
+const col = client.createCollection("docs", { dimensions: 384 });
+
+col.insert("doc1", new Float32Array(384).fill(0.1), { category: "science" });
+const results = col.search(new Float32Array(384).fill(0.1), 10);
+
+client.close();
+```
+
+> **Note:** All Node.js operations are synchronous and block the event loop. For server use, run ArrowDB operations in a [Worker thread](https://nodejs.org/api/worker_threads.html).
+
+## API Overview
+
+| Operation | Description |
+|-----------|-------------|
+| `insert(id, vec, metadata)` | Insert a vector with optional metadata |
+| `insertBatch(docs)` | Batch insert with partial success semantics |
+| `search(query, k, ef)` | K-nearest neighbor search |
+| `search(query, k, filter, ef)` | Filtered search by metadata |
+| `query(vec, k, ef)` | Search with metadata in results |
+| `get(id)` | Retrieve a vector by ID |
+| `update(id, vec, metadata)` | Update an existing vector |
+| `upsert(id, vec, metadata)` | Insert or update |
+| `remove(id)` | Delete a vector (lazy, excluded from search) |
+| `setMetadata(id, meta)` | Set metadata on a vector |
+| `getMetadata(id)` | Get metadata for a vector |
+| `optimize()` | Apply SQ8 quantization + BFS graph reorder |
+| `save(path)` / `load(path)` | Persist and restore a collection |
+| `close()` | Flush WAL and save state |
+
+## Configuration
+
+```cpp
+arrow::CollectionConfig config;
+config.name = "my_collection";
+config.dimensions = 384;               // Vector dimension
+config.space = arrow::Space::Cosine;   // Cosine, L2, or InnerProduct
+
+config.index_config.max_elements = 1000000;          // Initial HNSW capacity (auto-grows)
+config.index_config.quantization = arrow::Quantization::INT8;  // SQ8 quantization
+config.index_config.hnsw_params.M = 16;              // Max connections per node
+config.index_config.hnsw_params.ef_construction = 200; // Build beam width
+config.index_config.hnsw_params.ef_search = 200;     // Search beam width
+```
+
+## Metadata Filtering
+
+```cpp
+using arrow::MetadataFilter;
+
+auto f1 = MetadataFilter::eq("status", std::string("active"));
+auto f2 = MetadataFilter::gt("score", 0.8);
+auto f3 = MetadataFilter::in("tag", {std::string("ml"), std::string("ai")});
+
+// Compose with and/or/not
+auto combined = MetadataFilter::and_(f1, MetadataFilter::or_(f2, f3));
+auto negated  = MetadataFilter::not_(f1);
+
+auto results = collection.search(query, 10, combined);
+```
+
+## Persistence
+
+Collections are saved as directories:
+
+```
+collection_dir/
+├── meta.json       # Collection config + schema version + recovery metadata
+├── index.bin       # HNSW index binary
+├── id_space.bin    # VectorID <-> InternalID mapping
+├── metadata.json   # Per-vector metadata
+└── wal/
+    └── db.wal      # Write-ahead log
+```
+
+- **Atomic writes**: data files written to `.tmp`, fsynced, then renamed
+- **Commit point**: `meta.json` is written last; incomplete saves are detected on load
+- **WAL replay**: on dirty shutdown, pending WAL entries are replayed before the collection becomes available
+- **File locking**: `flock()` prevents concurrent access from multiple processes
+
+## Performance
+
+Benchmarks on Apple Silicon (M-series), 384-dimensional vectors, Cosine space, M=16, ef=200:
+
+| Operation | 10K vectors | 100K vectors |
+|-----------|------------|-------------|
+| Insert (in-memory) | 10,150 vec/s | 3,642 vec/s |
+| Insert (persistent) | 8,742 vec/s | 3,272 vec/s |
+| Insert (batch) | 9,909 vec/s | 3,459 vec/s |
+| Save | 45ms | 146ms |
+| Search | 110us (9,061 qps) | 356us (2,807 qps) |
+| Filtered search (50% selectivity) | 201us (4,979 qps) | 879us (1,138 qps) |
 
 ## Building
 
 ```bash
-mkdir build
-cd build
+mkdir -p build && cd build
 cmake ..
-make
+make -j$(sysctl -n hw.ncpu)   # macOS
+# make -j$(nproc)              # Linux
 ```
 
-## Usage
+### Binaries
 
-### Executables
-  - **arrowDB** - Interactive REPL for vector search (run without args) or CLI mode (with args)
-  - **tests** - Test suite
-  - **benchmarks** - Performance benchmarks
+- `./build/arrowDB` - Usage info
+- `./build/tests` - Test suite
+- `./build/benchmarks` - Performance benchmarks
 
-### Interactive REPL Mode
-
-Run ArrowDB without arguments to enter interactive mode:
+### Running Tests
 
 ```bash
-./arrowDB
+# All tests (skip embedder tests that require external model)
+./build/tests --gtest_filter="-DatasetTest.*:EmbeddingDebug.*:ThreadSafety.*:SIFTTest.*"
+
+# Specific suites
+./build/tests --gtest_filter=CollectionTest.*
+./build/tests --gtest_filter=HNSWIndexTest.*
+./build/tests --gtest_filter=WALTest.*
 ```
 
-This launches an interactive REPL with the following commands:
+### Dependencies (fetched automatically via CMake)
 
-**Commands:**
-- `.search <query>` - Search for similar vectors using your query text
-- `.help` - Display help message
-- `.exit` - Exit the REPL
+- hnswlib v0.8.0
+- Google Test v1.14.0
+- Google Benchmark v1.8.3
+- nlohmann/json v3.11.3
+- CRoaring (for bitmap-accelerated filtered search)
 
-**Example session:**
-```
-arrowdb> .search machine learning algorithms
-# ... search results displayed ...
-
-arrowdb> .search deep learning transformers
-# ... more results ...
-
-arrowdb> .exit
-Goodbye!
-```
-
-### Command-Line Mode
-
-Run ArrowDB with arguments for single command execution:
-
-```bash
-./arrowDB search "your query text" [-c <collection>] [-t <text_file>]
-./arrowDB ingest -e <embeddings_file> -i <ids_file> -t <text_file>
-```
-
-### Loading OpenWebText Dataset (200K Vectors)
-
-The Embedder class now includes dataset loading capabilities via Rust FFI:
-
-```cpp
-#include "embedder/embedder.h"
-
-Embedder embedder("models/all-MiniLM-L6-v2.onnx");
-
-// Load OpenWebText dataset with embeddings
-auto result = embedder.loadOpenWebText(
-    "openwebtext.txt",              // Text chunks file (one per line)
-    "openwebtext-embeddings.bin",   // Binary embeddings file (float32)
-    200000,                          // Number of chunks to load
-    40,                              // Minimum text length (characters)
-    200                              // Maximum text length (characters)
-);
-
-if (result) {
-    // Access loaded data
-    const auto& chunks = result->chunks;       // std::vector<std::string>
-    const auto& embeddings = result->embeddings; // std::vector<std::vector<float>>
-
-    // Insert into collection
-    for (size_t i = 0; i < chunks.size(); ++i) {
-        collection.insert(i, embeddings[i]);
-    }
-} else {
-    std::cerr << "Failed to load dataset\n";
-}
-```
-
-### Creating Dataset Files
-
-**Text file format** (openwebtext.txt):
-```
-One chunk of text with minimum 40 characters length
-Another text chunk meeting the length requirements
-And so on, one per line
-```
-
-**Embeddings file format** (openwebtext-embeddings.bin):
-- Binary file with float32 values
-- Format: flat array of all embeddings concatenated
-- Total size: num_chunks × 384 × 4 bytes
-- Little-endian byte order
-
-### Ingest Data
-```bash
- ./arrowDB
-```
-
-### Search Collection
-```bash
-./search "your query text here"
-```
-
-### Testing
-Run the full test suite:
-```bash
-./tests
-```
-
-Run specific test suites:
-```bash
-./tests --gtest_filter=CollectionTest.*
-./tests --gtest_filter=DatasetTest.*
-./tests --gtest_filter=HNSWIndexTest.*
-```
 ## Architecture
 
-### Core Components
-
-**Collection** - Main interface for vector database operations
-- Insert/search operations
-- Metadata management
-- Persistence to disk
-
-**HNSWIndex** - Hierarchical Navigable Small World graph
-- Approximate nearest neighbor search
-- Configurable M and ef parameters
-- Multiple space
-
-**Embedder** - Text embedding via ONNX Runtime
-- all-MiniLM-L6-v2 model integration
-- Dataset loading from files
-- L2 normalization
-
-**WAL (Write-Ahead Log)** - Durability and recovery
-- Binary format with CRC32 checksums
-- Transaction support
-- Atomic operations
-
-### Data Formats
-
-**Collections** are persisted as directories:
 ```
-collection_name/
-├── meta.json       # Configuration metadata
-├── index.bin       # HNSW index binary
-└── metadata.json   # Vector metadata
+Collection (public API, thread-safe via shared_mutex)
+├── HNSWIndex (wraps custom HNSW implementation)
+│   └── hnsw::HierarchicalNSW (graph + vector storage)
+├── IDSpace (VectorID <-> InternalID mapping with tombstones)
+├── WAL (write-ahead log for durability)
+└── CollectionPersistence (atomic save/load)
 ```
 
-**WAL** uses binary format with:
-- Magic number and version
-- CRC32 checksums (header + payload)
-- Transaction entries (INSERT, UPDATE, DELETE)
-
-## Requirements
-
-- C++23 compatible compiler
-- CMake 3.16 or higher
-- ONNX Runtime (for embeddings)
-- Rust toolchain (for dataset loading)
-
-## Performance
-
-Based on benchmarks with default config (M=64, EF=200):
-- **Insert throughput**: ~3-14k vectors/sec
-- **Search latency**: ~8-9ms for 100K vectors
-- **Recall**: ~91-92% recall@10 for approximate search
-- **Memory**: ~1KB per vector in HNSW graph
-
-## Testing
-
-Comprehensive test suite included:
-```bash
-make test           # Run all tests
-./tests --gtest_filter=DatasetTest.*  # Dataset loading tests
-./tests --gtest_filter=CollectionTest.*  # Collection tests
-./tests --gtest_filter=HNSWIndexTest.*  # Index tests
-```
-
-All 165 tests pass with no memory leaks.
+- **Collection** uses the Pimpl pattern to hide internals and provide a stable ABI
+- **Custom HNSW** implementation at `src/index/hnsw/hnsw.cpp` with built-in thread safety, scalar quantization, and BFS graph reordering
+- **WAL entries are logged after successful index insert** to avoid ghost entries on crash
+- **Error handling** uses `Status` and `Result<T>` (std::expected wrapper), not exceptions
 
 ## License
 
-This project is provided as-is and is built for fun (and maybe prod).
+MIT
