@@ -1,0 +1,32 @@
+{
+  "name": "arrowdb",
+  "version": "0.1.0",
+  "description": "Node.js bindings for ArrowDB vector database",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "install": "cmake-js compile",
+    "build": "cmake-js compile && tsc",
+    "rebuild": "cmake-js rebuild && tsc",
+    "test": "npm run build && node --test tests/*.test.js"
+  },
+  "dependencies": {
+    "cmake-js": "^7.3.0",
+    "node-addon-api": "^8.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "@types/node": "^22.0.0"
+  },
+  "cmake-js": {
+    "cmakeOptions": [
+      "-DCMAKE_BUILD_TYPE=Release"
+    ]
+  },
+  "files": [
+    "dist/",
+    "ext/",
+    "src/",
+    "CMakeLists.txt"
+  ]
+}
