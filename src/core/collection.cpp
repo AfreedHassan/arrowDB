@@ -129,7 +129,8 @@ public:
   uint32_t opsSinceLastSave_ = 0;
   uint32_t walPendingSyncs_ = 0;
   std::condition_variable_any cv_;
-  std::jthread compactionThread_;
+  std::atomic<bool> stopRequested_{false};
+  std::thread compactionThread_;
 
   utils::Status writeDirtyShutdownMarker() {
     if (!persistencePath_) {
@@ -145,11 +146,9 @@ public:
   }
 
   ~Impl() {
-    // Must notify the CV so the compaction thread can observe the stop request
-    // from jthread's destructor. Without this, the thread blocks on cv_.wait()
-    // forever since jthread::~jthread only calls request_stop() + join().
-    compactionThread_.request_stop();
+    stopRequested_.store(true, std::memory_order_release);
     cv_.notify_one();
+    if (compactionThread_.joinable()) compactionThread_.join();
   }
 
   explicit Impl(const CollectionConfig &config)
@@ -220,9 +219,8 @@ public:
 
   void startCompaction() {
     if (persistencePath_ && pWal_) {
-      compactionThread_ = std::jthread([this](std::stop_token st) {
-          compactionLoop(st);
-      });
+      stopRequested_.store(false, std::memory_order_release);
+      compactionThread_ = std::thread([this] { compactionLoop(); });
     }
   }
 
@@ -532,13 +530,13 @@ public:
     return utils::OkStatus();
   }
 
-  void compactionLoop(std::stop_token st) {
+  void compactionLoop() {
     std::unique_lock lock(mutex_);
-    while (!st.stop_requested()) {
+    while (!stopRequested_.load(std::memory_order_acquire)) {
       cv_.wait(lock, [&] {
-          return opsSinceLastSave_ >= kCompactionOpsThreshold || st.stop_requested();
+          return opsSinceLastSave_ >= kCompactionOpsThreshold || stopRequested_.load(std::memory_order_acquire);
           });
-      if (st.stop_requested()) break;
+      if (stopRequested_.load(std::memory_order_acquire)) break;
 
       // Flush deferred WAL entries before snapshotting state
       auto flushStatus = flushWal();
@@ -721,7 +719,7 @@ public:
   }
 
   utils::Status close() {
-    compactionThread_.request_stop();
+    stopRequested_.store(true, std::memory_order_release);
     cv_.notify_one();
 
     if (compactionThread_.joinable()) {

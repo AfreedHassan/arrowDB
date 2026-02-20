@@ -22,10 +22,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Select Xcode 16 (macOS)
-        if: runner.os == 'macOS'
-        run: sudo xcode-select -s /Applications/Xcode_16.0.app
-
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
