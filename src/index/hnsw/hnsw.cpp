@@ -21,6 +21,7 @@
 #include "impl_kernels.h"
 #include "scalar_quantizer.h"
 #include "impl_kernels_sq.h"
+#include <roaring/roaring.hh>
 
 namespace hnsw {
   using tableidx_t = uint32_t;
@@ -77,7 +78,7 @@ namespace hnsw {
       std::unique_ptr<VisitedListPool> visitedListPool_{nullptr};
 
       std::mutex globalMutex_;
-      mutable std::vector<std::shared_mutex> adjacencyMutexes_;
+      mutable std::vector<std::unique_ptr<std::shared_mutex>> adjacencyMutexes_;
       mutable std::vector<std::mutex> labelMutexes_;
 
       mutable std::mutex labelLookupMutex_;
@@ -137,9 +138,11 @@ namespace hnsw {
         bool quantize = false,
         SQDistType sqDistType = SQDistType::L2)
         : elementLevels_(maxElems),
-            adjacencyMutexes_(maxElems),
             labelMutexes_(MAX_LABEL_OPERATION_LOCKS),
             allowReuseDeleted_(allowReuseDeleted) {
+        adjacencyMutexes_.reserve(maxElems);
+        for (size_t i = 0; i < maxElems; ++i)
+            adjacencyMutexes_.push_back(std::make_unique<std::shared_mutex>());
         maxElements_ = maxElems;
         deletedElementCount_.store(0, std::memory_order_relaxed);
         kElemVecSize_ = s->getDataSize();
@@ -360,7 +363,10 @@ namespace hnsw {
 
         kLvl0AdjListSize_ = maxM0_ * sizeof(tableidx_t) + sizeof(linklistsize_t);
 
-        std::vector<std::shared_mutex>(maxElements_).swap(adjacencyMutexes_);
+        adjacencyMutexes_.clear();
+        adjacencyMutexes_.reserve(maxElements_);
+        for (size_t i = 0; i < maxElements_; ++i)
+            adjacencyMutexes_.push_back(std::make_unique<std::shared_mutex>());
         std::vector<std::mutex>(MAX_LABEL_OPERATION_LOCKS).swap(labelMutexes_);
 
         visitedListPool_.reset(new VisitedListPool(
@@ -450,13 +456,13 @@ namespace hnsw {
 
         elementLevels_.resize(newMaxElems);
 
-        // Grow adjacency mutexes: shared_mutex is not movable, so we must
-        // create a new vector and swap. This is safe because the Collection
-        // layer holds a unique_lock which prevents concurrent searches, and
-        // we hold globalMutex_ which prevents concurrent inserts.
+        // Grow adjacency mutexes: append new unique_ptrs so existing mutex
+        // pointers remain stable. This is safe for concurrent readers that
+        // hold shared_locks on existing mutexes.
         if (newMaxElems > adjacencyMutexes_.size()) {
-            std::vector<std::shared_mutex> newMutexes(newMaxElems);
-            adjacencyMutexes_.swap(newMutexes);
+            adjacencyMutexes_.reserve(newMaxElems);
+            for (size_t i = adjacencyMutexes_.size(); i < newMaxElems; ++i)
+                adjacencyMutexes_.push_back(std::make_unique<std::shared_mutex>());
         }
 
         // Reallocate base layer
@@ -716,7 +722,7 @@ namespace hnsw {
 
             // Scope for adjacency lock - release before batch distance computation
             {
-                std::shared_lock<std::shared_mutex> lock(adjacencyMutexes_[curNodeId]);
+                std::shared_lock<std::shared_mutex> lock(*adjacencyMutexes_[curNodeId]);
 
                 linklistsize_t* adjList = getAdjListAtLevel(curNodeId, layer);
                 size_t numNeighbors = getListCount(adjList);
@@ -845,7 +851,7 @@ namespace hnsw {
           size_t unvisitedCount = 0;
 
           {
-            std::unique_lock<std::shared_mutex> lock(adjacencyMutexes_[curNodeId]);
+            std::shared_lock<std::shared_mutex> lock(*adjacencyMutexes_[curNodeId]);
 
             linklistsize_t* adjList = getAdjListAtLevel(curNodeId, layer);
             size_t numNeighbors = getListCount(adjList);
@@ -934,13 +940,14 @@ namespace hnsw {
       }
 
 
-    template <bool bare_bone_search = true, bool collect_metrics = false>
+    template <bool bare_bone_search = true, bool collect_metrics = false, bool has_bitmap_filter = false>
     CandidateQueue searchBaseLayerST(
         tableidx_t ep_id,
         const void *data_point,
         size_t ef,
         BaseFilterFunctor* isIdAllowed = nullptr,
-        BaseSearchController<dist_t>* controller = nullptr) const {
+        BaseSearchController<dist_t>* controller = nullptr,
+        const roaring::Roaring* bitmapFilter = nullptr) const {
         VisitedList *vl = visitedListPool_->getFreeVisitedList();
         epoch_t *visited = vl->visitedEpoch;
         epoch_t tag = vl->curEpoch;
@@ -984,8 +991,16 @@ namespace hnsw {
         CandidateQueue candidateSet;
 
         dist_t lowerBound;
-        if (bare_bone_search ||
-            (!isMarkedDeleted(ep_id) && ((!isIdAllowed) || (*isIdAllowed)(getExternalLabel(ep_id))))) {
+        bool ep_passes;
+        if constexpr (has_bitmap_filter) {
+            ep_passes = bare_bone_search ||
+                (!isMarkedDeleted(ep_id) &&
+                 bitmapFilter->contains(static_cast<uint32_t>(getExternalLabel(ep_id))));
+        } else {
+            ep_passes = bare_bone_search ||
+                (!isMarkedDeleted(ep_id) && ((!isIdAllowed) || (*isIdAllowed)(getExternalLabel(ep_id))));
+        }
+        if (ep_passes) {
             // Entry point distance uses SQ if enabled
             dist_t dist;
             if (useIntKernel) {
@@ -1122,8 +1137,16 @@ namespace hnsw {
                 if (flagConsiderCandidate) {
                     candidateSet.emplace(-dist, candidate_id);
 
-                    if (bare_bone_search ||
-                        (!isMarkedDeleted(candidate_id) && ((!isIdAllowed) || (*isIdAllowed)(getExternalLabel(candidate_id))))) {
+                    bool candidate_passes;
+                    if constexpr (has_bitmap_filter) {
+                        candidate_passes = bare_bone_search ||
+                            (!isMarkedDeleted(candidate_id) &&
+                             bitmapFilter->contains(static_cast<uint32_t>(getExternalLabel(candidate_id))));
+                    } else {
+                        candidate_passes = bare_bone_search ||
+                            (!isMarkedDeleted(candidate_id) && ((!isIdAllowed) || (*isIdAllowed)(getExternalLabel(candidate_id))));
+                    }
+                    if (candidate_passes) {
                         topCandidates.emplace(dist, candidate_id);
                         if (!bare_bone_search && controller) {
                             controller->onCandidateFound(getExternalLabel(candidate_id),
@@ -1478,7 +1501,7 @@ namespace hnsw {
     // ============================================================
 
     std::vector<tableidx_t> getConnectionsWithLock(tableidx_t internalId, int level) {
-        std::unique_lock<std::shared_mutex> lock(adjacencyMutexes_[internalId]);
+        std::unique_lock<std::shared_mutex> lock(*adjacencyMutexes_[internalId]);
         linklistsize_t* data = getAdjListAtLevel(internalId, level);
         int size = getListCount(data);
         std::vector<tableidx_t> result(size);
@@ -1512,7 +1535,7 @@ namespace hnsw {
 
         // Write connections to new element
         {
-            std::unique_lock<std::shared_mutex> lock(adjacencyMutexes_[curC], std::defer_lock);
+            std::unique_lock<std::shared_mutex> lock(*adjacencyMutexes_[curC], std::defer_lock);
             if (isUpdate) {
                 lock.lock();
             }
@@ -1537,7 +1560,7 @@ namespace hnsw {
 
         // Add bidirectional connections to neighbors
         for (size_t idx = 0; idx < selectedNeighbors.size(); idx++) {
-            std::unique_lock<std::shared_mutex> lock(adjacencyMutexes_[selectedNeighbors[idx]]);
+            std::unique_lock<std::shared_mutex> lock(*adjacencyMutexes_[selectedNeighbors[idx]]);
 
             linklistsize_t* llOther = getAdjListAtLevel(selectedNeighbors[idx], level);
             size_t szLinkListOther = getListCount(llOther);
@@ -1675,7 +1698,7 @@ namespace hnsw {
         }
 
         // Lock element and generate level
-        std::unique_lock<std::shared_mutex> lockEl(adjacencyMutexes_[curC]);
+        std::unique_lock<std::shared_mutex> lockEl(*adjacencyMutexes_[curC]);
         int curLevel = getRandomLevel(levelMult_);
         elementLevels_[curC] = curLevel;
 
@@ -1723,7 +1746,7 @@ namespace hnsw {
                     bool changed  = true;
                     while (changed) {
                         changed = false;
-                        std::shared_lock<std::shared_mutex> lock(adjacencyMutexes_[currObj]);
+                        std::shared_lock<std::shared_mutex> lock(*adjacencyMutexes_[currObj]);
                         linklistsize_t* data = getAdjList(currObj, level);
                         int size = getListCount(data);
                         tableidx_t* datal = reinterpret_cast<tableidx_t*>(data + 1);
@@ -1796,7 +1819,7 @@ namespace hnsw {
             bool changed = true;
             while (changed) {
                 changed = false;
-                std::shared_lock<std::shared_mutex> lock(adjacencyMutexes_[currObj]);
+                std::shared_lock<std::shared_mutex> lock(*adjacencyMutexes_[currObj]);
                 linklistsize_t* data = getAdjList(currObj, level);
                 int size = getListCount(data);
                 metricGraphHops.fetch_add(1, std::memory_order_relaxed);
@@ -1854,6 +1877,72 @@ namespace hnsw {
             topCandidates.pop();
         }
 
+        return result;
+    }
+
+    /// Search with pre-computed CRoaring bitmap filter (avoids callback overhead).
+    std::priority_queue<std::pair<dist_t, label_t>>
+    searchKnnBitmap(const void* queryData, size_t k, const roaring::Roaring& bitmap, size_t ef) const {
+        std::priority_queue<std::pair<dist_t, label_t>> result;
+        if (elementCount_.load(std::memory_order_acquire) == 0) return result;
+
+        tableidx_t currObj = entryPoint_.load();
+        int maxLevelSnap = maxLevel_.load();
+        if (currObj == INVALID_ID) return result;
+
+        const dist_t* qData = static_cast<const dist_t*>(queryData);
+        dist_t curDist = distFunc_(qData, reinterpret_cast<const dist_t*>(getVectorByInternalId(currObj)), dim_);
+
+        // Greedy descent through upper layers (same as searchKnn)
+        for (int level = maxLevelSnap; level > 0; level--) {
+            bool changed = true;
+            while (changed) {
+                changed = false;
+                std::shared_lock<std::shared_mutex> lock(*adjacencyMutexes_[currObj]);
+                linklistsize_t* data = getAdjList(currObj, level);
+                int size = getListCount(data);
+                tableidx_t* datal = reinterpret_cast<tableidx_t*>(data + 1);
+                for (int i = 0; i < size; i++) {
+                    tableidx_t cand = datal[i];
+                    if (isMarkedDeleted(cand)) continue;
+                    if (cand >= maxElements_)
+                        throw std::runtime_error("cand error: neighbor ID out of bounds");
+                    dist_t d = distFunc_(qData, reinterpret_cast<const dist_t*>(getVectorByInternalId(cand)), dim_);
+                    if (d < curDist) {
+                        curDist = d;
+                        currObj = cand;
+                        changed = true;
+                    }
+                }
+            }
+        }
+
+        // Search base layer with bitmap filter template path
+        CandidateQueue topCandidates =
+            searchBaseLayerST<false, false, true>(currObj, queryData, std::max(ef, k), nullptr, nullptr, &bitmap);
+
+        while (topCandidates.size() > k) {
+            topCandidates.pop();
+        }
+
+        // Refiner: recompute exact float32 distances for SQ
+        if (quantizationEnabled_) {
+            CandidateQueue refined;
+            while (!topCandidates.empty()) {
+                auto [approxDist, id] = topCandidates.top();
+                topCandidates.pop();
+                dist_t exactDist = distFunc_(qData,
+                    reinterpret_cast<const dist_t*>(getVectorByInternalId(id)), dim_);
+                refined.emplace(exactDist, id);
+            }
+            topCandidates = std::move(refined);
+        }
+
+        while (!topCandidates.empty()) {
+            auto [dist, internalId] = topCandidates.top();
+            result.emplace(dist, getExternalLabel(internalId));
+            topCandidates.pop();
+        }
         return result;
     }
 
@@ -1997,7 +2086,7 @@ namespace hnsw {
                 getNeighborsByHeuristic(candidates, layer == 0 ? maxM0_ : maxM_);
 
                 {
-                    std::unique_lock<std::shared_mutex> lock(adjacencyMutexes_[neigh]);
+                    std::unique_lock<std::shared_mutex> lock(*adjacencyMutexes_[neigh]);
                     linklistsize_t* llCur = getAdjListAtLevel(neigh, layer);
                     size_t candSize = candidates.size();
                     setListCount(llCur, candSize);
@@ -2030,7 +2119,7 @@ namespace hnsw {
                 bool changed = true;
                 while (changed) {
                     changed = false;
-                    std::unique_lock<std::shared_mutex> lock(adjacencyMutexes_[currObj]);
+                    std::unique_lock<std::shared_mutex> lock(*adjacencyMutexes_[currObj]);
                     linklistsize_t* data = getAdjListAtLevel(currObj, level);
                     int size = getListCount(data);
                     tableidx_t* datal = reinterpret_cast<tableidx_t*>(data + 1);

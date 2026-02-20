@@ -6,8 +6,8 @@
 #include "index/hnsw/space_ip.h"
 #include "index/hnsw/space_l2.h"
 #include "index/hnsw/scalar_quantizer.h"
+#include "utils/log.h"
 #include <algorithm>
-#include <iostream>
 #include <memory>
 #include <queue>
 #include <stdexcept>
@@ -54,8 +54,8 @@ HNSWIndex& HNSWIndex::operator=(HNSWIndex&&) noexcept = default;
 
 bool HNSWIndex::insert(InternalID id, const std::vector<float>& vec) {
   if (vec.size() != dim_) {
-    std::cerr << "Vector dimension mismatch: expected " << dim_
-              << ", got " << vec.size() << "\n";
+    ARROW_LOG_ERROR("HNSWIndex", "Vector dimension mismatch: expected " +
+        std::to_string(dim_) + ", got " + std::to_string(vec.size()));
     return false;
   }
   // Auto-grow if at capacity
@@ -72,8 +72,8 @@ std::vector<HNSWSearchResult> HNSWIndex::search(
     size_t k,
     size_t ef) const {
   if (query.size() != dim_) {
-    std::cerr << "Query dimension mismatch: expected " << dim_
-              << ", got " << query.size() << "\n";
+    ARROW_LOG_ERROR("HNSWIndex", "Query dimension mismatch: expected " +
+        std::to_string(dim_) + ", got " + std::to_string(query.size()));
     return {};
   }
 
@@ -122,8 +122,8 @@ std::vector<HNSWSearchResult> HNSWIndex::search(
     const IDFilter& filter,
     size_t ef) const {
   if (query.size() != dim_) {
-    std::cerr << "Query dimension mismatch: expected " << dim_
-              << ", got " << query.size() << "\n";
+    ARROW_LOG_ERROR("HNSWIndex", "Query dimension mismatch: expected " +
+        std::to_string(dim_) + ", got " + std::to_string(query.size()));
     return {};
   }
 
@@ -131,6 +131,36 @@ std::vector<HNSWSearchResult> HNSWIndex::search(
   using QueueItem = std::pair<float, hnsw::label_t>;
   std::priority_queue<QueueItem> resultsQueue =
       hnsw_->searchKnn(query.data(), k, &adapter, ef);
+
+  std::vector<HNSWSearchResult> results;
+  results.reserve(resultsQueue.size());
+
+  int8_t distToScoreConverter = (spaceKind_ == Space::L2) ? 1 : -1;
+
+  while (!resultsQueue.empty()) {
+    auto [dist, label] = resultsQueue.top();
+    resultsQueue.pop();
+    float score = distToScoreConverter * dist;
+    results.push_back({static_cast<InternalID>(label), score});
+  }
+  std::reverse(results.begin(), results.end());
+  return results;
+}
+
+std::vector<HNSWSearchResult> HNSWIndex::searchBitmap(
+    const std::vector<float>& query,
+    size_t k,
+    const roaring::Roaring& bitmap,
+    size_t ef) const {
+  if (query.size() != dim_) {
+    ARROW_LOG_ERROR("HNSWIndex", "Query dimension mismatch: expected " +
+        std::to_string(dim_) + ", got " + std::to_string(query.size()));
+    return {};
+  }
+
+  using QueueItem = std::pair<float, hnsw::label_t>;
+  std::priority_queue<QueueItem> resultsQueue =
+      hnsw_->searchKnnBitmap(query.data(), k, bitmap, ef);
 
   std::vector<HNSWSearchResult> results;
   results.reserve(resultsQueue.size());
@@ -179,6 +209,10 @@ utils::Status HNSWIndex::loadIndex(const std::string& path) {
 
 size_t HNSWIndex::size() const {
     return hnsw_->size();
+}
+
+size_t HNSWIndex::deletedCount() const {
+    return hnsw_->getDeletedCount();
 }
 
 void HNSWIndex::reserve(size_t max_elements) {
